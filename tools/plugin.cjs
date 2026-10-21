@@ -19,26 +19,52 @@ module.exports = function init({ typescript: ts }) {
 
       const out = same(config.out);
       const isOut = (file) => same(file) === out;
-      let text = existsSync(config.out) ? readFileSync(config.out, "utf8") : "";
+      // tsserver 는 디스크에 없는 파일의 문서를 지으면 Debug Failure 로 죽는다 — 없으면 빈 생성 파일을 먼저 쓴다
+      if (!existsSync(config.out)) writeIfChanged(config.out, render([], config));
+      let text = readFileSync(config.out, "utf8");
       let version = 0;
       let building = false;
 
+      // 이 프로그램으로 생성 내용을 짓는다. 바뀌었으면 판본을 올리고 디스크에 쓰고 true 를 돌려준다.
       // collect 가 던지면(정의 파일의 문법이 깨졌을 때 등) 앞의 내용을 그대로 두고 디스크에도 쓰지 않는다
-      // 짓는 동안 다시 들어오면(getProgram 이 이 파일을 다시 묻는다) 앞의 내용을 준다 — 그래서 한 번만큼 늦을 수 있다
-      const build = () => {
-        if (building) return;
-        building = true;
+      const refresh = (program) => {
+        if (!program) return false;
         try {
-          const program = info.languageService.getProgram();
-          if (!program) return;
           const next = render(collect(ts, program, config), config);
-          if (next !== text) {
-            text = next;
-            version++;
-          }
-          writeIfChanged(config.out, text);
+          writeIfChanged(config.out, next);
+          if (next === text) return false;
+          text = next;
+          version++;
+          return true;
         } catch (error) {
           log(error.message);
+          return false;
+        }
+      };
+
+      // 실제 tsserver: 프로그램을 다시 지은 직후 그 프로그램으로 생성 내용을 짓는다. 바뀌었으면 같은 요청 안에서
+      // 한 번 더 지어 따라잡는다 — tsserver 는 프로젝트가 dirty 할 때만 판본을 물으므로, 미루면 다음 편집까지 낡은 타입이 남는다
+      const project = info.project;
+      const inTsserver = ["updateGraph", "getCurrentProgram", "markAsDirty"].every((m) => typeof project[m] === "function");
+      if (inTsserver) {
+        const updateGraph = project.updateGraph.bind(project);
+        project.updateGraph = (...args) => {
+          let result = updateGraph(...args);
+          for (let round = 0; round < 2 && refresh(project.getCurrentProgram()); round++) {
+            project.markAsDirty();
+            result = updateGraph(...args);
+          }
+          return result;
+        };
+      }
+
+      // 맨 LanguageService(updateGraph 가 없다): 판본을 물을 때 직전 프로그램으로 짓는다 — 한 번만큼 늦을 수 있다.
+      // 짓는 동안 다시 들어오면(getProgram 이 이 파일을 다시 묻는다) 앞의 내용을 준다
+      const build = () => {
+        if (inTsserver || building) return;
+        building = true;
+        try {
+          refresh(info.languageService.getProgram());
         } finally {
           building = false;
         }
@@ -51,8 +77,6 @@ module.exports = function init({ typescript: ts }) {
       };
       wrap("getScriptVersion", () => (build(), `store-gen-${version}`));
       wrap("getScriptSnapshot", () => (build(), ts.ScriptSnapshot.fromString(text)));
-      // 아직 디스크에 없어도 import "./store.gen" 이 풀리도록 있다고 답한다
-      wrap("fileExists", () => true);
       return info.languageService;
     },
   };
