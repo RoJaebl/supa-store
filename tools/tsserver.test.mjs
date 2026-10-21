@@ -59,6 +59,7 @@ function startServer() {
   let stderr = "";
   const waiting = new Map();
   child.stderr.on("data", (chunk) => (stderr += chunk));
+  child.stdin.on("error", () => {}); // 끝난 뒤 쓰면 나는 EPIPE — 기다리던 요청은 아래 exit 가 실패시킨다
   // tsserver 가 죽으면 기다리던 요청을 모두 그 까닭과 함께 실패시킨다 — 시간 초과까지 매달리지 않게
   child.on("exit", (code) => {
     for (const [, { reject }] of waiting) reject(new Error(`tsserver 가 끝났다(code ${code}): ${stderr}`));

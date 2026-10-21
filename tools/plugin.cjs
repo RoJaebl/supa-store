@@ -6,7 +6,8 @@ const { loadConfig, collect, render, writeIfChanged } = require("./codegen.cjs")
 const same = (p) => p.replace(/\\/g, "/").toLowerCase();
 
 // tsconfig 를 다시 실으면 tsserver 가 create() 를 다시 부른다 — 우리가 앞서 씌운 감싸기를 벗겨 낸 원본을 다시 감싼다.
-// 그래야 층이 쌓이지 않고 낡은 config 를 쥔 층이 남지 않는다. 다른 플러그인이 씌운 감싸기는 그대로 둔다
+// 그래야 층이 쌓이지 않고 낡은 config 를 쥔 층이 남지 않는다. 다른 플러그인이 씌운 감싸기는 그대로 둔다.
+// 한계: 다른 플러그인이 같은 메서드를 우리 *바깥*에서 감쌌으면 표식이 보이지 않아 옛 층이 그 안에 남는다
 const OURS = Symbol.for("@fortuna-lottery/store/original");
 const unwrapped = (fn) => (fn && fn[OURS]) || fn;
 const mark = (wrapper, original) => Object.assign(wrapper, { [OURS]: original });

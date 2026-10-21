@@ -147,6 +147,7 @@ test("create 를 다시 불러도 감싸기가 쌓이지 않고 updateGraph 는 
   assert.equal(host.getScriptVersion[ours], originalVersion);
   assert.equal(project.updateGraph[ours], originalGraph);
   assert.equal(project.updateGraph(), false); // 첫 호출이 false 면 다시 지은 호출이 true 여도 false 다
+  assert.equal(calls, 2); // 내용이 바뀌어 한 번 더 지었다
 });
 
 test("tsserver 가 꺼져 있으면 언어 서비스를 그대로 돌려준다", () => {
