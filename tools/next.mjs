@@ -15,7 +15,6 @@ export function withStore(nextConfig) {
     if (!config.enabled("next")) return nextConfig;
     generate(ts, config);
     if (phase === "phase-development-server" && !globalThis[WATCHING]) {
-      globalThis[WATCHING] = true;
       const src = `${config.root}/src`;
       let timer;
       const regenerate = () => {
@@ -25,12 +24,19 @@ export function withStore(nextConfig) {
           console.error(error.message); // dev 서버를 죽이지 않는다 — 고치면 다음 변경에 다시 쓴다
         }
       };
-      watch(src, { recursive: true }, (_event, file) => {
-        if (!file || !config.match(`${src}/${file}`)) return;
-        clearTimeout(timer);
-        timer = setTimeout(regenerate, 200);
-        timer.unref();
-      }).unref();
+      try {
+        watch(src, { recursive: true }, (_event, file) => {
+          if (!file || !config.match(`${src}/${file}`)) return;
+          clearTimeout(timer);
+          timer = setTimeout(regenerate, 200);
+          timer.unref();
+        })
+          .on("error", (error) => console.error(`store-gen: 감시가 멈췄다 — ${error.message}`))
+          .unref();
+        globalThis[WATCHING] = true; // 감시가 선 뒤에만 표시한다 — 실패하면 다음에 설정을 읽을 때 다시 건다
+      } catch (error) {
+        console.error(`store-gen: 정의 파일을 감시하지 못했다 — ${error.message}`);
+      }
     }
     return nextConfig;
   };

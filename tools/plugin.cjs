@@ -23,6 +23,7 @@ module.exports = function init({ typescript: ts }) {
       let version = 0;
       let building = false;
 
+      // collect 가 던지면(정의 파일의 문법이 깨졌을 때 등) 앞의 내용을 그대로 두고 디스크에도 쓰지 않는다
       // 짓는 동안 다시 들어오면(getProgram 이 이 파일을 다시 묻는다) 앞의 내용을 준다 — 그래서 한 번만큼 늦을 수 있다
       const build = () => {
         if (building) return;

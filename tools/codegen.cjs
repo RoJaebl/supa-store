@@ -69,8 +69,14 @@ function collect(ts, program, config) {
   const printer = ts.createPrinter({ removeComments: true });
   const flags = ts.NodeBuilderFlags.NoTruncation | ts.NodeBuilderFlags.UseFullyQualifiedType;
   const entries = [];
+  const broken = [];
   for (const source of program.getSourceFiles()) {
     if (!config.match(source.fileName)) continue;
+    // 문법이 깨진 정의는 반환 타입이 any 로 무너진다 — 그것을 쓰면 타입 검사가 조용히 꺼지므로 아예 짓지 않는다
+    if (program.getSyntacticDiagnostics(source).length) {
+      broken.push(posix(source.fileName));
+      continue;
+    }
     const visit = (node) => {
       if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "createStore") {
         const [key, fn] = node.arguments;
@@ -85,6 +91,7 @@ function collect(ts, program, config) {
     };
     visit(source);
   }
+  if (broken.length) throw new Error(`정의 파일의 문법이 깨져 생성 파일을 쓰지 않는다: ${broken.join(", ")}`);
   return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 

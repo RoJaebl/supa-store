@@ -133,6 +133,18 @@ test("Windows 에서는 드라이브 글자의 대소문자가 달라도 맞힌�
   assert.equal(config.match(`${flipped}/src/a/b.state.ts`), true);
 });
 
+test("문법이 깨진 정의 파일은 파일 이름을 담아 실패하고 any 를 쓰지 않는다", () => {
+  const config = loadConfig(ts, root);
+  write("src/store.gen.ts", "// 앞선 생성본");
+  write(
+    "src/a/_state/broken.state.ts",
+    `import { createStore } from "@fortuna-lottery/store";
+createStore("state.a.broken", () => ({ n: , }));`,
+  );
+  assert.throws(() => generate(ts, config), /broken\.state\.ts/);
+  assert.equal(read("src/store.gen.ts"), "// 앞선 생성본");
+});
+
 test("깨진 tsconfig 는 tsconfig.json 을 담아 실패하고 생성 파일을 건드리지 않는다", () => {
   const config = loadConfig(ts, root);
   write("src/store.gen.ts", "// 앞선 생성본");

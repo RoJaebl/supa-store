@@ -107,6 +107,24 @@ export const label = getStore("state.a.count").getState().label;`,
   assert.match(readFileSync(join(root, "src/store.gen.ts"), "utf8"), /label: string/);
 });
 
+test("정의 파일의 문법이 깨지면 앞의 내용을 그대로 대 주고 디스크에도 쓰지 않는다", () => {
+  write("src/a/_state/count.state.ts", COUNT);
+  write("src/use.ts", `import "./store.gen";`);
+  const logs = [];
+  const { returned: ls, host } = createWithInfo(root, logs);
+  settle(ls);
+  const gen = join(root, "src/store.gen.ts");
+  const before = readFileSync(gen, "utf8");
+  assert.match(before, /n: number/);
+  edit("src/a/_state/count.state.ts", COUNT.replace("n: 0", "n: ,"));
+  settle(ls);
+  const snapshot = host.getScriptSnapshot(posix(gen));
+  assert.equal(snapshot.getText(0, snapshot.getLength()), before);
+  assert.equal(readFileSync(gen, "utf8"), before);
+  assert.doesNotMatch(before, /any/);
+  assert.ok(logs.some((l) => /count\.state\.ts/.test(l)));
+});
+
 test("tsserver 가 꺼져 있으면 언어 서비스를 그대로 돌려준다", () => {
   write("store.config.ts", `export default { targets: ["cli"] };`);
   const { info, returned } = createWithInfo(root);

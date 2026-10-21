@@ -63,10 +63,13 @@ it("개발 모드에서 같은 key 를 다시 등록하면 새 정의로 바뀌�
 });
 it("production 에서 같은 key 를 두 번 등록하면 실패한다", () => {
   vi.stubEnv("NODE_ENV", "production");
-  expect(() => createStore("state.test.count", () => ({ n: 0, add() {} }))).toThrow(
-    "같은 key 를 두 번 등록했다: state.test.count",
-  );
-  vi.unstubAllEnvs();
+  try {
+    expect(() => createStore("state.test.count", () => ({ n: 0, add() {} }))).toThrow(
+      "같은 key 를 두 번 등록했다: state.test.count",
+    );
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });
 it("등록되지 않은 key 는 key 이름을 담아 실패한다", () => {
   expect(() => getStore("state.test.none" as never)).toThrow("등록되지 않은 key 다: state.test.none");

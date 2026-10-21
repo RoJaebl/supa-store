@@ -73,6 +73,14 @@ test("next 가 꺼져 있으면 아무것도 쓰지 않는다", () => {
   assert.equal(existsSync(join(root, "src/store.gen.ts")), false);
 });
 
+test("dev 에서 감시를 걸지 못하면 dev 서버를 죽이지 않고 표식도 남기지 않는다", () => {
+  // src 폴더가 없어 fs.watch 가 ENOENT 로 던진다
+  write("store.config.ts", `export default { targets: ["next"], out: "gen/store.gen.ts" };`);
+  const config = {};
+  assert.equal(inDir(root, () => withStore(config)("phase-development-server")), config);
+  assert.equal(globalThis[Symbol.for("@fortuna-lottery/store/watching")], undefined);
+});
+
 // 감시는 globalThis 표식으로 한 번만 걸리므로 이 시험은 마지막에 둔다
 test("dev 에서는 정의 파일의 내용이 바뀌면 다시 쓴다", async () => {
   write("store.config.ts", `export default { targets: ["next"] };`);
