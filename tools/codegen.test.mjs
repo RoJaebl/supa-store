@@ -125,3 +125,18 @@ test("내용이 같으면 다시 쓰지 않는다", () => {
   assert.equal(generate(ts, config), true);
   assert.equal(generate(ts, config), false);
 });
+
+test("Windows 에서는 드라이브 글자의 대소문자가 달라도 맞힌다", { skip: process.platform !== "win32" }, () => {
+  const config = loadConfig(ts, root);
+  const first = posix(root)[0];
+  const flipped = (first === first.toUpperCase() ? first.toLowerCase() : first.toUpperCase()) + posix(root).slice(1);
+  assert.equal(config.match(`${flipped}/src/a/b.state.ts`), true);
+});
+
+test("깨진 tsconfig 는 tsconfig.json 을 담아 실패하고 생성 파일을 건드리지 않는다", () => {
+  const config = loadConfig(ts, root);
+  write("src/store.gen.ts", "// 앞선 생성본");
+  write("tsconfig.json", JSON.stringify({ extends: "./missing.json", include: ["src"] }));
+  assert.throws(() => generate(ts, config), /tsconfig\.json/);
+  assert.equal(read("src/store.gen.ts"), "// 앞선 생성본");
+});

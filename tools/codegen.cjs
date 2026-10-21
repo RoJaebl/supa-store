@@ -46,7 +46,11 @@ function loadConfig(ts, fromDir) {
   if (!found) throw new Error(`package.json 을 찾지 못했다: ${fromDir}`);
   const root = posix(dirname(resolve(found)));
   const merged = { ...defaults, ...readUserConfig(ts, root) };
-  const pattern = new RegExp(`^${globToSource(root)}/(?:${merged.include.map(globToSource).join("|")})$`);
+  // Windows 는 경로의 대소문자를 가리지 않고, tsserver 는 드라이브 글자를 소문자(c:/…)로 넘기곤 한다
+  const pattern = new RegExp(
+    `^${globToSource(root)}/(?:${merged.include.map(globToSource).join("|")})$`,
+    process.platform === "win32" ? "i" : "",
+  );
   return {
     root,
     out: posix(resolve(root, merged.out)),
@@ -116,9 +120,12 @@ function writeIfChanged(file, text) {
 function generate(ts, config) {
   const tsconfig = join(config.root, "tsconfig.json");
   const { config: json, error } = ts.readConfigFile(tsconfig, ts.sys.readFile);
-  if (error) throw new Error(ts.flattenDiagnosticMessageText(error.messageText, "\n"));
-  // 정의가 하나도 없으면 「No inputs were found」 진단이 나지만 빈 등록부를 써야 하므로 진단은 보지 않는다
-  const { fileNames, options } = ts.parseJsonConfigFileContent(json, ts.sys, config.root, undefined, tsconfig);
+  const fail = (d) => new Error(`tsconfig.json: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`);
+  if (error) throw fail(error);
+  const { fileNames, options, errors } = ts.parseJsonConfigFileContent(json, ts.sys, config.root, undefined, tsconfig);
+  // 정의가 하나도 없으면 「No inputs were found」(18003) 가 나지만 빈 등록부를 써야 하므로 그것만 넘긴다
+  const real = errors.filter((d) => d.code !== 18003);
+  if (real.length) throw fail(real[0]);
   const program = ts.createProgram({ rootNames: fileNames, options });
   return writeIfChanged(config.out, render(collect(ts, program, config), config));
 }
