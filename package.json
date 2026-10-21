@@ -1,0 +1,30 @@
+{
+  "name": "@fortuna-lottery/store",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": { "store-gen": "./tools/cli.mjs" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./react": { "types": "./dist/react.d.ts", "import": "./dist/react.js" },
+    "./config": { "types": "./dist/config.d.ts", "import": "./dist/config.js" },
+    "./next": { "types": "./tools/next.d.mts", "default": "./tools/next.mjs" },
+    "./plugin": "./tools/plugin.cjs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run && node --test tools",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": { "react": ">=18", "typescript": ">=5.4" },
+  "peerDependenciesMeta": { "react": { "optional": true } },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/react": "^19.1.0",
+    "jsdom": "^30.1.1",
+    "react": "^19.1.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0"
+  }
+}
