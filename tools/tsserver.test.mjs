@@ -3,7 +3,9 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { once } from "node:events";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,7 +14,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const posix = (p) => p.replace(/\\/g, "/");
 const repo = resolve(here, "../../..");
 const storeIndex = posix(resolve(here, "../src/index.ts"));
-const tsserverJs = realpathSync(join(repo, "apps/web/node_modules/typescript/lib/tsserver.js"));
+// 이 패키지가 devDependency 로 가진 TypeScript 의 tsserver 다
+const tsserverJs = createRequire(import.meta.url).resolve("typescript/lib/tsserver.js");
 
 let root;
 const write = (rel, text) => {
@@ -41,16 +44,26 @@ beforeEach(() => {
     }),
   );
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+// Windows 에서는 끝난 tsserver 의 감시 핸들이 늦게 풀릴 수 있어 몇 번 다시 지운다
+afterEach(() => rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
 
 /** tsserver 하나를 띄운다. 플러그인은 저장소 뿌리의 node_modules 에서 찾게 한다 */
 function startServer() {
-  const child = spawn(process.execPath, [tsserverJs, "--pluginProbeLocations", posix(repo)], {
-    stdio: ["pipe", "pipe", "ignore"],
-  });
+  const child = spawn(
+    process.execPath,
+    [tsserverJs, "--pluginProbeLocations", posix(repo), "--disableAutomaticTypingAcquisition"],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
   let seq = 0;
   let buf = Buffer.alloc(0);
+  let stderr = "";
   const waiting = new Map();
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  // tsserver 가 죽으면 기다리던 요청을 모두 그 까닭과 함께 실패시킨다 — 시간 초과까지 매달리지 않게
+  child.on("exit", (code) => {
+    for (const [, { reject }] of waiting) reject(new Error(`tsserver 가 끝났다(code ${code}): ${stderr}`));
+    waiting.clear();
+  });
   child.stdout.on("data", (chunk) => {
     buf = Buffer.concat([buf, chunk]);
     for (;;) {
@@ -61,18 +74,23 @@ function startServer() {
       const msg = JSON.parse(buf.subarray(head + 4, head + 4 + len).toString());
       buf = buf.subarray(head + 4 + len);
       if (msg.type === "response" && waiting.has(msg.request_seq)) {
-        waiting.get(msg.request_seq)(msg);
+        waiting.get(msg.request_seq).resolve(msg);
         waiting.delete(msg.request_seq);
       }
     }
   });
   const send = (command, args) =>
-    new Promise((res) => {
+    new Promise((resolve, reject) => {
       const s = ++seq;
-      waiting.set(s, res);
+      waiting.set(s, { resolve, reject });
       child.stdin.write(JSON.stringify({ seq: s, type: "request", command, arguments: args }) + "\n");
     });
-  return { send, stop: () => child.kill() };
+  const stop = async () => {
+    if (child.exitCode !== null) return;
+    child.kill();
+    await once(child, "exit");
+  };
+  return { send, stop };
 }
 
 const DEF = (body) => `import { createStore } from "@fortuna-lottery/store";
@@ -110,6 +128,6 @@ test("저장하지 않은 정의를 고치면 바로 그 다음 진단에서 새
     assert.deepEqual(await diag(), []); // 한 박자 늦어 다음 편집을 기다리면 여기서 label 오류가 남는다
     assert.match(readFileSync(join(root, "src/store.gen.ts"), "utf8"), /label: string/);
   } finally {
-    server.stop();
+    await server.stop();
   }
 });

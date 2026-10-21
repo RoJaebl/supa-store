@@ -125,6 +125,30 @@ test("정의 파일의 문법이 깨지면 앞의 내용을 그대로 대 주고
   assert.ok(logs.some((l) => /count\.state\.ts/.test(l)));
 });
 
+test("create 를 다시 불러도 감싸기가 쌓이지 않고 updateGraph 는 모든 호출이 그대로일 때만 true 다", () => {
+  write("src/a/_state/count.state.ts", COUNT);
+  const host = createHost();
+  const ls = ts.createLanguageService(host);
+  const originalVersion = host.getScriptVersion;
+  const graphs = [false, true, true]; // 첫 갱신은 파일 집합이 바뀌고, 다시 지은 갱신은 그대로라고 답한다
+  let calls = 0;
+  const project = Object.assign(host, {
+    getCurrentDirectory: () => root,
+    projectService: { logger: { info() {} } },
+    updateGraph: () => graphs[Math.min(calls++, graphs.length - 1)],
+    getCurrentProgram: () => ls.getProgram(),
+    markAsDirty() {},
+  });
+  const originalGraph = project.updateGraph;
+  const info = { languageServiceHost: host, languageService: ls, project };
+  init({ typescript: ts }).create(info);
+  init({ typescript: ts }).create(info); // tsconfig 를 다시 실은 꼴
+  const ours = Symbol.for("@fortuna-lottery/store/original");
+  assert.equal(host.getScriptVersion[ours], originalVersion);
+  assert.equal(project.updateGraph[ours], originalGraph);
+  assert.equal(project.updateGraph(), false); // 첫 호출이 false 면 다시 지은 호출이 true 여도 false 다
+});
+
 test("tsserver 가 꺼져 있으면 언어 서비스를 그대로 돌려준다", () => {
   write("store.config.ts", `export default { targets: ["cli"] };`);
   const { info, returned } = createWithInfo(root);
