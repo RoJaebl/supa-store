@@ -10,7 +10,12 @@ const CONFIG_FILE = "store.config.ts";
 const posix = (p) => p.replace(/\\/g, "/");
 
 function requireTypeScript(root) {
-  return createRequire(join(root, "package.json"))("typescript");
+  try {
+    return createRequire(join(root, "package.json"))("typescript");
+  } catch {
+    // 프로젝트 자리에서 풀리지 않으면 이 패키지 곁의 것(peer 로 함께 깔린 것)을 쓴다
+    return require("typescript");
+  }
 }
 
 function globToSource(glob) {
