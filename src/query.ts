@@ -18,7 +18,7 @@ export interface Event<P> {
   record(): { on: string[]; exempt: Array<{ who: string; why: string }> };
 }
 
-/** 자원 사이를 잇는 event. createStore("event.…", () => createEvent<P>()) 로 둔다 */
+/** 자원 사이를 잇는 event. createStore(key, () => createEvent<P>()) 로 둔다 */
 export function createEvent<P>(): Event<P> {
   const handlers = new Map<string, (payload: P) => void>();
   const exempts = new Map<string, string>();
