@@ -69,7 +69,8 @@ export interface MutationView<F extends Fn> {
 }
 /** 정의한 객체에서 query 를 뺀 함수 칸 — 바꾸기 */
 export type Mutations<R> = { [K in keyof R as K extends "query" ? never : R[K] extends Fn ? K : never]: R[K] };
-export type ResourceView<D, R> = QueryView<D> & { [K in keyof Mutations<R>]: MutationView<Mutations<R>[K] & Fn> };
+// & Fn 으로 좁히면 겹친 서명의 마지막인 Fn 이 ReturnType 을 정해 data 가 any 가 된다 — Extract 로 좁힌다
+export type ResourceView<D, R> = QueryView<D> & { [K in keyof Mutations<R>]: MutationView<Extract<Mutations<R>[K], Fn>> };
 type ViewName<D, R> = keyof ResourceView<D, R> & string;
 export type ResourceOptions<A, N extends string> =
   | { args?: A; pick?: readonly N[]; omit?: never }
