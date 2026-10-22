@@ -1,3 +1,6 @@
+/** 상태에 이 표식으로 함수를 두면 useStore 가 꺼내기를 그 함수에 맡긴다 — 그 함수는 훅이다 */
+export const USE: unique symbol = Symbol.for("fortuna-lottery.store.use") as never;
+
 export type SetState<T> = (partial: Partial<T> | ((now: T) => Partial<T>)) => void;
 export type GetState<T> = () => T;
 
