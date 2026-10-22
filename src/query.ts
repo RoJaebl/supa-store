@@ -161,7 +161,9 @@ export function createResource<A = void, D = never, R extends object = object>(
       const cell = cellOf(args);
       const data =
         typeof updater === "function" ? (updater as (prev: D | undefined) => D | undefined)(cell.view.data) : updater;
-      write(cell, { data, status: cell.view.status === "idle" && data !== undefined ? "ready" : cell.view.status });
+      // 차례를 올려 이 앞에 떠난 조회의 늦은 응답이 고친 값을 덮지 못하게 한다
+      cell.seq += 1;
+      write(cell, data === undefined ? { data } : { data, status: "ready", error: null });
     },
     async invalidate(args) {
       const targets = args === undefined ? [...cells.values()] : [cellOf(args)];

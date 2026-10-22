@@ -192,6 +192,22 @@ it("조회: fetch(args) 는 이미 받은 칸이면 다시 받지 않고 값을 
   expect(query).toHaveBeenCalledTimes(1);
 });
 
+it("조회: setData 앞에 떠난 조회 응답이 늦게 와도 setData 의 값을 덮지 않는다", async () => {
+  const q = controlled<number[]>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() })));
+  const pending = state(key).fetch().catch(() => {});
+  state(key).setData([1, 2]);
+  q.calls[0]!.d.resolve([1]);
+  await pending;
+  expect(state(key).getData()).toEqual([1, 2]);
+});
+it("조회: idle 칸에 setData 하면 ready 가 된다", () => {
+  const key = define(() => createResource(() => ({ query: async () => 1 }), { auto: false }));
+  const { result } = renderHook(() => view(key));
+  act(() => state(key).setData(5));
+  expect(result.current).toMatchObject({ data: 5, status: "ready", error: null });
+});
+
 // ── 바꾸기 ────────────────────────────────────────────
 
 it("바꾸기: 진행·오류·결과는 부른 화면의 것이다", async () => {
