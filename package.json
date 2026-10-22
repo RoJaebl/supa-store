@@ -7,6 +7,7 @@
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
     "./react": { "types": "./dist/react.d.ts", "import": "./dist/react.js" },
+    "./query": { "types": "./dist/query.d.ts", "import": "./dist/query.js" },
     "./config": { "types": "./dist/config.d.ts", "import": "./dist/config.js" },
     "./next": { "types": "./tools/next.d.mts", "default": "./tools/next.mjs" },
     "./plugin": "./tools/plugin.cjs",
