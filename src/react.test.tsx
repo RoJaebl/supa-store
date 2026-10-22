@@ -6,6 +6,7 @@ import { useSharedState, useStore } from "./react.js";
 
 declare module "." {
   interface StateTypes {
+    "state.test.pair2": { a: number; b: number; setA: (a: number) => void };
     "state.test.use": { [USE]: (x: number) => number };
     "state.test.count": { n: number; add: () => void };
     "state.test.pair": { a: number; b: number; setA: (a: number) => void };
@@ -15,6 +16,7 @@ declare module "." {
 createStore("state.test.count", (set, get) => ({ n: 0, add: () => set({ n: get().n + 1 }) }));
 createStore("state.test.pair", (set) => ({ a: 1, b: 2, setA: (a: number) => set({ a }) }));
 
+createStore("state.test.pair2", (set) => ({ a: 1, b: 2, setA: (a: number) => set({ a }) }));
 createStore("state.test.use", () => ({ [USE]: (x: number) => x * 2 }));
 const pair = () => getStore("state.test.pair");
 
@@ -55,6 +57,23 @@ it("useStore: pick 결과는 칸이 같으면 같은 참조다", () => {
   act(() => pair().setState({ b: 99 }));
   rerender();
   expect(result.current).toBe(first);
+});
+it("useStore: 상태가 그대로여도 pick 이 바뀌면 새 칸을 준다", () => {
+  const { result, rerender } = renderHook(({ pick }) => useStore("state.test.pair", { pick }), {
+    initialProps: { pick: ["a"] as ("a" | "b")[] },
+  });
+  expect(Object.keys(result.current)).toEqual(["a"]);
+  rerender({ pick: ["b"] });
+  expect(Object.keys(result.current)).toEqual(["b"]);
+});
+it("useStore: key 가 바뀌면 칸 값이 같아도 새 store 의 것을 준다", () => {
+  const { result, rerender } = renderHook(
+    ({ k }) => useStore(k, { pick: ["a", "b"] }),
+    { initialProps: { k: "state.test.pair" as "state.test.pair" | "state.test.pair2" } },
+  );
+  const first = result.current;
+  rerender({ k: "state.test.pair2" });
+  expect(result.current).not.toBe(first);
 });
 it("useStore: 표식이 있으면 꺼내기를 맡긴다", () => {
   const { result } = renderHook(() => useStore("state.test.use", 3));

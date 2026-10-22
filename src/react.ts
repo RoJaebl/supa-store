@@ -32,20 +32,25 @@ export function useStore(key: any, ...args: any[]): any {
   if (USE in (store.getInitialState() as object)) return (store.getState() as any)[USE](...args);
 
   const options: Opts = args[0] ?? {};
-  const cache = useRef<{ state: object; names: string[]; raw: unknown[]; out: object } | null>(null);
+  const cache = useRef<{ key: string; state: object; names: string[]; raw: unknown[]; out: object } | null>(null);
   const snapshot = (state: object): object => {
     if (!options.pick && !options.omit) return state;
-    const prev = cache.current;
-    if (prev?.state === state) return prev.out;
+    // key 나 고른 칸 이름이 바뀌었으면 앞 결과를 쓰지 않는다
+    const last = cache.current;
     const names = options.pick ? [...options.pick] : Object.keys(state).filter((n) => !options.omit!.includes(n));
+    const prev =
+      last && last.key === key && last.names.length === names.length && names.every((n, i) => n === last.names[i])
+        ? last
+        : null;
+    if (prev?.state === state) return prev.out;
     const raw = names.map((n) => (state as any)[n]);
     // pickFrom 은 함수 칸을 묶어 매번 새 함수를 만든다 — 묶기 전 값끼리 견줘야 같다고 본다
-    if (prev && prev.names.length === names.length && names.every((n, i) => n === prev.names[i] && Object.is(raw[i], prev.raw[i]))) {
+    if (prev && raw.every((v, i) => Object.is(v, prev.raw[i]))) {
       cache.current = { ...prev, state };
       return prev.out;
     }
     const out = pickFrom(state, { pick: names });
-    cache.current = { state, names, raw, out };
+    cache.current = { key, state, names, raw, out };
     return out;
   };
   return useSyncExternalStore(
