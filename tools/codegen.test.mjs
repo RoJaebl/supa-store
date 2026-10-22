@@ -152,3 +152,54 @@ test("깨진 tsconfig 는 tsconfig.json 을 담아 실패하고 생성 파일을
   assert.throws(() => generate(ts, config), /tsconfig\.json/);
   assert.equal(read("src/store.gen.ts"), "// 앞선 생성본");
 });
+
+test("새 key 의 첫 생성에서도 get() 에 기대는 함수의 반환 타입이 맞게 찍힌다", () => {
+  write(
+    "src/x/_state/y.state.ts",
+    `import { createStore } from "@fortuna-lottery/store";
+createStore("state.x.y", (set, get) => ({ n: 1, read: () => get().n }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  assert.match(read("src/store.gen.ts"), /"state\.x\.y": \{ n: number; read: \(\) => number; \};/);
+});
+
+test("결과에 any 가 남으면 key 와 파일을 담아 실패하고 생성 파일을 쓰지 않는다", () => {
+  const config = loadConfig(ts, root);
+  write("src/store.gen.ts", "// 앞선 생성본");
+  write(
+    "src/a/_state/loop.state.ts",
+    `import { createStore } from "@fortuna-lottery/store";
+createStore("state.a.loop", () => ({ f(n: number) { return n ? this.f(n - 1) : 0; } }));`,
+  );
+  assert.throws(
+    () => generate(ts, config),
+    (e) => /\bany\b/.test(e.message) && /state\.a\.loop/.test(e.message) && /loop\.state\.ts/.test(e.message),
+  );
+  assert.equal(read("src/store.gen.ts"), "// 앞선 생성본");
+});
+
+test("문자열·이름 속의 any 는 거부하지 않는다", () => {
+  write(
+    "src/a/_state/word.state.ts",
+    `import { createStore } from "@fortuna-lottery/store";
+createStore("state.a.word", () => ({ company: "any" as const, anyway: 1 }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  assert.match(read("src/store.gen.ts"), /company: "any"; anyway: number;/);
+});
+
+test("createResource 를 돌려주는 정의도 any 없이 찍힌다", () => {
+  const tsconfig = JSON.parse(read("tsconfig.json"));
+  tsconfig.compilerOptions.paths["@fortuna-lottery/store/query"] = [posix(resolve(here, "../src/query.ts"))];
+  write("tsconfig.json", JSON.stringify(tsconfig));
+  write(
+    "src/x/_state/r.state.ts",
+    `import { createStore } from "@fortuna-lottery/store";
+import { createResource } from "@fortuna-lottery/store/query";
+createStore("api.x.r", () => createResource(() => ({ query: async () => 1 })));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const line = read("src/store.gen.ts").split("\n").find((l) => l.includes('"api.x.r"'));
+  assert.ok(line, "api.x.r 가 찍힌다");
+  assert.doesNotMatch(line, /\bany\b/);
+});

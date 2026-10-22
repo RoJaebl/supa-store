@@ -6,6 +6,7 @@ const { dirname, join, relative, resolve } = require("node:path");
 // src/config.ts 의 defaults 와 같다 — dist 는 ESM 이라 여기서 부를 수 없다
 const defaults = { include: ["src/**/*.state.ts"], out: "src/store.gen.ts", targets: ["tsserver"] };
 const CONFIG_FILE = "store.config.ts";
+const MAX_ROUNDS = 5;
 
 const posix = (p) => p.replace(/\\/g, "/");
 
@@ -84,7 +85,8 @@ function collect(ts, program, config) {
           const type = checker.getReturnTypeOfSignature(checker.getSignatureFromDeclaration(fn));
           const typeNode = checker.typeToTypeNode(type, undefined, flags);
           const text = printer.printNode(ts.EmitHint.Unspecified, typeNode, source).replace(/\r?\n\s*/g, " ");
-          entries.push({ file: posix(source.fileName), key: key.text, text });
+          const hasAny = (n) => n.kind === ts.SyntaxKind.AnyKeyword || !!ts.forEachChild(n, hasAny);
+          entries.push({ file: posix(source.fileName), key: key.text, text, any: hasAny(typeNode) });
         }
       }
       ts.forEachChild(node, visit);
@@ -138,8 +140,30 @@ function generate(ts, config) {
   // 정의가 하나도 없으면 「No inputs were found」(18003) 가 나지만 빈 등록부를 써야 하므로 그것만 넘긴다
   const real = errors.filter((d) => d.code !== 18003);
   if (real.length) throw fail(real[0]);
-  const program = ts.createProgram({ rootNames: fileNames, options });
-  return writeIfChanged(config.out, render(collect(ts, program, config), config));
+  // 생성 내용을 가상 파일로 넣고 다시 뽑기를 되풀이한다. 새 key 의 첫 돌기에는 StateOf 가 unknown 이라
+  // get() 에 기대는 함수가 any 로 찍히는데, 그 결과를 넣은 다음 돌기가 바로잡는다
+  const same = (p) => posix(p).toLowerCase();
+  const out = same(config.out);
+  const rootNames = fileNames.some((f) => same(f) === out) ? fileNames : [...fileNames, config.out];
+  const host = ts.createCompilerHost(options);
+  const getSourceFile = host.getSourceFile.bind(host);
+  let text = existsSync(config.out) ? readFileSync(config.out, "utf8") : render([], config);
+  host.getSourceFile = (file, lang, ...rest) =>
+    same(file) === out ? ts.createSourceFile(file, text, lang) : getSourceFile(file, lang, ...rest);
+  let program;
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    program = ts.createProgram({ rootNames, options, host, oldProgram: program });
+    const entries = collect(ts, program, config);
+    const next = render(entries, config);
+    if (next === text) {
+      const bad = entries.find((e) => e.any);
+      // 고정점에도 any 가 남으면 그 key 의 타입 검사가 조용히 꺼진다 — 쓰지 않고 반환 타입을 적게 한다
+      if (bad) throw new Error(`${bad.key}(${bad.file}) 의 타입에 any 가 남는다 — 반환 타입을 적는다`);
+      return writeIfChanged(config.out, text);
+    }
+    text = next;
+  }
+  throw new Error(`생성 결과가 ${MAX_ROUNDS} 번 돌아도 멈추지 않는다 — 정의의 반환 타입을 적는다`);
 }
 
 module.exports = { loadConfig, collect, render, generate, writeIfChanged, requireTypeScript };
