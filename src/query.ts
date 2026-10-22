@@ -206,7 +206,8 @@ export function createResource<A = void, D = never, R extends object = object>(
       const cell = cellOf(args);
       if (cell.view.status === "ready" || (cell.inflight && !moved)) return;
       load(args, moved).catch(noop);
-    }, [active, id]);
+      // 자원을 다시 지으면 cache 가 새 객체다 — 새 칸은 idle 이므로 다시 받는다
+    }, [active, id, cache]);
 
     const out: Record<string, unknown> = {
       ...view,

@@ -29,7 +29,11 @@ export function useStore<K extends StateKey, N extends Names<K>, O extends PickO
 export function useStore(key: any, ...args: any[]): any {
   const store = getStore(key as StateKey) as ReturnType<typeof getStore>;
   // [USE] 갈래와 pick 갈래는 key 마다 늘 같은 쪽이라 훅 순서가 바뀌지 않는다
-  if (USE in (store.getInitialState() as object)) return (store.getState() as any)[USE](...args);
+  if (USE in (store.getInitialState() as object)) {
+    // 다시 지으면(재등록·overrideStore) 상태 객체가 바뀐다 — 구독해 두어야 새 상태의 [USE] 로 다시 그린다
+    const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
+    return (state as any)[USE](...args);
+  }
 
   const options: Opts = args[0] ?? {};
   const cache = useRef<{ key: string; state: object; names: string[]; raw: unknown[]; out: object } | null>(null);

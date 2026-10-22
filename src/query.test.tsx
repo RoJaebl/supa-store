@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, expect, expectTypeOf, it, vi } from "vitest";
-import { createStore, getStore, resetStores } from "./index.js";
+import { createStore, getStore, overrideStore, resetStores } from "./index.js";
 import { createEvent, createResource, type Cache } from "./query.js";
 import { useStore } from "./react.js";
 
@@ -137,6 +137,15 @@ it("조회: 같은 칸을 보는 두 화면이 요청 하나를 나눠 쓴다", 
   await act(async () => q.calls[0]!.d.resolve(7));
   expect(one.result.current).toMatchObject({ data: 7, status: "ready", error: null });
   expect(two.result.current.data).toBe(7);
+});
+it("조회: 자원을 다시 지으면(overrideStore·재등록) 화면이 새 자원으로 다시 받는다", async () => {
+  const key = define(() => createResource(() => ({ query: async () => "old" })));
+  const { result } = renderHook(() => view(key));
+  await flush();
+  expect(result.current).toMatchObject({ data: "old", status: "ready" });
+  await act(async () => overrideStore(key as never, () => createResource(() => ({ query: async () => "new" }))));
+  await flush();
+  expect(result.current).toMatchObject({ data: "new", status: "ready" });
 });
 it("조회: 다시 받는 동안 앞선 data 를 남긴다", async () => {
   const q = controlled<number>();
