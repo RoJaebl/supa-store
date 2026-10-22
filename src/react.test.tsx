@@ -4,7 +4,7 @@ import { beforeEach, expect, it } from "vitest";
 import { createStore, getStore, resetStores, USE } from "./index.js";
 import { useStore } from "./react.js";
 
-declare module "." {
+declare module "./index.js" {
   interface StateTypes {
     "state.test.pair2": { a: number; b: number; setA: (a: number) => void };
     "state.test.use": { [USE]: (x: number) => number };

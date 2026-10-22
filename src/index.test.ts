@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { createStore, getStore, overrideStore, pickFrom, registeredKeys, resetStores } from "./index.js";
 
-declare module "." {
+declare module "./index.js" {
   interface StateTypes {
     "state.test.count": { n: number; add: () => void };
     "state.test.pair": { a: number; b: number; setA: (a: number) => void };

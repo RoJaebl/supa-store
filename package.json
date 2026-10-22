@@ -16,7 +16,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run && node --test \"tools/*.test.mjs\"",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
   },
   "peerDependencies": { "react": ">=18", "typescript": ">=5.4" },
   "peerDependenciesMeta": { "react": { "optional": true } },

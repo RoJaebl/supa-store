@@ -53,6 +53,28 @@ it("타입: cache 를 쓰면 (cache: Cache<A, D>) 로 적고, 상태와 화면�
   expectTypeOf(plain.getData()).toEqualTypeOf<number | undefined>();
 });
 
+const typedResource = () =>
+  createResource((cache: Cache<void, number[]>) => ({
+    query: async () => [1],
+    async add(value: number) {
+      cache.setData((prev) => [...(prev ?? []), value]);
+      return value;
+    },
+  }));
+declare module "./index.js" {
+  interface StateTypes {
+    "api.types.typed": ReturnType<typeof typedResource>;
+  }
+}
+it("타입: useStore 로 꺼낸 바꾸기의 data 는 any 가 아니다", () => {
+  // 부르지 않는다 — 훅 바깥이라 타입만 본다
+  const read = () => useStore("api.types.typed");
+  type View = ReturnType<typeof read>;
+  expectTypeOf<View["add"]["data"]>().not.toBeAny();
+  expectTypeOf<View["add"]["data"]>().toEqualTypeOf<number | undefined>();
+  expectTypeOf<View["data"]>().toEqualTypeOf<number[] | undefined>();
+});
+
 // ── event ─────────────────────────────────────────────
 
 it("event: emit 은 on 한 반응을 부른다", () => {
