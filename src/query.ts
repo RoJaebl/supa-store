@@ -163,7 +163,8 @@ export function createResource<A = void, D = never, R extends object = object>(
         typeof updater === "function" ? (updater as (prev: D | undefined) => D | undefined)(cell.view.data) : updater;
       // 차례를 올려 이 앞에 떠난 조회의 늦은 응답이 고친 값을 덮지 못하게 한다
       cell.seq += 1;
-      write(cell, data === undefined ? { data } : { data, status: "ready", error: null });
+      // 값을 비우면(받은 적 없는 목록으로 되돌리기) 처음으로 돌린다 — 버린 응답 탓에 loading 에 갇히지 않고 다음에 다시 받는다
+      write(cell, { data, status: data === undefined ? "idle" : "ready", error: null });
     },
     async invalidate(args) {
       const targets = args === undefined ? [...cells.values()] : [cellOf(args)];

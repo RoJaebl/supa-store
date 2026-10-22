@@ -201,6 +201,20 @@ it("조회: setData 앞에 떠난 조회 응답이 늦게 와도 setData 의 값
   await pending;
   expect(state(key).getData()).toEqual([1, 2]);
 });
+it("조회: 받는 중에 setData 로 값을 비우면 칸이 idle 로 돌아가고 다음 fetch 가 새로 받는다", async () => {
+  const q = controlled<number[]>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() }), { auto: false }));
+  const { result } = renderHook(() => view(key));
+  const pending = state(key).fetch().catch(() => {});
+  act(() => state(key).setData(() => undefined));
+  await act(async () => {
+    q.calls[0]!.d.resolve([1]);
+    await pending;
+  });
+  expect(result.current).toMatchObject({ data: undefined, status: "idle", error: null });
+  void state(key).fetch().catch(() => {});
+  expect(q.fn).toHaveBeenCalledTimes(2);
+});
 it("조회: idle 칸에 setData 하면 ready 가 된다", () => {
   const key = define(() => createResource(() => ({ query: async () => 1 }), { auto: false }));
   const { result } = renderHook(() => view(key));
