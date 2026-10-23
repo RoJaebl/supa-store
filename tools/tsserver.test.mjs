@@ -42,8 +42,8 @@ beforeEach(() => {
         moduleResolution: "Bundler",
         target: "ES2022",
         skipLibCheck: true,
-        paths: { "@fortuna-lottery/store": [storeIndex] },
-        plugins: [{ name: "@fortuna-lottery/store/tools/plugin.cjs" }],
+        paths: { "supa-store": [storeIndex] },
+        plugins: [{ name: "supa-store/tools/plugin.cjs" }],
       },
       include: ["src"],
     }),
@@ -99,11 +99,11 @@ function startServer() {
   return { send, stop };
 }
 
-const DEF = (body) => `import { createStore } from "@fortuna-lottery/store";
+const DEF = (body) => `import { createStore } from "supa-store";
 createStore("state.a.count", (set) => ({ ${body} }));
 `;
 const USE = `import "./store.gen";
-import { getStore } from "@fortuna-lottery/store";
+import { getStore } from "supa-store";
 export const label = getStore("state.a.count").getState().label;
 `;
 

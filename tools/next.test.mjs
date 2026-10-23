@@ -9,7 +9,7 @@ import { withStore } from "./next.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 const posix = (p) => p.replace(/\\/g, "/");
 const storeIndex = posix(resolve(here, "../src/index.ts"));
-const COUNT = `import { createStore } from "@fortuna-lottery/store";
+const COUNT = `import { createStore } from "supa-store";
 createStore("state.a.count", (set, get) => ({ n: 0, add: () => set({ n: get().n + 1 }) }));`;
 
 let root;
@@ -50,7 +50,7 @@ beforeEach(() => {
         moduleResolution: "Bundler",
         target: "ES2022",
         skipLibCheck: true,
-        paths: { "@fortuna-lottery/store": [storeIndex] },
+        paths: { "supa-store": [storeIndex] },
       },
       include: ["src"],
     }),
@@ -78,7 +78,7 @@ test("dev 에서 감시를 걸지 못하면 dev 서버를 죽이지 않고 표�
   write("store.config.ts", `export default { targets: ["next"], out: "gen/store.gen.ts" };`);
   const config = {};
   assert.equal(inDir(root, () => withStore(config)("phase-development-server")), config);
-  assert.equal(globalThis[Symbol.for("@fortuna-lottery/store/watching")], undefined);
+  assert.equal(globalThis[Symbol.for("supa-store/watching")], undefined);
 });
 
 // 감시는 globalThis 표식으로 한 번만 걸리므로 이 시험은 마지막에 둔다

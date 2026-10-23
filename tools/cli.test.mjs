@@ -12,7 +12,7 @@ const posix = (p) => p.replace(/\\/g, "/");
 const storeIndex = posix(resolve(here, "../src/index.ts"));
 const cli = join(here, "cli.mjs");
 const tscBin = createRequire(import.meta.url).resolve("typescript/bin/tsc");
-const COUNT = `import { createStore } from "@fortuna-lottery/store";
+const COUNT = `import { createStore } from "supa-store";
 createStore("state.a.count", (set, get) => ({ n: 0, add: () => set({ n: get().n + 1 }) }));`;
 
 let root;
@@ -38,7 +38,7 @@ beforeEach(() => {
         moduleResolution: "Bundler",
         target: "ES2022",
         skipLibCheck: true,
-        paths: { "@fortuna-lottery/store": [storeIndex] },
+        paths: { "supa-store": [storeIndex] },
       },
       include: ["src"],
     }),
@@ -74,7 +74,7 @@ test("생성 뒤 tsc 가 없는 key·없는 필드·set 의 없는 필드를 잡
   write(
     "src/use.ts",
     `import "./store.gen";
-import { getStore, createStore } from "@fortuna-lottery/store";
+import { getStore, createStore } from "supa-store";
 // @ts-expect-error 없는 key
 getStore("state.a.none");
 // @ts-expect-error 없는 필드
@@ -93,7 +93,7 @@ export { n };`,
 test("생성 파일이 없으면 모든 key 가 never 다", () => {
   write(
     "src/use.ts",
-    `import { getStore } from "@fortuna-lottery/store";
+    `import { getStore } from "supa-store";
 // @ts-expect-error StateTypes 가 비면 key 가 never 다
 getStore("state.a.count");`,
   );

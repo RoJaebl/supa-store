@@ -38,7 +38,7 @@ function readUserConfig(ts, root) {
     });
     if (diagnostics.length) throw new Error(ts.flattenDiagnosticMessageText(diagnostics[0].messageText, "\n"));
     const projectRequire = createRequire(join(root, "package.json"));
-    const req = (id) => (id === "@fortuna-lottery/store/config" ? { defineConfig: (c) => c } : projectRequire(id));
+    const req = (id) => (id === "supa-store/config" ? { defineConfig: (c) => c } : projectRequire(id));
     const module = { exports: {} };
     new Function("exports", "require", "module", outputText)(module.exports, req, module);
     return module.exports.default ?? module.exports;
@@ -111,11 +111,11 @@ function render(entries, config) {
     return `    ${JSON.stringify(e.key)}: ${text};`;
   });
   return [
-    "// 자동 생성 — @fortuna-lottery/store 가 쓴다. 고치지 않는다",
+    "// 자동 생성 — supa-store 가 쓴다. 고치지 않는다",
     "export {};",
     ...files.map((f) => `import "${relativeFromOut(config, f).replace(/\.ts$/, "")}";`),
     "",
-    'declare module "@fortuna-lottery/store" {',
+    'declare module "supa-store" {',
     "  interface StateTypes {",
     ...types,
     "  }",
