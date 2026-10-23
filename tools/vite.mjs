@@ -5,15 +5,23 @@ const require = createRequire(import.meta.url);
 const { loadConfig, generate, requireTypeScript } = require("./codegen.cjs");
 
 export function supaStore() {
-  let ts, config;
+  let ts, config, serve, logger;
   return {
     name: "supa-store",
     configResolved(resolved) {
+      serve = resolved.command === "serve";
+      logger = resolved.logger;
       ts = requireTypeScript(resolved.root);
       config = loadConfig(ts, resolved.root);
     },
     buildStart() {
-      if (config.enabled("vite")) generate(ts, config); // 실패하면 던진다 — 빌드를 멈춘다
+      if (!config.enabled("vite")) return;
+      try {
+        generate(ts, config);
+      } catch (error) {
+        if (!serve) throw error; // 빌드는 멈춘다
+        logger.error(error.message); // 개발 서버는 살린다 — 고치면 감시가 다시 쓴다
+      }
     },
     configureServer(server) {
       if (!config.enabled("vite")) return;

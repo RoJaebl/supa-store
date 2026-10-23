@@ -105,6 +105,14 @@ test("감시 중 생성이 실패해도 서버는 살아 있고 고치면 다시
   await until((t) => t.includes("s: string"), "고친 뒤 다시 쓰지 않았다");
 });
 
+test("개발 서버 시작 때 생성이 실패해도 서버는 뜨고 고치면 다시 쓴다", async () => {
+  write("src/a.state.ts", BAD);
+  const { errors } = await start();
+  assert.match(errors.join("\n"), /정의 파일의 문법이 깨져/);
+  write("src/a.state.ts", def("a", "{ n: 0 }"));
+  await until((t) => t.includes('"a":'), "고친 뒤 다시 쓰지 않았다");
+});
+
 test("감시자가 역슬래시 경로를 넘겨도 맞힌다", async (t) => {
   if (process.platform !== "win32") return t.skip();
   write("src/a.state.ts", def("a", "{ n: 0 }"));

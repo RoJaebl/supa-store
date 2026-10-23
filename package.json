@@ -5,13 +5,14 @@
   "repository": { "type": "git", "url": "git+https://github.com/RoJaebl/supa-store.git" },
   "packageManager": "pnpm@11.18.0",
   "type": "module",
+  "types": "./dist/index.d.ts",
   "bin": { "store-gen": "./tools/cli.mjs" },
   "files": ["dist", "plugin", "tools/*.cjs", "tools/*.mjs", "tools/*.d.mts", "!tools/*.test.mjs"],
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
-    "./react": { "types": "./dist/react.d.ts", "import": "./dist/react.js" },
-    "./query": { "types": "./dist/query.d.ts", "import": "./dist/query.js" },
-    "./config": { "types": "./dist/config.d.ts", "import": "./dist/config.js" },
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./react": { "types": "./dist/react.d.ts", "default": "./dist/react.js" },
+    "./query": { "types": "./dist/query.d.ts", "default": "./dist/query.js" },
+    "./config": { "types": "./dist/config.d.ts", "default": "./dist/config.js" },
     "./vite": { "types": "./tools/vite.d.mts", "default": "./tools/vite.mjs" },
     "./next": { "types": "./tools/next.d.mts", "default": "./tools/next.mjs" },
     "./plugin": "./tools/plugin.cjs"

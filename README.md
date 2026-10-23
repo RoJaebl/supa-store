@@ -72,6 +72,7 @@ createStore("event.saved", () => createEvent<{ id: string }>());
 
 - tsconfig `compilerOptions.plugins` 에 `{ "name": "supa-store/plugin" }` 를 더하고, VS Code 에서 작업 공간 TypeScript 를 쓴다.
 - **모노레포라면 루트 `package.json` 의 devDependencies 에도 `supa-store` 를 둔다.** tsserver 는 플러그인을 tsconfig 폴더가 아니라 TypeScript 가 놓인 자리에서 찾으므로 루트 `node_modules` 에 있어야 한다.
+- Vite react-ts 템플릿은 루트 `tsconfig.json` 이 `files: []` 와 references 뿐이므로, 플러그인 항목은 `tsconfig.app.json` 의 `compilerOptions.plugins` 에 넣는다.
 
 ## Next.js 와 그 밖의 도구
 
