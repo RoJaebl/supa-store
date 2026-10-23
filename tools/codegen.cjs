@@ -1,10 +1,10 @@
 // 생성기 핵심 — CLI·Next 래퍼·tsserver 플러그인이 함께 쓴다. 플러그인이 CommonJS 여야 하므로 이 파일도 CommonJS 다
 const { createRequire } = require("node:module");
 const { existsSync, mkdirSync, readFileSync, writeFileSync } = require("node:fs");
-const { dirname, join, relative, resolve } = require("node:path");
+const { basename, dirname, join, relative, resolve } = require("node:path");
 
 // src/config.ts 의 defaults 와 같다 — dist 는 ESM 이라 여기서 부를 수 없다
-const defaults = { include: ["src/**/*.state.ts"], out: "src/store.gen.ts", targets: ["tsserver"] };
+const defaults = { include: ["src/**/*.state.ts"], out: "src/store.gen.ts", targets: ["tsserver", "next", "vite", "cli"] };
 const CONFIG_FILE = "store.config.ts";
 const MAX_ROUNDS = 5;
 
@@ -71,6 +71,7 @@ function collect(ts, program, config) {
   const flags = ts.NodeBuilderFlags.NoTruncation | ts.NodeBuilderFlags.UseFullyQualifiedType;
   const entries = [];
   const broken = [];
+  const loose = [];
   for (const source of program.getSourceFiles()) {
     if (!config.match(source.fileName)) continue;
     // 문법이 깨진 정의는 반환 타입이 any 로 무너진다 — 그것을 쓰면 타입 검사가 조용히 꺼지므로 아예 짓지 않는다
@@ -81,7 +82,9 @@ function collect(ts, program, config) {
     const visit = (node) => {
       if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "createStore") {
         const [key, fn] = node.arguments;
-        if (key && ts.isStringLiteral(key) && fn && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) {
+        // 변수·템플릿 key 는 등록부에 실을 수 없다 — 조용히 건너뛰면 타입이 없는 채로 남으므로 실패시킨다
+        if (key && !ts.isStringLiteral(key)) loose.push(posix(source.fileName));
+        else if (key && fn && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) {
           const type = checker.getReturnTypeOfSignature(checker.getSignatureFromDeclaration(fn));
           const typeNode = checker.typeToTypeNode(type, undefined, flags);
           const text = printer.printNode(ts.EmitHint.Unspecified, typeNode, source).replace(/\r?\n\s*/g, " ");
@@ -94,6 +97,7 @@ function collect(ts, program, config) {
     visit(source);
   }
   if (broken.length) throw new Error(`정의 파일의 문법이 깨져 생성 파일을 쓰지 않는다: ${broken.join(", ")}`);
+  if (loose.length) throw new Error(`${[...new Set(loose)].map((f) => posix(relative(config.root, f))).join(", ")}: createStore 의 key 는 문자열 그대로 쓴다`);
   return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
@@ -132,14 +136,28 @@ function writeIfChanged(file, text) {
 }
 
 function generate(ts, config) {
-  const tsconfig = join(config.root, "tsconfig.json");
-  const { config: json, error } = ts.readConfigFile(tsconfig, ts.sys.readFile);
-  const fail = (d) => new Error(`tsconfig.json: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`);
-  if (error) throw fail(error);
-  const { fileNames, options, errors } = ts.parseJsonConfigFileContent(json, ts.sys, config.root, undefined, tsconfig);
-  // 정의가 하나도 없으면 「No inputs were found」(18003) 가 나지만 빈 등록부를 써야 하므로 그것만 넘긴다
-  const real = errors.filter((d) => d.code !== 18003);
-  if (real.length) throw fail(real[0]);
+  const parse = (tsconfig) => {
+    const { config: json, error } = ts.readConfigFile(tsconfig, ts.sys.readFile);
+    const fail = (d) => new Error(`${basename(tsconfig)}: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`);
+    if (error) throw fail(error);
+    const parsed = ts.parseJsonConfigFileContent(json, ts.sys, dirname(tsconfig), undefined, tsconfig);
+    // 정의가 하나도 없으면 「No inputs were found」(18003) 가 나지만 빈 등록부를 써야 하므로 그것만 넘긴다
+    const real = parsed.errors.filter((d) => d.code !== 18003);
+    if (real.length) throw fail(real[0]);
+    return parsed;
+  };
+  let parsed = parse(join(config.root, "tsconfig.json"));
+  // 뿌리가 files: [] + references 뿐인 솔루션 스타일이면 참조한 설정 가운데 정의 파일을 가진 첫 것을 쓴다
+  if (!parsed.fileNames.some(config.match) && parsed.projectReferences?.length) {
+    for (const ref of parsed.projectReferences) {
+      const sub = parse(ts.resolveProjectReferencePath(ref));
+      if (sub.fileNames.some(config.match)) {
+        parsed = sub;
+        break;
+      }
+    }
+  }
+  const { fileNames, options } = parsed;
   // 생성 내용을 가상 파일로 넣고 다시 뽑기를 되풀이한다. 새 key 의 첫 돌기에는 StateOf 가 unknown 이라
   // get() 에 기대는 함수가 any 로 찍히는데, 그 결과를 넣은 다음 돌기가 바로잡는다
   const same = (p) => posix(p).toLowerCase();

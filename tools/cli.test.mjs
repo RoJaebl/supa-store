@@ -47,7 +47,8 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 test("cli 가 꺼져 있으면 건너뛴다는 한 줄을 남기고 0 으로 끝난다", () => {
-  const r = run(); // config 없음 — 기본 targets 는 tsserver 뿐이다
+  write("store.config.ts", `export default { targets: ["tsserver"] };`);
+  const r = run();
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /store-gen: targets 에 cli 가 없어 건너뛴다/);
   assert.equal(existsSync(join(root, "src/store.gen.ts")), false);

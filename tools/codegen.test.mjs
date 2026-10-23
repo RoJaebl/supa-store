@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const { loadConfig, generate, requireTypeScript } = require("./codegen.cjs");
+const { loadConfig, generate, render, requireTypeScript } = require("./codegen.cjs");
 
 const here = dirname(fileURLToPath(import.meta.url));
 const posix = (p) => p.replace(/\\/g, "/");
@@ -46,7 +46,7 @@ test("config 파일이 없으면 기본값을 쓴다", () => {
   const config = loadConfig(ts, root);
   assert.equal(config.out, `${posix(root)}/src/store.gen.ts`);
   assert.equal(config.enabled("tsserver"), true);
-  assert.equal(config.enabled("cli"), false);
+  for (const t of ["next", "vite", "cli"]) assert.equal(config.enabled(t), true);
   assert.equal(config.match(`${root}\\src\\a\\b.state.ts`), true); // 역슬래시 경로도 맞힌다
   assert.equal(config.match(`${root}/src/a/b.ts`), false);
 });
@@ -61,6 +61,13 @@ export default defineConfig({ out: "src/gen/x.gen.ts", targets: ["cli"] });`,
   assert.equal(config.out, `${posix(root)}/src/gen/x.gen.ts`);
   assert.equal(config.enabled("cli"), true);
   assert.equal(config.enabled("tsserver"), false);
+});
+
+test("targets 를 적으면 그것만 켜진다", () => {
+  write("store.config.ts", `export default { targets: ["cli"] };`);
+  const config = loadConfig(ts, root);
+  assert.equal(config.enabled("vite"), false);
+  assert.equal(config.enabled("cli"), true);
 });
 
 test("문법이 깨진 config 는 파일 이름을 담아 실패한다", () => {
@@ -104,15 +111,59 @@ createStore("state.a.last", () => ({ last: null as Pick | null }));`,
   assert.match(read("src/store.gen.ts"), /last: import\("\.\/types"\)\.Pick \| null/);
 });
 
-test("리터럴이 아닌 key·함수가 아닌 정의는 건너뛴다", () => {
+test("함수가 아닌 정의는 건너뛴다", () => {
   write(
     "src/a/_state/odd.state.ts",
     `import { createStore } from "supa-store";
-const KEY = "state.a.odd";
-createStore(KEY, () => ({ n: 0 }));`,
+const make = () => ({ n: 0 });
+createStore("state.a.odd", make);`,
   );
   generate(ts, loadConfig(ts, root));
   assert.doesNotMatch(read("src/store.gen.ts"), /state\.a\.odd/);
+});
+
+test("key 가 변수면 생성이 실패한다", () => {
+  write("src/a.state.ts", `import { createStore } from "supa-store";
+const k = "a";
+createStore(k, () => ({}));`);
+  assert.throws(() => generate(ts, loadConfig(ts, root)), /src\/a\.state\.ts: createStore 의 key 는 문자열 그대로 쓴다/);
+});
+
+test("템플릿 리터럴 key 도 실패한다", () => {
+  write("src/a.state.ts", `import { createStore } from "supa-store";
+createStore(\`a\`, () => ({}));`);
+  assert.throws(() => generate(ts, loadConfig(ts, root)), /src\/a\.state\.ts: createStore 의 key 는 문자열 그대로 쓴다/);
+});
+
+const COMPILER = { strict: true, module: "ESNext", moduleResolution: "Bundler", target: "ES2022", skipLibCheck: true, paths: { "supa-store": [storeIndex] } };
+const DEF = `import { createStore } from "supa-store";
+createStore("state.r.x", () => ({ n: 1 }));`;
+
+test("뿌리 tsconfig 의 references 를 따라 정의를 찾는다", () => {
+  write("tsconfig.json", JSON.stringify({ files: [], references: [{ path: "./tsconfig.app.json" }, { path: "./tsconfig.node.json" }] }));
+  write("tsconfig.app.json", JSON.stringify({ compilerOptions: COMPILER, include: ["src"] }));
+  write("tsconfig.node.json", JSON.stringify({ compilerOptions: COMPILER, include: ["vite.config.ts"] }));
+  write("vite.config.ts", "export default {};");
+  write("src/r.state.ts", DEF);
+  generate(ts, loadConfig(ts, root));
+  assert.match(read("src/store.gen.ts"), /"state\.r\.x"/);
+});
+
+test("references 가 폴더를 가리켜도 따라간다", () => {
+  write("tsconfig.json", JSON.stringify({ files: [], references: [{ path: "./app" }] }));
+  write("app/tsconfig.json", JSON.stringify({ compilerOptions: COMPILER, include: ["../src"] }));
+  write("src/r.state.ts", DEF);
+  generate(ts, loadConfig(ts, root));
+  assert.match(read("src/store.gen.ts"), /"state\.r\.x"/);
+});
+
+test("어느 참조에도 정의가 없으면 빈 등록부를 쓴다", () => {
+  write("tsconfig.json", JSON.stringify({ files: [], references: [{ path: "./tsconfig.app.json" }] }));
+  write("tsconfig.app.json", JSON.stringify({ compilerOptions: COMPILER, include: ["src"] }));
+  write("src/plain.ts", "export const a = 1;");
+  const config = loadConfig(ts, root);
+  generate(ts, config);
+  assert.equal(read("src/store.gen.ts"), render([], config));
 });
 
 test("정의가 없으면 빈 StateTypes 를 쓴다", () => {

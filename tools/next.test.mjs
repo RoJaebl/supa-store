@@ -68,6 +68,7 @@ test("next 가 켜져 있으면 설정을 읽을 때 생성하고 설정을 그�
 });
 
 test("next 가 꺼져 있으면 아무것도 쓰지 않는다", () => {
+  write("store.config.ts", `export default { targets: ["tsserver"] };`);
   write("src/a/_state/count.state.ts", COUNT);
   inDir(root, () => withStore({})("phase-production-build"));
   assert.equal(existsSync(join(root, "src/store.gen.ts")), false);
