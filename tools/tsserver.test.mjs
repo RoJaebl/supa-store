@@ -43,7 +43,7 @@ beforeEach(() => {
         target: "ES2022",
         skipLibCheck: true,
         paths: { "supa-store": [storeIndex] },
-        plugins: [{ name: "supa-store/tools/plugin.cjs" }],
+        plugins: [{ name: "supa-store/plugin" }],
       },
       include: ["src"],
     }),
