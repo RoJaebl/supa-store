@@ -13,7 +13,7 @@ const init = require("./plugin.cjs");
 const here = dirname(fileURLToPath(import.meta.url));
 const posix = (p) => p.replace(/\\/g, "/");
 const storeIndex = posix(resolve(here, "../src/index.ts"));
-const ts = requireTypeScript(resolve(here, "../../../apps/web"));
+const ts = requireTypeScript(resolve(here, ".."));
 const COUNT = `import { createStore } from "@fortuna-lottery/store";
 createStore("state.a.count", (set, get) => ({ n: 0, add: () => set({ n: get().n + 1 }) }));`;
 

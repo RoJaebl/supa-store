@@ -12,7 +12,7 @@ const { loadConfig, generate, requireTypeScript } = require("./codegen.cjs");
 const here = dirname(fileURLToPath(import.meta.url));
 const posix = (p) => p.replace(/\\/g, "/");
 const storeIndex = posix(resolve(here, "../src/index.ts"));
-const ts = requireTypeScript(resolve(here, "../../../apps/web"));
+const ts = requireTypeScript(resolve(here, ".."));
 
 let root;
 const write = (rel, text) => {

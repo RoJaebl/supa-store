@@ -4,7 +4,7 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -12,7 +12,8 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const posix = (p) => p.replace(/\\/g, "/");
-const repo = resolve(here, "../../..");
+const pkgRoot = resolve(here, "..");
+const pkgName = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf8")).name;
 const storeIndex = posix(resolve(here, "../src/index.ts"));
 // 이 패키지가 devDependency 로 가진 TypeScript 의 tsserver 다
 const tsserverJs = createRequire(import.meta.url).resolve("typescript/lib/tsserver.js");
@@ -27,6 +28,10 @@ const write = (rel, text) => {
 beforeEach(() => {
   root = posix(mkdtempSync(join(tmpdir(), "store-tsserver-")));
   write("package.json", "{}");
+  // 플러그인을 임시 프로젝트의 node_modules/<패키지 이름> 에서 찾게 저장소 뿌리를 잇는다
+  const link = join(root, "node_modules", pkgName);
+  mkdirSync(dirname(link), { recursive: true });
+  symlinkSync(pkgRoot, link, "junction");
   write("store.config.ts", `export default { targets: ["tsserver"] };`);
   write(
     "tsconfig.json",
@@ -47,11 +52,11 @@ beforeEach(() => {
 // Windows 에서는 끝난 tsserver 의 감시 핸들이 늦게 풀릴 수 있어 몇 번 다시 지운다
 afterEach(() => rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
 
-/** tsserver 하나를 띄운다. 플러그인은 저장소 뿌리의 node_modules 에서 찾게 한다 */
+/** tsserver 하나를 띄운다. 플러그인은 임시 프로젝트의 node_modules 에서 찾게 한다 */
 function startServer() {
   const child = spawn(
     process.execPath,
-    [tsserverJs, "--pluginProbeLocations", posix(repo), "--disableAutomaticTypingAcquisition"],
+    [tsserverJs, "--pluginProbeLocations", root, "--disableAutomaticTypingAcquisition"],
     { stdio: ["pipe", "pipe", "pipe"] },
   );
   let seq = 0;
