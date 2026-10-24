@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const { loadConfig, generate, requireTypeScript } = require("./codegen.cjs");
 
 // Next 는 설정을 여러 번 읽으므로 감시는 프로세스에 한 번만 건다
-const WATCHING = Symbol.for("@fortuna-lottery/store/watching");
+const WATCHING = Symbol.for("supa-store/watching");
 
 export function withStore(nextConfig) {
   return (phase) => {

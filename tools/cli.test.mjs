@@ -2,6 +2,7 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,8 +11,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const posix = (p) => p.replace(/\\/g, "/");
 const storeIndex = posix(resolve(here, "../src/index.ts"));
 const cli = join(here, "cli.mjs");
-const tscBin = resolve(here, "../../../apps/web/node_modules/typescript/bin/tsc");
-const COUNT = `import { createStore } from "@fortuna-lottery/store";
+const tscBin = createRequire(import.meta.url).resolve("typescript/bin/tsc");
+const COUNT = `import { createStore } from "supa-store";
 createStore("state.a.count", (set, get) => ({ n: 0, add: () => set({ n: get().n + 1 }) }));`;
 
 let root;
@@ -37,7 +38,7 @@ beforeEach(() => {
         moduleResolution: "Bundler",
         target: "ES2022",
         skipLibCheck: true,
-        paths: { "@fortuna-lottery/store": [storeIndex] },
+        paths: { "supa-store": [storeIndex] },
       },
       include: ["src"],
     }),
@@ -46,7 +47,8 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 test("cli 가 꺼져 있으면 건너뛴다는 한 줄을 남기고 0 으로 끝난다", () => {
-  const r = run(); // config 없음 — 기본 targets 는 tsserver 뿐이다
+  write("store.config.ts", `export default { targets: ["tsserver"] };`);
+  const r = run();
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /store-gen: targets 에 cli 가 없어 건너뛴다/);
   assert.equal(existsSync(join(root, "src/store.gen.ts")), false);
@@ -73,7 +75,7 @@ test("생성 뒤 tsc 가 없는 key·없는 필드·set 의 없는 필드를 잡
   write(
     "src/use.ts",
     `import "./store.gen";
-import { getStore, createStore } from "@fortuna-lottery/store";
+import { getStore, createStore } from "supa-store";
 // @ts-expect-error 없는 key
 getStore("state.a.none");
 // @ts-expect-error 없는 필드
@@ -92,7 +94,7 @@ export { n };`,
 test("생성 파일이 없으면 모든 key 가 never 다", () => {
   write(
     "src/use.ts",
-    `import { getStore } from "@fortuna-lottery/store";
+    `import { getStore } from "supa-store";
 // @ts-expect-error StateTypes 가 비면 key 가 never 다
 getStore("state.a.count");`,
   );
