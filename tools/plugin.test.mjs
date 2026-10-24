@@ -13,8 +13,8 @@ const init = require("./plugin.cjs");
 const here = dirname(fileURLToPath(import.meta.url));
 const posix = (p) => p.replace(/\\/g, "/");
 const storeIndex = posix(resolve(here, "../src/index.ts"));
-const ts = requireTypeScript(resolve(here, "../../../apps/web"));
-const COUNT = `import { createStore } from "@fortuna-lottery/store";
+const ts = requireTypeScript(resolve(here, ".."));
+const COUNT = `import { createStore } from "supa-store";
 createStore("state.a.count", (set, get) => ({ n: 0, add: () => set({ n: get().n + 1 }) }));`;
 
 let root;
@@ -43,7 +43,7 @@ beforeEach(() => {
         moduleResolution: "Bundler",
         target: "ES2022",
         skipLibCheck: true,
-        paths: { "@fortuna-lottery/store": [storeIndex] },
+        paths: { "supa-store": [storeIndex] },
       },
       include: ["src"],
     }),
@@ -96,7 +96,7 @@ test("정의를 고치면 다음 진단에서 새 필드를 알고 생성 파일
   write(
     "src/use.ts",
     `import "./store.gen";
-import { getStore } from "@fortuna-lottery/store";
+import { getStore } from "supa-store";
 export const label = getStore("state.a.count").getState().label;`,
   );
   const ls = createPluggedService(root);
@@ -143,7 +143,7 @@ test("create 를 다시 불러도 감싸기가 쌓이지 않고 updateGraph 는 
   const info = { languageServiceHost: host, languageService: ls, project };
   init({ typescript: ts }).create(info);
   init({ typescript: ts }).create(info); // tsconfig 를 다시 실은 꼴
-  const ours = Symbol.for("@fortuna-lottery/store/original");
+  const ours = Symbol.for("supa-store/original");
   assert.equal(host.getScriptVersion[ours], originalVersion);
   assert.equal(project.updateGraph[ours], originalGraph);
   assert.equal(project.updateGraph(), false); // 첫 호출이 false 면 다시 지은 호출이 true 여도 false 다
