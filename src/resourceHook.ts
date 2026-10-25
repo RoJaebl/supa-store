@@ -39,7 +39,8 @@ function same(a: unknown, b: unknown): boolean {
   return keys.length === Object.keys(b).length && keys.every((k) => k in b && Object.is((a as any)[k], (b as any)[k]));
 }
 
-type Item = { on: boolean; out: Record<string, unknown> };
+/** raw 는 select 를 거치기 전의 D, screen 은 그때 쓴 화면 select, data 는 거친 결과 */
+type Item = { on: boolean; out: Record<string, unknown>; raw: unknown; screen: Fn | undefined; data: unknown };
 type Last = { core: object; fields: string; items: Record<string, unknown>[]; byId: Map<string, Item> };
 
 export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: object) => unknown {
@@ -69,12 +70,17 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         const kept = byId.get(id);
         if (kept) return kept.out;
         const { data: raw, status, error } = on ? cellOf(a).view : IDLE;
-        // 자원 select → 화면 select. 렌더마다 새 함수여도 아래 견주기가 결과로 가른다
-        let data: unknown = raw;
-        if (data !== undefined && select) data = select(data as D, a as A);
-        if (data !== undefined && options?.select) data = options.select(data, a);
-        const values: Record<string, unknown> = { data, status, error, isPlaceholderData: false };
         const before = prev?.byId.get(id);
+        const screen = options?.select;
+        // 자원 select → 화면 select. getSnapshot 은 렌더마다 여러 번 불리므로 받은 값과 화면 select 가 그대로면 앞 결과를 쓴다 —
+        // 안 그러면 매번 새 객체를 만드는 select 가 스냅숏을 흔들어 끝없이 다시 그린다. 자원 select 는 core 와 함께 같다
+        let data: unknown = raw;
+        if (before && Object.is(before.raw, raw) && before.screen === screen) data = before.data;
+        else {
+          if (data !== undefined && select) data = select(data as D, a as A);
+          if (data !== undefined && screen) data = screen(data, a);
+        }
+        const values: Record<string, unknown> = { data, status, error, isPlaceholderData: false };
         const reuse = before?.on === on && fields.every((f) => f === "refetch" || same(before.out[f], values[f]));
         let out = before?.out as Record<string, unknown>;
         if (!reuse) {
@@ -82,7 +88,7 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
           out = {};
           for (const f of fields) out[f] = values[f];
         }
-        byId.set(id, { on, out });
+        byId.set(id, { on, out, raw, screen, data });
         return out;
       });
       // 바뀐 항목이 없으면 앞 배열을 그대로 준다 — 다시 그리지 않는다

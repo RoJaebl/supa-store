@@ -283,3 +283,36 @@ it("select: 목록 꼴에서 항목마다 (data, args) 로 불린다", async () 
   expect(resource).toHaveBeenCalledWith(10, { id: 1 });
   expect(resource).toHaveBeenCalledWith(20, { id: 2 });
 });
+
+type Feed = { items: { id: number; at: number }[] };
+const fresh = (d: Feed) => d.items.map((x) => ({ id: x.id }));
+const feed = (select?: (d: Feed) => unknown) =>
+  define(() =>
+    createResource(() => ({ query: async (a?: { id: number }): Promise<Feed> => ({ items: [{ id: a?.id ?? 0, at: 0 }] }) }), {
+      select,
+    }),
+  );
+it("select: 겉 칸이 매번 새 객체인 결과여도 받은 값이 그대로면 앞 결과를 준다 — 하나 꼴", async () => {
+  const key = feed(fresh);
+  const { result, renders, rerender } = counted(key, () => ({ args: { id: 1 }, select: (s: { id: number }[]) => s.map((x) => ({ ...x })) }));
+  await flush();
+  expect(result.current.data).toEqual([{ id: 1 }]);
+  const before = renders();
+  // 다른 칸이 바뀌어 알림만 오면 다시 그리지 않는다
+  act(() => state(key).setData({ items: [] }, { id: 9 }));
+  expect(renders()).toBe(before);
+  // 렌더마다 새 화면 select 면 그 렌더에서 한 번만 다시 만든다
+  rerender();
+  expect(renders()).toBe(before + 1);
+});
+it("select: 겉 칸이 매번 새 객체인 결과여도 받은 값이 그대로면 앞 결과를 준다 — 목록 꼴", async () => {
+  const key = feed(fresh);
+  const { result, renders } = counted(key, () => ({ args: ids(1, 2), pick: ["data"] }));
+  await flush();
+  const shown = result.current;
+  expect(shown).toEqual([{ data: [{ id: 1 }] }, { data: [{ id: 2 }] }]);
+  const before = renders();
+  act(() => state(key).setData({ items: [] }, { id: 9 }));
+  expect(renders()).toBe(before);
+  expect(result.current).toBe(shown);
+});
