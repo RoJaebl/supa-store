@@ -1,6 +1,7 @@
 // 자원 훅 — 정의 파일과 함께 서버 쪽에서도 평가되므로 "use client" 를 두지 않고 React 를 이름공간으로 가져온다
 import * as React from "react";
 import type { MutationView, PlaceholderData, Prev, Status } from "./query.js";
+import { type RefetchInterval, valueOf } from "./refetch.js";
 
 type Fn = (...args: any[]) => any;
 type CellView<D> = { data: D | undefined; status: Status; error: string | null };
@@ -19,6 +20,8 @@ export interface ResourceCore<A, D> {
   placeholderData: PlaceholderData<A, D> | undefined;
   mutations: Record<string, Fn>;
   names: string[];
+  /** 화면이 args 를 보기 시작한다(주기 받기) — 풀기 함수를 돌려준다 */
+  watch(args: A | undefined, screen: RefetchInterval<A | undefined>): () => void;
 }
 
 export const QUERY_FIELDS = ["data", "status", "error", "isPlaceholderData", "refetch"];
@@ -72,13 +75,14 @@ function fill(sources: unknown[], args: unknown, prev: Prev<unknown, unknown>[],
 }
 
 export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: object) => unknown {
-  const { cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names } = core;
+  const { cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names, watch } = core;
   type Options = {
     args?: A | readonly A[];
     pick?: readonly string[];
     omit?: readonly string[];
     select?: Fn;
     placeholderData?: unknown;
+    refetchInterval?: RefetchInterval<A | undefined>;
   };
 
   return function useResource(options?: Options) {
@@ -152,9 +156,12 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
       return items;
     };
     const items = React.useSyncExternalStore(active.some(Boolean) ? subscribe : subscribeNone, snapshot, snapshot);
+    // 화면 간격은 렌더마다 새 함수여도 된다 — 타이머가 걸릴 때 마지막 값을 읽는다
+    const interval = React.useRef(options?.refetchInterval);
     // 그려진 뒤에야 prev 를 넘긴다 — 한 렌더 안에서 스냅숏이 여러 번 불려도 모두 같은 앞 렌더를 본다
     React.useEffect(() => {
       prevShown.current = last.current?.visible ?? [];
+      interval.current = options?.refetchInterval;
     });
 
     const seen = React.useRef<Set<string> | null>(null);
@@ -175,6 +182,25 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
       });
       // 자원을 다시 지으면 core 가 새 객체다 — 새 칸은 idle 이므로 다시 받는다
     }, [activeKey, core]);
+
+    // 주기 받기에 보는 args 를 건다. auto 와 상관없다. 앞과 견주어 빠진 것만 풀고 새 것만 건다 — 그대로인 args 의 타이머는 이어 간다
+    const watching = React.useRef(new Map<string, () => void>());
+    React.useEffect(() => {
+      const want = new Map<string, A | undefined>();
+      argsList.forEach((a, i) => active[i] && want.set(ids[i]!, a));
+      const map = watching.current;
+      map.forEach((stop, id) => want.has(id) || (stop(), map.delete(id)));
+      const screen = (a: A | undefined) => valueOf(interval.current, a);
+      want.forEach((a, id) => map.has(id) || map.set(id, watch(a, screen)));
+    }, [activeKey, core]);
+    // 떠나거나 자원을 다시 지으면 모두 푼다 — 정리가 위 효과보다 먼저 돌므로 다시 지을 때 비운 map 에 새 자원으로 다시 건다
+    React.useEffect(() => {
+      const map = watching.current;
+      return () => {
+        map.forEach((stop) => stop());
+        map.clear();
+      };
+    }, [core]);
 
     // 바꾸기마다 훅을 정해진 차례로 부른다 — 꼴 · 고르기와 상관없이 훅 순서가 같다
     const views: Record<string, unknown> = {};

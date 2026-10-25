@@ -1,7 +1,10 @@
 // 정의 도우미 — 정의 파일은 서버 쪽에서도 평가되므로 "use client" 를 두지 않는다. 훅은 [USE] 안에서만 부른다
 // 훅은 resourceHook.ts 에 살고, 이 파일은 React 를 가져오지 않는다
 import { USE } from "./index.js";
+import { createRefetcher, type RefetchInterval } from "./refetch.js";
 import { IDLE, makeResourceHook, message, noop, QUERY_FIELDS } from "./resourceHook.js";
+
+export type { RefetchInterval };
 
 type Fn = (...args: any[]) => any;
 
@@ -85,7 +88,12 @@ export type Prev<A, D> = { args: A; data: D };
 /** 받은 값이 없을 때 보일 값 — 지어낸 값 그대로, 또는 함수(undefined 면 정하지 않았다) */
 export type PlaceholderData<A, D> = D | ((args: A, prev: Prev<A, D>[]) => D | undefined);
 /** 화면의 select 는 자원 select 의 결과(S)를 이어 받고, 자리 채우기는 select 전 모양 D 를 짓는다 */
-type ScreenOptions<A, S, D> = { select?: (data: S, args: A) => unknown; placeholderData?: PlaceholderData<A, D> };
+type ScreenOptions<A, S, D> = {
+  select?: (data: S, args: A) => unknown;
+  placeholderData?: PlaceholderData<A, D>;
+  /** 자원이 간격을 정하지 않은 args 를 채운다 — 보는 화면들 가운데 가장 짧은 간격 */
+  refetchInterval?: RefetchInterval<A>;
+};
 /** 하나 꼴 — 조회 칸과 바꾸기 칸을 고른다 */
 export type ResourceOptions<A, N extends string, S = unknown, D = unknown> = ScreenOptions<A, S, D> &
   ({ args?: A; pick?: readonly N[]; omit?: never } | { args?: A; omit?: readonly N[]; pick?: never });
@@ -165,12 +173,23 @@ interface Cell<A, D> {
  */
 export function createResource<A = void, D = never, R extends object = object, S = D>(
   define: (cache: Cache<A, D>) => R & { query?: (args: A) => Promise<D> },
-  options: { auto?: boolean; select?: (data: D, args: A) => S; placeholderData?: PlaceholderData<A, D> } = {},
+  options: {
+    auto?: boolean;
+    select?: (data: D, args: A) => S;
+    placeholderData?: PlaceholderData<A, D>;
+    refetchInterval?: RefetchInterval<A>;
+  } = {},
 ): Resource<A, D, R, S> {
   const auto = options.auto ?? true;
   const cells = new Map<string, Cell<A, D>>();
   const listeners = new Set<() => void>();
   const idOf = (args: A | undefined) => JSON.stringify(args ?? null);
+  const refetcher = createRefetcher<A>({
+    resource: options.refetchInterval,
+    load: (args) => load(args),
+    idOf,
+    inflight: (args) => cells.get(idOf(args))?.inflight,
+  });
   const cellOf = (args: A | undefined): Cell<A, D> => {
     const id = idOf(args);
     let cell = cells.get(id);
@@ -193,20 +212,24 @@ export function createResource<A = void, D = never, R extends object = object, S
     const seq = ++cell.seq;
     write(cell, { status: "loading", error: null });
     // 실행자는 곧바로 돈다 — query 가 동기로 던져도 거절로 바뀐다
-    const request = new Promise<D>((resolve) => resolve(query!.call(defined, args as A)))
-      .then(
-        (data) => {
-          if (cell.seq === seq) write(cell, { data, status: "ready" });
-          return data;
-        },
-        (e) => {
-          if (cell.seq === seq) write(cell, { status: "error", error: message(e) });
-          throw e;
-        },
-      )
-      .finally(() => {
-        if (cell.inflight === request) cell.inflight = undefined;
-      });
+    // 이 칸의 마지막 요청이 끝날 때만 주기에 알린다 — setData 로 응답을 버려도 끝은 알린다
+    const end = (ok: boolean) => {
+      if (cell.inflight !== request) return;
+      cell.inflight = undefined;
+      refetcher.settled(args as A, ok);
+    };
+    const request: Promise<D> = new Promise<D>((resolve) => resolve(query!.call(defined, args as A))).then(
+      (data) => {
+        if (cell.seq === seq) write(cell, { data, status: "ready" });
+        end(true);
+        return data;
+      },
+      (e) => {
+        if (cell.seq === seq) write(cell, { status: "error", error: message(e) });
+        end(false);
+        throw e;
+      },
+    );
     cell.inflight = request;
     return request;
   };
@@ -252,6 +275,7 @@ export function createResource<A = void, D = never, R extends object = object, S
   const names = Object.keys(mutations);
 
   const { select, placeholderData } = options;
-  const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names });
+  const watch = refetcher.watch;
+  const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names, watch });
   return Object.assign(cache, mutations, { [USE]: useResource }) as unknown as Resource<A, D, R, S>;
 }
