@@ -1,5 +1,5 @@
 // 정의 도우미 — 정의 파일은 서버 쪽에서도 평가되므로 "use client" 를 두지 않는다. 훅은 [USE] 안에서만 부른다
-// 훅은 resourceHook.ts 에 산다 — 서버 층에서도 링크가 깨지지 않게 React 를 이름공간으로 가져온다
+// 훅은 resourceHook.ts 에 살고, 이 파일은 React 를 가져오지 않는다
 import { USE } from "./index.js";
 import { IDLE, makeResourceHook, message, noop, QUERY_FIELDS } from "./resourceHook.js";
 

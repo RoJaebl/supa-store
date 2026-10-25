@@ -179,3 +179,13 @@ it("pick: 아무 항목도 바뀌지 않으면 목록은 앞 배열을 그대로
   });
   expect(result.current).toBe(second);
 });
+it("pick: 겉 칸을 견주는 것은 배열과 보통 객체뿐 — Date · Map 은 새 값이면 바뀐 것이다", async () => {
+  const key = define(() => createResource(() => ({ query: async () => new Date(0) as Date | Map<number, number> })));
+  const { result } = renderHook(() => view(key, { pick: ["data"] }));
+  await flush();
+  act(() => state(key).setData(new Date(1)));
+  expect(result.current.data).toEqual(new Date(1));
+  act(() => state(key).setData(new Map([[1, 2]])));
+  act(() => state(key).setData(new Map([[1, 3]])));
+  expect(result.current.data.get(1)).toBe(3);
+});

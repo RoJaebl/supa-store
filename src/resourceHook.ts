@@ -23,11 +23,16 @@ export const message = (e: unknown) => (e instanceof Error ? e.message : String(
 export const noop = () => {};
 const subscribeNone = () => noop;
 
-/** 겉 한 겹 견주기 — 칸마다 Object.is, 객체면 그 겉 칸도 Object.is. 깊이 견주지 않는다 */
+const plain = (x: unknown): x is object => {
+  if (typeof x !== "object" || x === null) return false;
+  const proto = Object.getPrototypeOf(x);
+  return proto === Object.prototype || proto === null;
+};
+/** 겉 한 겹 견주기 — 칸마다 Object.is, 둘 다 배열이거나 둘 다 보통 객체면 그 겉 칸도 Object.is. 깊이 견주지 않는다 */
 function same(a: unknown, b: unknown): boolean {
   if (Object.is(a, b)) return true;
-  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  // Date · Map · 클래스 인스턴스는 Object.keys 가 값을 보이지 않으므로 Object.is 로만 본다
+  if (!(Array.isArray(a) && Array.isArray(b)) && !(plain(a) && plain(b))) return false;
   const keys = Object.keys(a);
   return keys.length === Object.keys(b).length && keys.every((k) => k in b && Object.is((a as any)[k], (b as any)[k]));
 }
