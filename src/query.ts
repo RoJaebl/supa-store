@@ -60,7 +60,7 @@ export interface QueryView<D> {
   data: D | undefined;
   status: Status;
   error: string | null;
-  /** 자리를 채운 값이면 true — 이 판에서는 늘 false 다 */
+  /** 보이는 data 가 받은 값이 아니라 자리를 채운 값이면 true */
   isPlaceholderData: boolean;
   refetch(): Promise<void>;
 }
@@ -80,13 +80,17 @@ export type Mutations<R> = { [K in keyof R as K extends "query" ? never : R[K] e
 // & Fn 으로 좁히면 겹친 서명의 마지막인 Fn 이 ReturnType 을 정해 data 가 any 가 된다 — Extract 로 좁힌다
 export type ResourceView<D, R> = QueryView<D> & { [K in keyof Mutations<R>]: MutationView<Extract<Mutations<R>[K], Fn>> };
 type ViewName<D, R> = keyof ResourceView<D, R> & string;
-/** 화면의 select — 자원 select 의 결과(S)를 이어 받는다 */
-type ScreenSelect<A, S> = { select?: (data: S, args: A) => unknown };
+/** 이 화면이 바로 전 렌더에 보이던 args 와 그 값(select 전 D) */
+export type Prev<A, D> = { args: A; data: D };
+/** 받은 값이 없을 때 보일 값 — 지어낸 값 그대로, 또는 함수(undefined 면 정하지 않았다) */
+export type PlaceholderData<A, D> = D | ((args: A, prev: Prev<A, D>[]) => D | undefined);
+/** 화면의 select 는 자원 select 의 결과(S)를 이어 받고, 자리 채우기는 select 전 모양 D 를 짓는다 */
+type ScreenOptions<A, S, D> = { select?: (data: S, args: A) => unknown; placeholderData?: PlaceholderData<A, D> };
 /** 하나 꼴 — 조회 칸과 바꾸기 칸을 고른다 */
-export type ResourceOptions<A, N extends string, S = unknown> = ScreenSelect<A, S> &
+export type ResourceOptions<A, N extends string, S = unknown, D = unknown> = ScreenOptions<A, S, D> &
   ({ args?: A; pick?: readonly N[]; omit?: never } | { args?: A; omit?: readonly N[]; pick?: never });
 /** 목록 꼴 — 조회 칸만 고른다. 바꾸기는 자원 전체에 하나라 항목에 넣지 않는다 */
-export type ResourceListOptions<A, S = unknown> = ScreenSelect<A, S> &
+export type ResourceListOptions<A, S = unknown, D = unknown> = ScreenOptions<A, S, D> &
   (
     | { args: readonly A[]; pick?: readonly QueryField[]; omit?: never }
     | { args: readonly A[]; omit?: readonly QueryField[]; pick?: never }
@@ -99,10 +103,10 @@ type Chosen<V, O> = [O] extends [{ pick: readonly (infer N)[] }]
     : V;
 export type PickedView<D, R, O> = Chosen<ResourceView<D, R>, O>;
 export type PickedQuery<D, O> = Chosen<QueryView<D>, O>;
-// 아래 셋의 S 는 화면이 받는 data 의 모양이다 — 자원 select 를 거친 값
-export type ResourceUseOptions<A, S, R> =
-  | ResourceOptions<A, ViewName<S, R>, S>
-  | ResourceListOptions<A, S>
+// 아래 셋의 S 는 화면이 받는 data 의 모양이다 — 자원 select 를 거친 값. D 는 select 전 모양
+export type ResourceUseOptions<A, S, R, D = S> =
+  | ResourceOptions<A, ViewName<S, R>, S, D>
+  | ResourceListOptions<A, S, D>
   | undefined;
 /** 화면 select 가 있으면 그 결과가 data 다 */
 type Selected<S, O> = [O] extends [{ select: (...a: any[]) => infer S2 }] ? S2 : S;
@@ -110,12 +114,29 @@ export type ResourceUseResult<S, R, O> = [O] extends [{ args: readonly unknown[]
   ? PickedQuery<Selected<S, O>, O>[]
   : PickedView<Selected<S, O>, R, O>;
 /** 자원의 꺼내기 — 서명 하나다. 입력이 목록이면 배열을 돌려준다 */
-export interface ResourceUse<A, S, R> {
+export interface ResourceUse<A, S, R, D = S> {
   // O 에 기본값을 두지 않는다 — 있으면 TS 가 화면 select 의 인자 타입을 정하려고 O 를 그 기본값에 굳힌다
-  <O extends ResourceUseOptions<A, S, R>>(options?: O): ResourceUseResult<S, R, O>;
+  <O extends ResourceUseOptions<A, S, R, D>>(options?: O): ResourceUseResult<S, R, O>;
 }
 /** store 끼리·시험이 보는 자원의 모양. 캐시는 서버 모양 D, 화면은 useStore 로 꺼내 select 를 거친 S 를 받는다 */
-export type Resource<A, D, R, S = D> = Cache<A, D> & Mutations<R> & { [USE]: ResourceUse<A, S, R> };
+export type Resource<A, D, R, S = D> = Cache<A, D> & Mutations<R> & { [USE]: ResourceUse<A, S, R, D> };
+
+type KeepPrevious = (<A, D>(args: A, prev: Prev<A, D>[]) => D | undefined) &
+  (<A>(match: (args: A, prev: { args: A }) => boolean) => <D>(args: A, prev: Prev<A, D>[]) => D | undefined);
+/**
+ * 자리 채우기 도우미. `placeholderData: keepPreviousData` 는 하나 꼴에서 바로 전 값을, 목록 꼴에서 같은 args 의 앞 값만 잇는다.
+ * `keepPreviousData(match)` 는 prev 가운데 match 가 참인 첫 항목의 값을 잇는다.
+ */
+export const keepPreviousData = ((...a: any[]) => {
+  if (a.length === 1 && typeof a[0] === "function") {
+    const match = a[0] as (args: unknown, prev: { args: unknown }) => boolean;
+    return (args: unknown, prev: Prev<unknown, unknown>[]) => prev.find((p) => match(args, p))?.data;
+  }
+  // 목록 꼴인지는 훅이 셋째 인자로 알린다 — 목록이면 자리를 밀지 않고 같은 args 만 본다
+  const [args, prev, list] = a as [unknown, Prev<unknown, unknown>[], boolean | undefined];
+  const id = JSON.stringify(args ?? null);
+  return list ? prev.find((p) => JSON.stringify(p.args ?? null) === id)?.data : prev[0]?.data;
+}) as KeepPrevious;
 
 const RESERVED = [...QUERY_FIELDS, "fetch", "getData", "setData", "invalidate"];
 
@@ -144,7 +165,7 @@ interface Cell<A, D> {
  */
 export function createResource<A = void, D = never, R extends object = object, S = D>(
   define: (cache: Cache<A, D>) => R & { query?: (args: A) => Promise<D> },
-  options: { auto?: boolean; select?: (data: D, args: A) => S } = {},
+  options: { auto?: boolean; select?: (data: D, args: A) => S; placeholderData?: PlaceholderData<A, D> } = {},
 ): Resource<A, D, R, S> {
   const auto = options.auto ?? true;
   const cells = new Map<string, Cell<A, D>>();
@@ -230,6 +251,7 @@ export function createResource<A = void, D = never, R extends object = object, S
   }
   const names = Object.keys(mutations);
 
-  const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, select: options.select, mutations, names });
+  const { select, placeholderData } = options;
+  const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names });
   return Object.assign(cache, mutations, { [USE]: useResource }) as unknown as Resource<A, D, R, S>;
 }

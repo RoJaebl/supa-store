@@ -1,6 +1,6 @@
 // 자원 훅 — 정의 파일과 함께 서버 쪽에서도 평가되므로 "use client" 를 두지 않고 React 를 이름공간으로 가져온다
 import * as React from "react";
-import type { MutationView, Status } from "./query.js";
+import type { MutationView, PlaceholderData, Prev, Status } from "./query.js";
 
 type Fn = (...args: any[]) => any;
 type CellView<D> = { data: D | undefined; status: Status; error: string | null };
@@ -15,6 +15,8 @@ export interface ResourceCore<A, D> {
   auto: boolean;
   /** 자원의 select — 화면에 줄 때만 거친다 */
   select: ((data: D, args: A) => unknown) | undefined;
+  /** 자원의 자리 채우기 — 화면의 것보다 먼저 구한다 */
+  placeholderData: PlaceholderData<A, D> | undefined;
   mutations: Record<string, Fn>;
   names: string[];
 }
@@ -39,13 +41,45 @@ function same(a: unknown, b: unknown): boolean {
   return keys.length === Object.keys(b).length && keys.every((k) => k in b && Object.is((a as any)[k], (b as any)[k]));
 }
 
-/** raw 는 select 를 거치기 전의 D, screen 은 그때 쓴 화면 select, data 는 거친 결과 */
-type Item = { on: boolean; out: Record<string, unknown>; raw: unknown; screen: Fn | undefined; data: unknown };
-type Last = { core: object; fields: string; items: Record<string, unknown>[]; byId: Map<string, Item> };
+/**
+ * raw 는 보인 값(받은 값 또는 자리를 채운 값)의 select 전 D, screen 은 그때 쓴 화면 select, data 는 거친 결과.
+ * filled 는 자리를 채웠을 때 그때 쓴 화면 placeholderData 를 담는다 — 받은 값이면 undefined
+ */
+type Item = {
+  on: boolean;
+  out: Record<string, unknown>;
+  raw: unknown;
+  screen: Fn | undefined;
+  data: unknown;
+  filled: { with: unknown } | undefined;
+};
+type Last = {
+  core: object;
+  fields: string;
+  items: Record<string, unknown>[];
+  byId: Map<string, Item>;
+  /** 이 스냅숏이 보인 값 — 그려진 뒤 다음 렌더의 prev 가 된다 */
+  visible: Prev<unknown, unknown>[];
+};
+
+/** 자원 → 화면 차례로 구한다. 함수의 셋째 인자는 keepPreviousData 꼴 1 에 목록 꼴인지 알린다 */
+function fill(sources: unknown[], args: unknown, prev: Prev<unknown, unknown>[], list: boolean): unknown {
+  for (const p of sources) {
+    const v = typeof p === "function" ? p(args, prev, list) : p;
+    if (v !== undefined) return v;
+  }
+  return undefined;
+}
 
 export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: object) => unknown {
-  const { cellOf, load, subscribe, idOf, query, auto, select, mutations, names } = core;
-  type Options = { args?: A | readonly A[]; pick?: readonly string[]; omit?: readonly string[]; select?: Fn };
+  const { cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names } = core;
+  type Options = {
+    args?: A | readonly A[];
+    pick?: readonly string[];
+    omit?: readonly string[];
+    select?: Fn;
+    placeholderData?: unknown;
+  };
 
   return function useResource(options?: Options) {
     // 하나 꼴은 길이 1 목록처럼 다루고 마지막에 푼다 — 두 꼴이 같은 훅을 같은 차례로 부른다
@@ -61,6 +95,8 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
     const activeKey = ids.filter((_, i) => active[i]).join("\n");
 
     const last = React.useRef<Last | null>(null);
+    // 바로 전 렌더에 보이던 값 — 고른 칸이 바뀌어도 last 와 달리 버리지 않는다
+    const prevShown = React.useRef<Prev<unknown, unknown>[]>([]);
     const snapshot = () => {
       const prev = last.current?.core === core && last.current.fields === fields.join() ? last.current : null;
       const byId = new Map<string, Item>();
@@ -69,9 +105,20 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         const on = active[i]!;
         const kept = byId.get(id);
         if (kept) return kept.out;
-        const { data: raw, status, error } = on ? cellOf(a).view : IDLE;
+        const { data: got, status, error } = on ? cellOf(a).view : IDLE;
         const before = prev?.byId.get(id);
         const screen = options?.select;
+        // 받은 값이 없으면(받는 중 · 실패) 자리를 채운다. 앞에도 채웠고 화면 placeholderData 가 그대로면 그 값을 쓴다 —
+        // 그려진 뒤 prev 가 바뀌어도 다시 구하지 않아야 새 객체를 짓는 함수가 끝없이 다시 그리지 않는다
+        let raw: unknown = got;
+        let filled: Item["filled"];
+        if (got === undefined) {
+          filled = { with: options?.placeholderData };
+          raw =
+            before?.filled && before.raw !== undefined && before.filled.with === filled.with
+              ? before.raw
+              : fill([placeholderData, filled.with], a, prevShown.current, list);
+        }
         // 자원 select → 화면 select. getSnapshot 은 렌더마다 여러 번 불리므로 받은 값과 화면 select 가 그대로면 앞 결과를 쓴다 —
         // 안 그러면 매번 새 객체를 만드는 select 가 스냅숏을 흔들어 끝없이 다시 그린다. 자원 select 는 core 와 함께 같다
         let data: unknown = raw;
@@ -80,7 +127,7 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
           if (data !== undefined && select) data = select(data as D, a as A);
           if (data !== undefined && screen) data = screen(data, a);
         }
-        const values: Record<string, unknown> = { data, status, error, isPlaceholderData: false };
+        const values: Record<string, unknown> = { data, status, error, isPlaceholderData: filled !== undefined && raw !== undefined };
         const reuse = before?.on === on && fields.every((f) => f === "refetch" || same(before.out[f], values[f]));
         let out = before?.out as Record<string, unknown>;
         if (!reuse) {
@@ -88,18 +135,27 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
           out = {};
           for (const f of fields) out[f] = values[f];
         }
-        byId.set(id, { on, out, raw, screen, data });
+        byId.set(id, { on, out, raw, screen, data, filled });
         return out;
+      });
+      const visible = argsList.flatMap((a, i) => {
+        const raw = byId.get(ids[i]!)!.raw;
+        return raw === undefined ? [] : [{ args: a, data: raw }];
       });
       // 바뀐 항목이 없으면 앞 배열을 그대로 준다 — 다시 그리지 않는다
       if (prev && prev.items.length === items.length && items.every((it, i) => it === prev.items[i])) {
         prev.byId = byId;
+        prev.visible = visible;
         return prev.items;
       }
-      last.current = { core, fields: fields.join(), items, byId };
+      last.current = { core, fields: fields.join(), items, byId, visible };
       return items;
     };
     const items = React.useSyncExternalStore(active.some(Boolean) ? subscribe : subscribeNone, snapshot, snapshot);
+    // 그려진 뒤에야 prev 를 넘긴다 — 한 렌더 안에서 스냅숏이 여러 번 불려도 모두 같은 앞 렌더를 본다
+    React.useEffect(() => {
+      prevShown.current = last.current?.visible ?? [];
+    });
 
     const seen = React.useRef<Set<string> | null>(null);
     React.useEffect(() => {

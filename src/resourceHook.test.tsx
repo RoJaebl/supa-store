@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { createStore, getStore, resetStores } from "./index.js";
-import { createResource, type QueryView } from "./query.js";
+import { createResource, keepPreviousData, type Prev, type QueryView } from "./query.js";
 import { useStore } from "./react.js";
 
 beforeEach(() => resetStores());
@@ -18,8 +18,8 @@ const flush = () => act(async () => {});
 
 /** 부를 때마다 새 약속을 내주고, 시험이 차례대로 풀게 한다 */
 function controlled<T>() {
-  const calls: Array<{ args: any; resolve: (value: T) => void }> = [];
-  const fn = vi.fn((args?: unknown) => new Promise<T>((resolve) => calls.push({ args, resolve })));
+  const calls: Array<{ args: any; resolve: (value: T) => void; reject: (e: Error) => void }> = [];
+  const fn = vi.fn((args?: unknown) => new Promise<T>((resolve, reject) => calls.push({ args, resolve, reject })));
   return { fn, calls };
 }
 const byId = () => {
@@ -72,6 +72,14 @@ it("타입: 자원 select 의 결과가 화면 data 로, 화면 select 의 결�
   expectTypeOf<ReturnType<typeof screen>["data"]>().toEqualTypeOf<number | undefined>();
   const list = () => useStore("api.types.select", { args: ids(1), pick: ["data"], select: (s) => s.length > 0 });
   expectTypeOf<ReturnType<typeof list>>().toEqualTypeOf<Array<{ data: boolean | undefined }>>();
+  const filled = () => useStore("api.types.select", { args: { id: 1 }, placeholderData: keepPreviousData });
+  expectTypeOf<ReturnType<typeof filled>["data"]>().toEqualTypeOf<string | undefined>();
+  // 화면의 자리 채우기는 select 전 모양 D 를 짓는다
+  void (() => useStore("api.types.select", { args: ids(1), placeholderData: (a) => ({ title: `p${a.id}` }) }));
+  void (() =>
+    useStore("api.types.select", { args: { id: 1 }, placeholderData: keepPreviousData((a, p) => p.args.id === a.id) }));
+  // @ts-expect-error 자리를 채우는 값은 select 전 모양이어야 한다
+  void (() => useStore("api.types.select", { args: { id: 1 }, placeholderData: "x" }));
   const got = () => selectResource().getData({ id: 1 });
   expectTypeOf<ReturnType<typeof got>>().toEqualTypeOf<{ title: string } | undefined>();
 });
@@ -315,4 +323,154 @@ it("select: 겉 칸이 매번 새 객체인 결과여도 받은 값이 그대로
   act(() => state(key).setData({ items: [] }, { id: 9 }));
   expect(renders()).toBe(before);
   expect(result.current).toBe(shown);
+});
+
+// ── 자리 채우기 ────────────────────────────────────────
+
+it("자리 채우기: 처음 열면 화면의 지어낸 값을 보이고 isPlaceholderData 가 true", async () => {
+  const { q, key } = byId();
+  const { result } = renderHook(() => view(key, { args: { id: 1 }, placeholderData: 7 }));
+  expect(result.current).toMatchObject({ data: 7, status: "loading", isPlaceholderData: true });
+  expect(state(key).getData({ id: 1 })).toBeUndefined();
+  await act(async () => q.calls[0]!.resolve(10));
+  expect(result.current).toMatchObject({ data: 10, status: "ready", isPlaceholderData: false });
+});
+it("자리 채우기: 자원 함수가 undefined 면 화면 값을 따른다", () => {
+  const key = define(() =>
+    createResource(() => ({ query: (a: { id: number }) => new Promise<number>(() => void a) }), {
+      placeholderData: (a: { id: number }) => (a.id === 1 ? 100 : undefined),
+    }),
+  );
+  const { result } = renderHook(() => view(key, { args: ids(1, 2), pick: ["data"], placeholderData: 5 }));
+  expect(result.current).toEqual([{ data: 100 }, { data: 5 }]);
+});
+it("자리 채우기: 새 args 가 실패해도 채운 값이 남고 status 는 error", async () => {
+  const { q, key } = byId();
+  const { result, rerender } = renderHook(({ id }) => view(key, { args: { id }, placeholderData: keepPreviousData }), {
+    initialProps: { id: 1 },
+  });
+  await act(async () => q.calls[0]!.resolve(10));
+  rerender({ id: 2 });
+  await act(async () => q.calls[1]!.reject(new Error("없다")));
+  expect(result.current).toMatchObject({ data: 10, status: "error", error: "없다", isPlaceholderData: true });
+});
+it("자리 채우기: 화면끼리 영향이 없다 — 한 화면이 채워도 다른 화면 data 는 undefined", () => {
+  const { key } = byId();
+  const filled = renderHook(() => view(key, { args: { id: 1 }, placeholderData: 7 }));
+  const plain = renderHook(() => view(key, { args: { id: 1 } }));
+  expect(filled.result.current.data).toBe(7);
+  expect(plain.result.current).toMatchObject({ data: undefined, isPlaceholderData: false });
+});
+it("keepPreviousData 꼴 1 하나: args 가 무엇으로 바뀌든 앞 값을 잇는다", async () => {
+  const { q, key } = byId();
+  const { result, rerender } = renderHook(({ id }) => view(key, { args: { id }, placeholderData: keepPreviousData }), {
+    initialProps: { id: 1 },
+  });
+  expect(result.current).toMatchObject({ data: undefined, isPlaceholderData: false });
+  await act(async () => q.calls[0]!.resolve(10));
+  rerender({ id: 2 });
+  expect(result.current).toMatchObject({ data: 10, status: "loading", isPlaceholderData: true });
+  rerender({ id: 99 });
+  expect(result.current).toMatchObject({ data: 10, isPlaceholderData: true });
+  await act(async () => q.calls[2]!.resolve(990));
+  expect(result.current).toMatchObject({ data: 990, isPlaceholderData: false });
+});
+it("keepPreviousData 꼴 1 목록: 끼어든 항목은 undefined 이고 옆 값이 밀려오지 않는다", async () => {
+  const { q, key } = byId();
+  const { result, rerender } = renderHook(
+    ({ list }) => view(key, { args: ids(...list), pick: ["data", "isPlaceholderData"], placeholderData: keepPreviousData }),
+    { initialProps: { list: [1, 2] } },
+  );
+  await act(async () => q.calls.forEach((c) => c.resolve(c.args.id * 10)));
+  rerender({ list: [1, 3, 2] });
+  expect(result.current).toEqual([
+    { data: 10, isPlaceholderData: false },
+    { data: undefined, isPlaceholderData: false },
+    { data: 20, isPlaceholderData: false },
+  ]);
+  // 받은 값을 비우면 같은 args 의 앞 값으로 채운다
+  act(() => state(key).setData(undefined, { id: 2 }));
+  expect(result.current[1]).toEqual({ data: undefined, isPlaceholderData: false });
+  expect(result.current[2]).toEqual({ data: 20, isPlaceholderData: true });
+});
+it("keepPreviousData 꼴 2: match 가 참인 앞 항목을 잇는다", async () => {
+  const q = controlled<string>();
+  type Path = { repo: string; path: string };
+  const key = define(() => createResource(() => ({ query: (a: Path) => q.fn(a) })));
+  const sameRepo = keepPreviousData((a: Path, p: { args: Path }) => p.args.repo === a.repo);
+  const at = (repo: string, path: string) => ({ repo, path });
+  const { result, rerender } = renderHook(
+    ({ list }) => view(key, { args: list, pick: ["data", "isPlaceholderData"], placeholderData: sameRepo }),
+    { initialProps: { list: [at("r1", "a"), at("r2", "x")] } },
+  );
+  await act(async () => q.calls.forEach((c) => c.resolve(c.args.path.toUpperCase())));
+  rerender({ list: [at("r2", "y"), at("r1", "b"), at("r3", "z")] });
+  expect(result.current).toEqual([
+    { data: "X", isPlaceholderData: true },
+    { data: "A", isPlaceholderData: true },
+    { data: undefined, isPlaceholderData: false },
+  ]);
+  // 하나 꼴도 같다 — 앞 값이 하나뿐이다
+  const one = renderHook(({ path }) => view(key, { args: at("r1", path), placeholderData: sameRepo }), {
+    initialProps: { path: "a" },
+  });
+  one.rerender({ path: "c" });
+  expect(one.result.current).toMatchObject({ data: "A", isPlaceholderData: true });
+  one.rerender({ path: "x" });
+  expect(one.result.current.isPlaceholderData).toBe(true);
+});
+it("prev 는 보이던 값이다 — A→B→C 로 빠르게 바꾸면 C 는 A 값을 잇는다", async () => {
+  const q = controlled<string>();
+  const key = define(() => createResource(() => ({ query: (a: string) => q.fn(a) })));
+  const seen: Prev<string, string>[][] = [];
+  const keep = (a: string, prev: Prev<string, string>[]) => (seen.push(prev), keepPreviousData(a, prev));
+  const { result, rerender } = renderHook(({ args }) => view(key, { args, placeholderData: keep }), {
+    initialProps: { args: "A" },
+  });
+  await act(async () => q.calls[0]!.resolve("a"));
+  rerender({ args: "B" });
+  rerender({ args: "C" });
+  expect(seen.at(-1)).toEqual([{ args: "B", data: "a" }]);
+  expect(result.current).toMatchObject({ data: "a", isPlaceholderData: true });
+  // B 가 늦게 와도 C 에는 보인 적 없는 B 값이 오지 않는다
+  await act(async () => q.calls[1]!.resolve("b"));
+  expect(result.current).toMatchObject({ data: "a", isPlaceholderData: true });
+  await act(async () => q.calls[2]!.resolve("c"));
+  expect(result.current).toMatchObject({ data: "c", isPlaceholderData: false });
+});
+it("자리를 채운 값에도 자원·화면 select 가 걸린다", () => {
+  const key = define(() =>
+    createResource(() => ({ query: (a: { id: number }) => new Promise<number>(() => void a) }), {
+      select: (d: number) => `r:${d}`,
+    }),
+  );
+  const { result } = renderHook(() =>
+    view(key, { args: ids(1), pick: ["data"], placeholderData: 7, select: (s: string, a: { id: number }) => `${s}@${a.id}` }),
+  );
+  expect(result.current).toEqual([{ data: "r:7@1" }]);
+});
+it("prev 는 select 전 값이고 data 를 고르지 않아도, 고른 칸이 바뀌어도 남는다", async () => {
+  const { q, key } = byId();
+  const seen: Prev<{ id: number }, number>[][] = [];
+  const keep = (a: { id: number }, prev: Prev<{ id: number }, number>[]) => (seen.push(prev), keepPreviousData(a, prev));
+  const { result, rerender } = renderHook(
+    ({ id, pick }) => view(key, { args: { id }, pick, placeholderData: keep, select: (d: number) => `s${d}` }),
+    { initialProps: { id: 1, pick: ["data"] } },
+  );
+  await act(async () => q.calls[0]!.resolve(10));
+  rerender({ id: 2, pick: ["isPlaceholderData"] });
+  expect(result.current).toEqual({ isPlaceholderData: true });
+  expect(seen.at(-1)).toEqual([{ args: { id: 1 }, data: 10 }]);
+  rerender({ id: 3, pick: ["data", "isPlaceholderData"] });
+  expect(result.current).toEqual({ data: "s10", isPlaceholderData: true });
+  expect(seen.at(-1)).toEqual([{ args: { id: 2 }, data: 10 }]);
+});
+it("자리 채우기: 부를 때마다 새 객체를 짓는 함수여도 끝없이 다시 그리지 않는다", async () => {
+  const { key } = byId();
+  const { result, renders } = counted(key, () => ({ args: { id: 1 }, placeholderData: () => ({ list: [] }) }));
+  await flush();
+  expect(result.current).toMatchObject({ data: { list: [] }, isPlaceholderData: true });
+  const before = renders();
+  act(() => state(key).setData(5, { id: 9 }));
+  expect(renders()).toBe(before);
 });
