@@ -43,13 +43,16 @@ export function createEvent<P>(): Event<P> {
 // ── 자원 ──────────────────────────────────────────────
 
 export interface Cache<A, D> {
+  /** args 하나면 값 하나, 배열이면 같은 순서의 값 배열 */
   getData(args?: A): D | undefined;
-  /** 응답이 실어 온 값으로 바로 고친다 — 다시 받지 않는다 */
-  setData(updater: D | ((prev: D | undefined) => D | undefined), args?: A): void;
-  /** 다시 받는다 — args 를 주면 그 칸만, 없으면 받아 둔 칸 모두. 실패는 칸의 error 에 둔다 */
-  invalidate(args?: A): Promise<void>;
-  /** 받아서 칸에 넣고 값을 돌려준다 — 이미 받은 칸이면 그 값을 바로 준다(체인에서 쓴다). 실패하면 던진다 */
+  getData(args: readonly A[]): (D | undefined)[];
+  /** 응답이 실어 온 값으로 바로 고친다 — 다시 받지 않는다. 배열이면 args 마다 updater 를 부른다 */
+  setData(updater: D | ((prev: D | undefined, args: A) => D | undefined), args?: A | readonly A[]): void;
+  /** 다시 받는다 — args 를 주면 그 칸만(배열이면 그 칸들만, 빈 배열은 아무것도 안 함), 없으면 받아 둔 칸 모두. 실패는 칸의 error 에 둔다 */
+  invalidate(args?: A | readonly A[]): Promise<void>;
+  /** 받아서 칸에 넣고 값을 돌려준다 — 이미 받은 칸이면 그 값을 바로 준다(체인에서 쓴다). 실패하면 던진다. 배열이면 하나라도 실패할 때 그 오류로 거절한다 */
   fetch(args?: A): Promise<D>;
+  fetch(args: readonly A[]): Promise<D[]>;
 }
 
 export type Status = "idle" | "loading" | "ready" | "error";
@@ -156,26 +159,35 @@ export function createResource<A = void, D = never, R extends object = object>(
     return request;
   };
 
-  const cache: Cache<A, D> = {
-    getData: (args) => cells.get(idOf(args))?.view.data,
-    setData(updater, args) {
-      const cell = cellOf(args);
-      const data =
-        typeof updater === "function" ? (updater as (prev: D | undefined) => D | undefined)(cell.view.data) : updater;
-      // 차례를 올려 이 앞에 떠난 조회의 늦은 응답이 고친 값을 덮지 못하게 한다
-      cell.seq += 1;
-      // 값을 비우면(받은 적 없는 목록으로 되돌리기) 처음으로 돌린다 — 버린 응답 탓에 loading 에 갇히지 않고 다음에 다시 받는다
-      write(cell, { data, status: data === undefined ? "idle" : "ready", error: null });
-    },
-    async invalidate(args) {
-      const targets = args === undefined ? [...cells.values()] : [cellOf(args)];
-      await Promise.all(targets.filter((c) => c.view.status !== "idle").map((c) => load(c.args, true).catch(noop)));
-    },
-    fetch: (args) => {
-      const cell = cellOf(args);
-      return cell.view.status === "ready" ? Promise.resolve(cell.view.data as D) : load(args);
-    },
+  // 목록은 Array.isArray 로 가른다 — 생성기가 args 자체가 배열인 자원을 막는다
+  const getOne = (args: A | undefined) => cells.get(idOf(args))?.view.data;
+  const setOne = (updater: unknown, args: A | undefined) => {
+    const cell = cellOf(args);
+    const data =
+      typeof updater === "function" ? (updater as (prev: D | undefined, a: A) => D | undefined)(cell.view.data, args as A) : (updater as D);
+    // 차례를 올려 이 앞에 떠난 조회의 늦은 응답이 고친 값을 덮지 못하게 한다
+    cell.seq += 1;
+    // 값을 비우면(받은 적 없는 목록으로 되돌리기) 처음으로 돌린다 — 버린 응답 탓에 loading 에 갇히지 않고 다음에 다시 받는다
+    write(cell, { data, status: data === undefined ? "idle" : "ready", error: null });
   };
+  const reload = (cell: Cell<A, D>) => (cell.view.status === "idle" ? undefined : load(cell.args, true).catch(noop));
+  const fetchOne = (args: A | undefined) => {
+    const cell = cellOf(args);
+    return cell.view.status === "ready" ? Promise.resolve(cell.view.data as D) : load(args);
+  };
+
+  const cache = {
+    getData: (args?: A | readonly A[]) => (Array.isArray(args) ? args.map(getOne) : getOne(args as A | undefined)),
+    setData(updater: unknown, args?: A | readonly A[]) {
+      if (Array.isArray(args)) args.forEach((a) => setOne(updater, a));
+      else setOne(updater, args as A | undefined);
+    },
+    async invalidate(args?: A | readonly A[]) {
+      const targets = args === undefined ? [...cells.values()] : (Array.isArray(args) ? args : [args]).map((a) => cellOf(a));
+      await Promise.all(targets.map(reload));
+    },
+    fetch: (args?: A | readonly A[]) => (Array.isArray(args) ? Promise.all(args.map(fetchOne)) : fetchOne(args as A | undefined)),
+  } as Cache<A, D>;
 
   const defined = define(cache) as Record<string, unknown>;
   const query = defined.query as ((args: A) => Promise<D>) | undefined;

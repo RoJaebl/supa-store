@@ -339,3 +339,44 @@ it("이름: 바꾸기 이름이 data·status·error·refetch 면 지을 때 던�
     expect(() => state(key)).toThrow(name);
   }
 });
+
+// ── Cache 목록 ─────────────────────────────────────────
+
+it("Cache 목록: getData 는 같은 순서의 배열을 준다", async () => {
+  const r = createResource(() => ({ query: async ({ id }: { id: number }) => id * 10 }));
+  await r.fetch({ id: 1 });
+  expect(r.getData([{ id: 1 }, { id: 2 }])).toEqual([10, undefined]);
+  expect(r.getData([])).toEqual([]);
+  expectTypeOf(r.getData([{ id: 1 }])).toEqualTypeOf<(number | undefined)[]>();
+  expectTypeOf(r.fetch([{ id: 1 }])).toEqualTypeOf<Promise<number[]>>();
+});
+
+it("Cache 목록: fetch 는 값 배열을 주고, 하나라도 실패하면 그 오류로 거절한다", async () => {
+  const r = createResource(() => ({
+    query: async ({ id }: { id: number }) => {
+      if (id === 2) throw new Error("둘");
+      return id;
+    },
+  }));
+  await expect(r.fetch([{ id: 1 }, { id: 3 }])).resolves.toEqual([1, 3]);
+  await expect(r.fetch([{ id: 1 }, { id: 2 }])).rejects.toThrow("둘");
+  await expect(r.fetch([])).resolves.toEqual([]);
+});
+
+it("Cache 목록: invalidate([a, b]) 는 그 둘만 다시 받고, invalidate([]) 는 아무것도 하지 않는다", async () => {
+  const query = vi.fn(async ({ id }: { id: number }) => id);
+  const r = createResource(() => ({ query }));
+  await r.fetch([{ id: 1 }, { id: 2 }, { id: 3 }]);
+  query.mockClear();
+  await r.invalidate([{ id: 1 }, { id: 2 }]);
+  expect(query.mock.calls.map(([a]) => a.id).sort()).toEqual([1, 2]);
+  query.mockClear();
+  await r.invalidate([]);
+  expect(query).not.toHaveBeenCalled();
+});
+
+it("Cache 목록: setData 의 updater 는 args 마다 (prev, args) 로 불린다", () => {
+  const r = createResource(() => ({ query: async ({ id }: { id: number }) => id }));
+  r.setData((_prev, args) => args.id + 100, [{ id: 1 }, { id: 2 }]);
+  expect(r.getData([{ id: 1 }, { id: 2 }])).toEqual([101, 102]);
+});
