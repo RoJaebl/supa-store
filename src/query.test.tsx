@@ -49,7 +49,7 @@ it("타입: cache 를 쓰면 (cache: Cache<A, D>) 로 적고, 상태와 화면�
   expectTypeOf(resource).not.toHaveProperty("query");
   // cache 를 쓰지 않으면 적지 않아도 query 에서 추론한다
   const plain = createResource(() => ({ query: async (id: string) => id.length }));
-  expectTypeOf(plain.fetch).parameter(0).toEqualTypeOf<string | undefined>();
+  expectTypeOf(plain.fetch("a")).toEqualTypeOf<Promise<number>>();
   expectTypeOf(plain.getData()).toEqualTypeOf<number | undefined>();
 });
 
