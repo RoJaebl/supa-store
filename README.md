@@ -55,7 +55,7 @@ createStore("api.todos", () =>
     add: async (title: string) => void (await fetch("/api/todos", { method: "POST", body: title })),
   })),
 );
-// useStore("api.todos") → { data, status, error, refetch, add: { mutate, pending, error, data, reset } }
+// useStore("api.todos") → { data, status, error, refetch, add: { mutate, mutateAsync, pending, error, data, reset } }
 
 createStore("event.saved", () => createEvent<{ id: string }>());
 ```
