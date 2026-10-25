@@ -159,6 +159,12 @@ test("객체 args 와 인자 없는 query 는 통과한다", () => {
   assert.doesNotThrow(() => generate(ts, loadConfig(ts, root)));
 });
 
+test("자원의 select 결과 타입이 생성 파일의 상태 타입에 실린다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => createResource(() => ({ query: async () => ({ title: "t" }) }), { select: (d) => d.title.length }));`);
+  generate(ts, loadConfig(ts, root));
+  assert.match(read("src/store.gen.ts"), /Resource<void, \{ title: string; \}, \{ query: \(\) => Promise<\{ title: string; \}>; \}, number>/);
+});
+
 const COMPILER = { strict: true, module: "ESNext", moduleResolution: "Bundler", target: "ES2022", skipLibCheck: true, paths: { "supa-store": [storeIndex] } };
 const DEF = `import { createStore } from "supa-store";
 createStore("state.r.x", () => ({ n: 1 }));`;

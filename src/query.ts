@@ -80,14 +80,17 @@ export type Mutations<R> = { [K in keyof R as K extends "query" ? never : R[K] e
 // & Fn 으로 좁히면 겹친 서명의 마지막인 Fn 이 ReturnType 을 정해 data 가 any 가 된다 — Extract 로 좁힌다
 export type ResourceView<D, R> = QueryView<D> & { [K in keyof Mutations<R>]: MutationView<Extract<Mutations<R>[K], Fn>> };
 type ViewName<D, R> = keyof ResourceView<D, R> & string;
+/** 화면의 select — 자원 select 의 결과(S)를 이어 받는다 */
+type ScreenSelect<A, S> = { select?: (data: S, args: A) => unknown };
 /** 하나 꼴 — 조회 칸과 바꾸기 칸을 고른다 */
-export type ResourceOptions<A, N extends string> =
-  | { args?: A; pick?: readonly N[]; omit?: never }
-  | { args?: A; omit?: readonly N[]; pick?: never };
+export type ResourceOptions<A, N extends string, S = unknown> = ScreenSelect<A, S> &
+  ({ args?: A; pick?: readonly N[]; omit?: never } | { args?: A; omit?: readonly N[]; pick?: never });
 /** 목록 꼴 — 조회 칸만 고른다. 바꾸기는 자원 전체에 하나라 항목에 넣지 않는다 */
-export type ResourceListOptions<A> =
-  | { args: readonly A[]; pick?: readonly QueryField[]; omit?: never }
-  | { args: readonly A[]; omit?: readonly QueryField[]; pick?: never };
+export type ResourceListOptions<A, S = unknown> = ScreenSelect<A, S> &
+  (
+    | { args: readonly A[]; pick?: readonly QueryField[]; omit?: never }
+    | { args: readonly A[]; omit?: readonly QueryField[]; pick?: never }
+  );
 // [O] 로 감싸 유니온에 나눠 걸지 않는다 — ReturnType 이 제약으로 읽으면 다 고른 하나 꼴이 된다
 type Chosen<V, O> = [O] extends [{ pick: readonly (infer N)[] }]
   ? Pick<V, N & keyof V>
@@ -96,16 +99,23 @@ type Chosen<V, O> = [O] extends [{ pick: readonly (infer N)[] }]
     : V;
 export type PickedView<D, R, O> = Chosen<ResourceView<D, R>, O>;
 export type PickedQuery<D, O> = Chosen<QueryView<D>, O>;
-export type ResourceUseOptions<A, D, R> = ResourceOptions<A, ViewName<D, R>> | ResourceListOptions<A> | undefined;
-export type ResourceUseResult<D, R, O> = [O] extends [{ args: readonly unknown[] }]
-  ? PickedQuery<D, O>[]
-  : PickedView<D, R, O>;
+// 아래 셋의 S 는 화면이 받는 data 의 모양이다 — 자원 select 를 거친 값
+export type ResourceUseOptions<A, S, R> =
+  | ResourceOptions<A, ViewName<S, R>, S>
+  | ResourceListOptions<A, S>
+  | undefined;
+/** 화면 select 가 있으면 그 결과가 data 다 */
+type Selected<S, O> = [O] extends [{ select: (...a: any[]) => infer S2 }] ? S2 : S;
+export type ResourceUseResult<S, R, O> = [O] extends [{ args: readonly unknown[] }]
+  ? PickedQuery<Selected<S, O>, O>[]
+  : PickedView<Selected<S, O>, R, O>;
 /** 자원의 꺼내기 — 서명 하나다. 입력이 목록이면 배열을 돌려준다 */
-export interface ResourceUse<A, D, R> {
-  <O extends ResourceUseOptions<A, D, R> = undefined>(options?: O): ResourceUseResult<D, R, O>;
+export interface ResourceUse<A, S, R> {
+  // O 에 기본값을 두지 않는다 — 있으면 TS 가 화면 select 의 인자 타입을 정하려고 O 를 그 기본값에 굳힌다
+  <O extends ResourceUseOptions<A, S, R>>(options?: O): ResourceUseResult<S, R, O>;
 }
-/** store 끼리·시험이 보는 자원의 모양. 화면은 useStore 로 꺼내 ResourceView 를 받는다 */
-export type Resource<A, D, R> = Cache<A, D> & Mutations<R> & { [USE]: ResourceUse<A, D, R> };
+/** store 끼리·시험이 보는 자원의 모양. 캐시는 서버 모양 D, 화면은 useStore 로 꺼내 select 를 거친 S 를 받는다 */
+export type Resource<A, D, R, S = D> = Cache<A, D> & Mutations<R> & { [USE]: ResourceUse<A, S, R> };
 
 const RESERVED = [...QUERY_FIELDS, "fetch", "getData", "setData", "invalidate"];
 
@@ -129,11 +139,13 @@ interface Cell<A, D> {
  * createResource(() => ({ query: async (id: string) => … })) // cache 를 쓰지 않으면 적지 않는다
  * ```
  * 함수는 늘 정의한 객체를 this 로 부른다 — 메서드 꼴은 this.다른함수() 를 쓸 수 있다.
+ *
+ * `select` 는 화면에 줄 때만 바꾼다 — 캐시(getData · setData · fetch)는 서버 모양 그대로다.
  */
-export function createResource<A = void, D = never, R extends object = object>(
+export function createResource<A = void, D = never, R extends object = object, S = D>(
   define: (cache: Cache<A, D>) => R & { query?: (args: A) => Promise<D> },
-  options: { auto?: boolean } = {},
-): Resource<A, D, R> {
+  options: { auto?: boolean; select?: (data: D, args: A) => S } = {},
+): Resource<A, D, R, S> {
   const auto = options.auto ?? true;
   const cells = new Map<string, Cell<A, D>>();
   const listeners = new Set<() => void>();
@@ -218,6 +230,6 @@ export function createResource<A = void, D = never, R extends object = object>(
   }
   const names = Object.keys(mutations);
 
-  const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, mutations, names });
-  return Object.assign(cache, mutations, { [USE]: useResource }) as unknown as Resource<A, D, R>;
+  const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, select: options.select, mutations, names });
+  return Object.assign(cache, mutations, { [USE]: useResource }) as unknown as Resource<A, D, R, S>;
 }

@@ -13,6 +13,8 @@ export interface ResourceCore<A, D> {
   idOf(args: A | undefined): string;
   query: ((args: A) => Promise<D>) | undefined;
   auto: boolean;
+  /** 자원의 select — 화면에 줄 때만 거친다 */
+  select: ((data: D, args: A) => unknown) | undefined;
   mutations: Record<string, Fn>;
   names: string[];
 }
@@ -41,9 +43,10 @@ type Item = { on: boolean; out: Record<string, unknown> };
 type Last = { core: object; fields: string; items: Record<string, unknown>[]; byId: Map<string, Item> };
 
 export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: object) => unknown {
-  const { cellOf, load, subscribe, idOf, query, auto, mutations, names } = core;
+  const { cellOf, load, subscribe, idOf, query, auto, select, mutations, names } = core;
+  type Options = { args?: A | readonly A[]; pick?: readonly string[]; omit?: readonly string[]; select?: Fn };
 
-  return function useResource(options?: { args?: A | readonly A[]; pick?: readonly string[]; omit?: readonly string[] }) {
+  return function useResource(options?: Options) {
     // 하나 꼴은 길이 1 목록처럼 다루고 마지막에 푼다 — 두 꼴이 같은 훅을 같은 차례로 부른다
     const list = Array.isArray(options?.args);
     const argsList = (list ? options!.args : [options?.args]) as (A | undefined)[];
@@ -65,7 +68,11 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         const on = active[i]!;
         const kept = byId.get(id);
         if (kept) return kept.out;
-        const { data, status, error } = on ? cellOf(a).view : IDLE;
+        const { data: raw, status, error } = on ? cellOf(a).view : IDLE;
+        // 자원 select → 화면 select. 렌더마다 새 함수여도 아래 견주기가 결과로 가른다
+        let data: unknown = raw;
+        if (data !== undefined && select) data = select(data as D, a as A);
+        if (data !== undefined && options?.select) data = options.select(data, a);
         const values: Record<string, unknown> = { data, status, error, isPlaceholderData: false };
         const before = prev?.byId.get(id);
         const reuse = before?.on === on && fields.every((f) => f === "refetch" || same(before.out[f], values[f]));

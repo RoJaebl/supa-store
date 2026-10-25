@@ -38,9 +38,14 @@ const listResource = () =>
       return value;
     },
   }));
+const selectResource = () =>
+  createResource(() => ({ query: async (a: { id: number }) => ({ title: `t${a.id}` }) }), {
+    select: (d, a) => `${a.id}:${d.title}`,
+  });
 declare module "./index.js" {
   interface StateTypes {
     "api.types.list": ReturnType<typeof listResource>;
+    "api.types.select": ReturnType<typeof selectResource>;
   }
 }
 it("타입: 목록 꼴은 고른 조회 칸의 배열을, 하나 꼴은 고른 칸을 준다", () => {
@@ -58,6 +63,17 @@ it("타입: 목록 꼴은 고른 조회 칸의 배열을, 하나 꼴은 고른 �
   expectTypeOf<ReturnType<typeof one>>().toEqualTypeOf<Pick<View, "data" | "save">>();
   // @ts-expect-error 목록의 pick 에는 바꾸기 이름을 적지 못한다
   void (() => useStore("api.types.list", { args: ids(1), pick: ["save"] }));
+});
+
+it("타입: 자원 select 의 결과가 화면 data 로, 화면 select 의 결과가 그 위로, getData 는 서버 모양 그대로", () => {
+  const one = () => useStore("api.types.select", { args: { id: 1 } });
+  expectTypeOf<ReturnType<typeof one>["data"]>().toEqualTypeOf<string | undefined>();
+  const screen = () => useStore("api.types.select", { args: { id: 1 }, select: (s, a) => s.length + a.id });
+  expectTypeOf<ReturnType<typeof screen>["data"]>().toEqualTypeOf<number | undefined>();
+  const list = () => useStore("api.types.select", { args: ids(1), pick: ["data"], select: (s) => s.length > 0 });
+  expectTypeOf<ReturnType<typeof list>>().toEqualTypeOf<Array<{ data: boolean | undefined }>>();
+  const got = () => selectResource().getData({ id: 1 });
+  expectTypeOf<ReturnType<typeof got>>().toEqualTypeOf<{ title: string } | undefined>();
 });
 
 // ── 목록 ──────────────────────────────────────────────
@@ -188,4 +204,82 @@ it("pick: 겉 칸을 견주는 것은 배열과 보통 객체뿐 — Date · Map
   act(() => state(key).setData(new Map([[1, 2]])));
   act(() => state(key).setData(new Map([[1, 3]])));
   expect(result.current.data.get(1)).toBe(3);
+});
+
+// ── select ────────────────────────────────────────────
+
+type Post = { title: string; updatedAt: number };
+const posts = (select?: (d: Post) => unknown) => {
+  const key = define(() =>
+    createResource(() => ({ query: async (): Promise<Post> => ({ title: "hi", updatedAt: 0 }) }), { select }),
+  );
+  return key;
+};
+const counted = (key: string, options?: () => object) => {
+  let renders = 0;
+  const hook = renderHook(() => {
+    renders++;
+    return view(key, options?.());
+  });
+  return { ...hook, renders: () => renders };
+};
+
+it("select: 자원의 select 는 화면에만 걸리고 getData 는 서버 모양 그대로다", async () => {
+  const key = posts((d) => d.title.toUpperCase());
+  const { result } = renderHook(() => view(key));
+  await flush();
+  expect(result.current.data).toBe("HI");
+  expect(state(key).getData()).toEqual({ title: "hi", updatedAt: 0 });
+  await expect(state(key).fetch()).resolves.toEqual({ title: "hi", updatedAt: 0 });
+});
+it("select: 화면의 select 는 자원 select 의 결과를 이어 받는다", async () => {
+  const key = posts((s) => s.title.toUpperCase());
+  const { result } = renderHook(() => view(key, { select: (t: string) => `${t}!`.length }));
+  await flush();
+  expect(result.current.data).toBe(3);
+});
+it("select: 결과가 같으면 data 가 새 객체여도 다시 그리지 않는다", async () => {
+  const key = posts((d) => d.title);
+  const { result, renders } = counted(key);
+  await flush();
+  const before = renders();
+  const shown = result.current;
+  act(() => state(key).setData({ title: "hi", updatedAt: 1 }));
+  expect(renders()).toBe(before);
+  expect(result.current).toBe(shown);
+});
+it("select: 객체를 돌려주면 겉 칸이 같을 때 앞 객체를 그대로 준다", async () => {
+  const key = posts((d) => ({ title: d.title }));
+  const { result, renders } = counted(key);
+  await flush();
+  const before = renders();
+  const data = result.current.data;
+  act(() => state(key).setData({ title: "hi", updatedAt: 1 }));
+  expect(renders()).toBe(before);
+  expect(result.current.data).toBe(data);
+  act(() => state(key).setData({ title: "yo", updatedAt: 2 }));
+  expect(result.current.data).toEqual({ title: "yo" });
+});
+it("select: 렌더마다 새 함수를 줘도 결과가 같으면 다시 그리지 않는다", async () => {
+  const key = posts();
+  const { result, renders, rerender } = counted(key, () => ({ select: (d: Post) => ({ title: d.title }) }));
+  await flush();
+  const shown = result.current;
+  rerender();
+  expect(result.current).toBe(shown);
+  const before = renders();
+  act(() => state(key).setData({ title: "hi", updatedAt: 1 }));
+  expect(renders()).toBe(before);
+  expect(result.current).toBe(shown);
+});
+it("select: 목록 꼴에서 항목마다 (data, args) 로 불린다", async () => {
+  const resource = vi.fn((d: number, a: { id: number }) => `${a.id}:${d}`);
+  const key = define(() => createResource(() => ({ query: async (a: { id: number }) => a.id * 10 }), { select: resource }));
+  const { result } = renderHook(() =>
+    view(key, { args: ids(1, 2), pick: ["data"], select: (s: string, a: { id: number }) => `${s}@${a.id}` }),
+  );
+  await flush();
+  expect(result.current).toEqual([{ data: "1:10@1" }, { data: "2:20@2" }]);
+  expect(resource).toHaveBeenCalledWith(10, { id: 1 });
+  expect(resource).toHaveBeenCalledWith(20, { id: 2 });
 });

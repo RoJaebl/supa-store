@@ -17,7 +17,8 @@ type UseFn<K> = Extract<StateOf<K>[typeof USE & keyof StateOf<K>], (...a: any[])
 // 자원은 옵션의 꼴(하나 · 목록)에 따라 돌려주는 타입이 갈린다 — Parameters · ReturnType 은 제네릭 서명을 제약으로만 읽으므로 따로 받는다
 type UseOf<K> = StateOf<K>[typeof USE & keyof StateOf<K>];
 type ResourceKeys = { [K in StateKey]: StateOf<K> extends { [USE]: ResourceUse<any, any, any> } ? K : never }[StateKey];
-type ResourceTypes<K> = UseOf<K> extends ResourceUse<infer A, infer D, infer R> ? [A, D, R] : never;
+// 둘째 자리는 화면이 받는 data — 자원 select 를 거친 S 다
+type ResourceTypes<K> = UseOf<K> extends ResourceUse<infer A, infer S, infer R> ? [A, S, R] : never;
 type Opts = { pick?: readonly string[]; omit?: readonly string[] };
 
 /**
@@ -27,7 +28,7 @@ type Opts = { pick?: readonly string[]; omit?: readonly string[] };
  */
 export function useStore<
   K extends ResourceKeys,
-  O extends ResourceUseOptions<ResourceTypes<K>[0], ResourceTypes<K>[1], ResourceTypes<K>[2]> = undefined,
+  O extends ResourceUseOptions<ResourceTypes<K>[0], ResourceTypes<K>[1], ResourceTypes<K>[2]>,
 >(key: K, options?: O): ResourceUseResult<ResourceTypes<K>[1], ResourceTypes<K>[2], O>;
 export function useStore<K extends UseKeys>(key: K, ...args: Parameters<UseFn<K>>): ReturnType<UseFn<K>>;
 export function useStore<K extends StateKey>(key: K): StateOf<K>;
