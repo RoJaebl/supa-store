@@ -72,6 +72,18 @@ function collect(ts, program, config) {
   const entries = [];
   const broken = [];
   const loose = [];
+  const arrayArgs = [];
+  // query 의 첫 매개변수가 배열·튜플(유니온의 한 갈래 포함)인가 — 읽지 못하면 아니라고 본다
+  const isArrayArgs = (call) => {
+    const fn = call.arguments[0];
+    if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return false;
+    const def = checker.getReturnTypeOfSignature(checker.getSignatureFromDeclaration(fn));
+    const query = def.getProperty("query");
+    const param = query && checker.getTypeOfSymbolAtLocation(query, fn).getCallSignatures()[0]?.parameters[0];
+    if (!param) return false;
+    const type = checker.getTypeOfSymbolAtLocation(param, fn);
+    return (type.isUnion() ? type.types : [type]).some((t) => checker.isArrayType(t) || checker.isTupleType(t));
+  };
   for (const source of program.getSourceFiles()) {
     if (!config.match(source.fileName)) continue;
     // 문법이 깨진 정의는 반환 타입이 any 로 무너진다 — 그것을 쓰면 타입 검사가 조용히 꺼지므로 아예 짓지 않는다
@@ -80,6 +92,9 @@ function collect(ts, program, config) {
       continue;
     }
     const visit = (node) => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "createResource" && isArrayArgs(node)) {
+        arrayArgs.push(posix(source.fileName));
+      }
       if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "createStore") {
         const [key, fn] = node.arguments;
         // 변수·템플릿 key 는 등록부에 실을 수 없다 — 조용히 건너뛰면 타입이 없는 채로 남으므로 실패시킨다
@@ -98,6 +113,7 @@ function collect(ts, program, config) {
   }
   if (broken.length) throw new Error(`정의 파일의 문법이 깨져 생성 파일을 쓰지 않는다: ${broken.join(", ")}`);
   if (loose.length) throw new Error(`${[...new Set(loose)].map((f) => posix(relative(config.root, f))).join(", ")}: createStore 의 key 는 문자열 그대로 쓴다`);
+  if (arrayArgs.length) throw new Error(`${[...new Set(arrayArgs)].map((f) => posix(relative(config.root, f))).join(", ")}: 자원의 args 는 배열로 짓지 않는다 — 여러 값은 객체로 묶는다`);
   return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
