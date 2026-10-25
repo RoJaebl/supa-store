@@ -63,8 +63,10 @@ export interface QueryView<D> {
   refetch(): Promise<void>;
 }
 export interface MutationView<F extends Fn> {
-  /** 실패해도 던지지 않는다 — error 에 문구를 두고 undefined 를 준다 */
-  mutate(...args: Parameters<F>): Promise<Awaited<ReturnType<F>> | undefined>;
+  /** 아무것도 돌려주지 않는다 — 실패는 error 에만 둔다. 결과가 필요하면 mutateAsync */
+  mutate(...args: Parameters<F>): void;
+  /** 결과를 돌려주고 실패하면 원래 오류를 던진다. error·data 칸도 mutate 와 같이 채운다 */
+  mutateAsync(...args: Parameters<F>): Promise<Awaited<ReturnType<F>>>;
   pending: boolean;
   error: string | null;
   data: Awaited<ReturnType<F>> | undefined;
@@ -243,20 +245,25 @@ function useMutation(fn: Fn): MutationView<Fn> {
     data: undefined,
   });
   const seq = React.useRef(0);
+  // 밀린 호출은 칸을 건드리지 않지만 자기 Promise 는 자기 결과로 끝난다
+  const run = async (args: unknown[]) => {
+    const mine = ++seq.current;
+    setState((s) => ({ ...s, pending: true, error: null }));
+    try {
+      const data = await fn(...args);
+      if (mine === seq.current) setState({ pending: false, error: null, data });
+      return data;
+    } catch (e) {
+      if (mine === seq.current) setState((s) => ({ ...s, pending: false, error: message(e) }));
+      throw e;
+    }
+  };
   return {
     ...state,
-    async mutate(...args) {
-      const mine = ++seq.current;
-      setState((s) => ({ ...s, pending: true, error: null }));
-      try {
-        const data = await fn(...args);
-        if (mine === seq.current) setState({ pending: false, error: null, data });
-        return data;
-      } catch (e) {
-        if (mine === seq.current) setState((s) => ({ ...s, pending: false, error: message(e) }));
-        return undefined;
-      }
+    mutate(...args) {
+      run(args).catch(noop);
     },
+    mutateAsync: (...args) => run(args),
     reset() {
       seq.current += 1;
       setState({ pending: false, error: null, data: undefined });

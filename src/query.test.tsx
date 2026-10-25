@@ -73,6 +73,8 @@ it("타입: useStore 로 꺼낸 바꾸기의 data 는 any 가 아니다", () => 
   expectTypeOf<View["add"]["data"]>().not.toBeAny();
   expectTypeOf<View["add"]["data"]>().toEqualTypeOf<number | undefined>();
   expectTypeOf<View["data"]>().toEqualTypeOf<number[] | undefined>();
+  expectTypeOf<View["add"]["mutateAsync"]>().returns.resolves.toEqualTypeOf<number>();
+  expectTypeOf<View["add"]["mutate"]>().returns.toEqualTypeOf<void>();
 });
 
 // ── event ─────────────────────────────────────────────
@@ -269,21 +271,76 @@ it("바꾸기: 진행·오류·결과는 부른 화면의 것이다", async () =
   act(() => one.result.current.save.reset());
   expect(one.result.current.save.data).toBeUndefined();
 });
-it("바꾸기: mutate 는 실패해도 던지지 않고 error 를 둔다", async () => {
+it("바꾸기: mutate 는 아무것도 돌려주지 않고, 실패는 error 칸에만 둔다", async () => {
   const key = define(() =>
     createResource(() => ({
-      save: async () => {
-        throw new Error("저장하지 못했다");
+      save: async (_x: number) => {
+        throw new Error("실패");
       },
     })),
   );
   const { result } = renderHook(() => view(key));
-  let out: unknown = "unset";
-  await act(async () => {
-    out = await result.current.save.mutate();
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown) => unhandled.push(e);
+  const proc = (globalThis as any).process; // 시험 환경에는 node 타입이 없다
+  proc.on("unhandledRejection", onUnhandled);
+  try {
+    let out: unknown = "unset";
+    await act(async () => {
+      out = result.current.save.mutate(1);
+    });
+    await new Promise((r) => setTimeout(r, 0)); // 처리되지 않은 거절은 한 틱 뒤에 보고된다
+    expect(out).toBeUndefined();
+    expect(result.current.save).toMatchObject({ pending: false, error: "실패" });
+    expect(unhandled).toEqual([]);
+  } finally {
+    proc.off("unhandledRejection", onUnhandled);
+  }
+});
+it("바꾸기: mutateAsync 는 결과를 돌려주고 data 칸에도 둔다", async () => {
+  const m = controlled<number>();
+  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
+  const { result } = renderHook(() => view(key));
+  let p!: Promise<number>;
+  act(() => {
+    p = result.current.save.mutateAsync(2);
   });
-  expect(out).toBeUndefined();
-  expect(result.current.save).toMatchObject({ pending: false, error: "저장하지 못했다" });
+  expect(result.current.save.pending).toBe(true);
+  await act(async () => m.calls[0]!.d.resolve(20));
+  expect(await p).toBe(20);
+  expect(result.current.save).toMatchObject({ pending: false, data: 20, error: null });
+});
+it("바꾸기: mutateAsync 는 실패하면 원래 오류 객체를 던지고 error 칸에 문구를 둔다", async () => {
+  const e = new Error("x");
+  const key = define(() =>
+    createResource(() => ({
+      save: async () => {
+        throw e;
+      },
+    })),
+  );
+  const { result } = renderHook(() => view(key));
+  let p!: Promise<unknown>;
+  act(() => {
+    p = result.current.save.mutateAsync();
+  });
+  await expect(p).rejects.toBe(e);
+  await flush();
+  expect(result.current.save).toMatchObject({ pending: false, error: "x" });
+});
+it("바꾸기: 뒤 요청에 밀린 mutateAsync 도 자기 결과를 돌려주지만 칸은 덮지 않는다", async () => {
+  const m = controlled<string>();
+  const key = define(() => createResource(() => ({ go: (x: string) => m.fn(x) })));
+  const { result } = renderHook(() => view(key));
+  let first!: Promise<string>;
+  act(() => {
+    first = result.current.go.mutateAsync("첫째");
+  });
+  act(() => void result.current.go.mutateAsync("둘째"));
+  await act(async () => m.calls[1]!.d.resolve("둘째"));
+  await act(async () => m.calls[0]!.d.resolve("첫째"));
+  expect(await first).toBe("첫째");
+  expect(result.current.go).toMatchObject({ pending: false, data: "둘째" });
 });
 it("바꾸기: 화면 안에서 늦게 온 응답은 버린다", async () => {
   const m = controlled<string>();
@@ -329,7 +386,7 @@ it("this: 메서드 꼴은 this.다른함수() 를 부를 수 있고, 화살표 
   const { result } = renderHook(() => view(key));
   let out: unknown;
   await act(async () => {
-    out = await result.current.quad.mutate(2);
+    out = await result.current.quad.mutateAsync(2);
   });
   expect(out).toBe(8);
 });
