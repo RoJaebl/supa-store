@@ -1,7 +1,7 @@
 // 정의 도우미 — 정의 파일은 서버 쪽에서도 평가되므로 "use client" 를 두지 않는다. 훅은 [USE] 안에서만 부른다
-// 서버 층(react-server)의 react 에는 훅 이름이 없다 — 이름으로 가져오면 링크가 깨지므로 이름공간으로 가져온다
-import * as React from "react";
+// 훅은 resourceHook.ts 에 산다 — 서버 층에서도 링크가 깨지지 않게 React 를 이름공간으로 가져온다
 import { USE } from "./index.js";
+import { IDLE, makeResourceHook, message, noop, QUERY_FIELDS } from "./resourceHook.js";
 
 type Fn = (...args: any[]) => any;
 
@@ -60,8 +60,11 @@ export interface QueryView<D> {
   data: D | undefined;
   status: Status;
   error: string | null;
+  /** 자리를 채운 값이면 true — 이 판에서는 늘 false 다 */
+  isPlaceholderData: boolean;
   refetch(): Promise<void>;
 }
+export type QueryField = "data" | "status" | "error" | "isPlaceholderData" | "refetch";
 export interface MutationView<F extends Fn> {
   /** 아무것도 돌려주지 않는다 — 실패는 error 에만 둔다. 결과가 필요하면 mutateAsync */
   mutate(...args: Parameters<F>): void;
@@ -77,14 +80,33 @@ export type Mutations<R> = { [K in keyof R as K extends "query" ? never : R[K] e
 // & Fn 으로 좁히면 겹친 서명의 마지막인 Fn 이 ReturnType 을 정해 data 가 any 가 된다 — Extract 로 좁힌다
 export type ResourceView<D, R> = QueryView<D> & { [K in keyof Mutations<R>]: MutationView<Extract<Mutations<R>[K], Fn>> };
 type ViewName<D, R> = keyof ResourceView<D, R> & string;
+/** 하나 꼴 — 조회 칸과 바꾸기 칸을 고른다 */
 export type ResourceOptions<A, N extends string> =
   | { args?: A; pick?: readonly N[]; omit?: never }
   | { args?: A; omit?: readonly N[]; pick?: never };
+/** 목록 꼴 — 조회 칸만 고른다. 바꾸기는 자원 전체에 하나라 항목에 넣지 않는다 */
+export type ResourceListOptions<A> =
+  | { args: readonly A[]; pick?: readonly QueryField[]; omit?: never }
+  | { args: readonly A[]; omit?: readonly QueryField[]; pick?: never };
+// [O] 로 감싸 유니온에 나눠 걸지 않는다 — ReturnType 이 제약으로 읽으면 다 고른 하나 꼴이 된다
+type Chosen<V, O> = [O] extends [{ pick: readonly (infer N)[] }]
+  ? Pick<V, N & keyof V>
+  : [O] extends [{ omit: readonly (infer N)[] }]
+    ? Omit<V, N & keyof V>
+    : V;
+export type PickedView<D, R, O> = Chosen<ResourceView<D, R>, O>;
+export type PickedQuery<D, O> = Chosen<QueryView<D>, O>;
+export type ResourceUseOptions<A, D, R> = ResourceOptions<A, ViewName<D, R>> | ResourceListOptions<A> | undefined;
+export type ResourceUseResult<D, R, O> = [O] extends [{ args: readonly unknown[] }]
+  ? PickedQuery<D, O>[]
+  : PickedView<D, R, O>;
+/** 자원의 꺼내기 — 서명 하나다. 입력이 목록이면 배열을 돌려준다 */
+export interface ResourceUse<A, D, R> {
+  <O extends ResourceUseOptions<A, D, R> = undefined>(options?: O): ResourceUseResult<D, R, O>;
+}
 /** store 끼리·시험이 보는 자원의 모양. 화면은 useStore 로 꺼내 ResourceView 를 받는다 */
-export type Resource<A, D, R> = Cache<A, D> &
-  Mutations<R> & { [USE]: (options?: ResourceOptions<A, ViewName<D, R>>) => ResourceView<D, R> };
+export type Resource<A, D, R> = Cache<A, D> & Mutations<R> & { [USE]: ResourceUse<A, D, R> };
 
-const QUERY_FIELDS = ["data", "status", "error", "refetch"];
 const RESERVED = [...QUERY_FIELDS, "fetch", "getData", "setData", "invalidate"];
 
 interface Cell<A, D> {
@@ -94,11 +116,6 @@ interface Cell<A, D> {
   seq: number;
   inflight?: Promise<D>;
 }
-
-const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const noop = () => {};
-const IDLE = { data: undefined, status: "idle" as Status, error: null };
-const subscribeNone = () => noop;
 
 /**
  * 자원 하나를 정의한다. `query` 가 조회 하나이고, 나머지 함수가 모두 바꾸기다.
@@ -201,72 +218,6 @@ export function createResource<A = void, D = never, R extends object = object>(
   }
   const names = Object.keys(mutations);
 
-  function useResource(opts?: { args?: A; pick?: readonly string[]; omit?: readonly string[] }) {
-    const args = opts?.args;
-    const shown = opts?.pick ?? [...QUERY_FIELDS, ...names].filter((n) => !opts?.omit?.includes(n));
-    // 조회 칸을 하나도 고르지 않았거나, 인자가 필요한데 없으면 조회를 시작하지도 구독하지도 않는다
-    const active =
-      query !== undefined && shown.some((n) => QUERY_FIELDS.includes(n)) && !(query.length > 0 && args === undefined);
-    const id = idOf(args);
-    const snapshot = () => (active ? cellOf(args).view : IDLE);
-    const view = React.useSyncExternalStore(active ? subscribe : subscribeNone, snapshot, snapshot);
-
-    const seen = React.useRef<string | null>(null);
-    React.useEffect(() => {
-      if (!active || !auto) return;
-      // 이 화면이 다른 칸에서 넘어왔으면(A→B→A) 진행 중인 앞 요청을 나눠 쓰지 않고 새로 받는다
-      const moved = seen.current !== null && seen.current !== id;
-      seen.current = id;
-      const cell = cellOf(args);
-      if (cell.view.status === "ready" || (cell.inflight && !moved)) return;
-      load(args, moved).catch(noop);
-      // 자원을 다시 지으면 cache 가 새 객체다 — 새 칸은 idle 이므로 다시 받는다
-    }, [active, id, cache]);
-
-    const out: Record<string, unknown> = {
-      ...view,
-      refetch: () => (active ? load(args).then(noop, noop) : Promise.resolve()),
-    };
-    // 바꾸기마다 훅을 정해진 차례로 부른다 — 고르기와 상관없이 훅 순서가 같다
-    for (const name of names) out[name] = useMutation(mutations[name]!);
-    const picked: Record<string, unknown> = {};
-    for (const name of shown) picked[name] = out[name];
-    return picked;
-  }
-
+  const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, mutations, names });
   return Object.assign(cache, mutations, { [USE]: useResource }) as unknown as Resource<A, D, R>;
-}
-
-/** 바꾸기 하나의 화면별 상태. 화면 안에서 요청 차례를 세어 늦게 온 응답을 버린다 */
-function useMutation(fn: Fn): MutationView<Fn> {
-  const [state, setState] = React.useState<{ pending: boolean; error: string | null; data: unknown }>({
-    pending: false,
-    error: null,
-    data: undefined,
-  });
-  const seq = React.useRef(0);
-  // 밀린 호출은 칸을 건드리지 않지만 자기 Promise 는 자기 결과로 끝난다
-  const run = async (args: unknown[]) => {
-    const mine = ++seq.current;
-    setState((s) => ({ ...s, pending: true, error: null }));
-    try {
-      const data = await fn(...args);
-      if (mine === seq.current) setState({ pending: false, error: null, data });
-      return data;
-    } catch (e) {
-      if (mine === seq.current) setState((s) => ({ ...s, pending: false, error: message(e) }));
-      throw e;
-    }
-  };
-  return {
-    ...state,
-    mutate(...args) {
-      run(args).catch(noop);
-    },
-    mutateAsync: (...args) => run(args),
-    reset() {
-      seq.current += 1;
-      setState({ pending: false, error: null, data: undefined });
-    },
-  };
 }
