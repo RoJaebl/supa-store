@@ -474,3 +474,38 @@ it("자리 채우기: 부를 때마다 새 객체를 짓는 함수여도 끝없�
   act(() => state(key).setData(5, { id: 9 }));
   expect(renders()).toBe(before);
 });
+
+// ── 리뷰 고침 ──────────────────────────────────────────
+
+it("자리 채우기: 받지 않는 항목(조회 칸을 고르지 않음 · args 없음)에는 자리 채우기 함수를 부르지 않는다", () => {
+  const placeholderData = vi.fn((a: { repo: string }) => [a.repo]);
+  const key = define(() =>
+    createResource(() => ({ query: (a: { repo: string }) => new Promise<string[]>(() => void a), save: async () => 1 }), {
+      placeholderData,
+    }),
+  );
+  expect(() => renderHook(() => view(key, { pick: ["save"] }))).not.toThrow();
+  const { result } = renderHook(() => view(key));
+  expect(result.current).toMatchObject({ data: undefined, status: "idle", isPlaceholderData: false });
+  expect(placeholderData).not.toHaveBeenCalled();
+});
+it("자리 채우기: 하나 꼴의 prev 는 길이 0 또는 1 이다 — 목록 꼴에서 넘어와도", async () => {
+  const { q, key } = byId();
+  const seen: number[] = [];
+  const placeholderData = (_a: unknown, prev: Prev<unknown, unknown>[]) => void seen.push(prev.length);
+  const { rerender } = renderHook(({ args }) => view(key, { args, placeholderData }), {
+    initialProps: { args: ids(1, 2) as unknown },
+  });
+  await act(async () => q.calls.forEach((c) => c.resolve(c.args.id)));
+  seen.length = 0;
+  rerender({ args: { id: 3 } });
+  expect(seen.length).toBeGreaterThan(0);
+  expect(Math.max(...seen)).toBe(1);
+});
+it("목록: 목록에 새로 든 args 는 다른 화면이 받는 중인 요청을 나눠 쓴다", async () => {
+  const { q, key } = byId();
+  renderHook(() => view(key, { args: { id: 2 } }));
+  const { rerender } = renderHook(({ list }) => view(key, { args: ids(...list) }), { initialProps: { list: [1] } });
+  rerender({ list: [1, 2] });
+  expect(q.calls.map((c) => c.args.id)).toEqual([2, 1]);
+});

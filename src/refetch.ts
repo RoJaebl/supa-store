@@ -17,7 +17,14 @@ interface Watched<A> {
   due: boolean;
 }
 
-export const valueOf = <A>(v: RefetchInterval<A> | undefined, args: A) => (typeof v === "function" ? v(args) : v);
+/** 함수가 던지면 그 args 는 간격을 정하지 않은 것으로 본다 — 받기가 끝난 자리에서 불려 성공을 거절로 바꾸지 않게 */
+export const valueOf = <A>(v: RefetchInterval<A> | undefined, args: A) => {
+  try {
+    return typeof v === "function" ? v(args) : v;
+  } catch {
+    return undefined;
+  }
+};
 const hidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
 
 export function createRefetcher<A>(core: {
@@ -89,6 +96,12 @@ export function createRefetcher<A>(core: {
         watched.delete(id);
         if (watched.size === 0 && typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible);
       };
+    },
+    /** 화면 간격이 바뀌었다 — 세던 때(from)는 그대로 두고 지금 값으로 다시 건다. 없으면 타이머만 걷힌다 */
+    rearm(args: A): void {
+      const id = core.idOf(args);
+      const w = watched.get(id);
+      if (w) arm(id, w);
     },
     /** 그 args 의 받기가 끝났다(어디서 받았든) — 늘린 정도를 고치고 끝난 때부터 다시 센다 */
     settled(args: A, ok: boolean): void {

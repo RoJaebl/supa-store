@@ -151,6 +151,20 @@ test("감싼 createResource 도 본다", () => {
   write("src/a.state.ts", `${RES}createStore("a", () => { const r = createResource(() => ({ query: async (ids: string[]) => ids })); return { r }; });`);
   assert.throws(() => generate(ts, loadConfig(ts, root)), ARRAY_ARGS);
 });
+test("TypeScript 가 isArrayType · isTupleType 을 내주지 않으면 배열 검사를 건너뛴다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => createResource(() => ({ query: async (ids: string[]) => ids })));`);
+  // 옛 TypeScript 를 흉내 낸다 — 검사기에서 두 함수를 뺀다
+  const old = {
+    ...ts,
+    createProgram: (...a) => {
+      const program = ts.createProgram(...a);
+      const checker = program.getTypeChecker();
+      const bare = new Proxy(checker, { get: (t, k) => (k === "isArrayType" || k === "isTupleType" ? undefined : t[k]) });
+      return new Proxy(program, { get: (t, k) => (k === "getTypeChecker" ? () => bare : t[k]) });
+    },
+  };
+  assert.doesNotThrow(() => generate(old, loadConfig(ts, root)));
+});
 test("객체 args 와 인자 없는 query 는 통과한다", () => {
   write("src/a.state.ts", `${RES}createStore("a", () => ({
   r: createResource(() => ({ query: async ({ from, to }: { from: number; to: number }) => from + to })),

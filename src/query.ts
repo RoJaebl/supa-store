@@ -275,7 +275,7 @@ export function createResource<A = void, D = never, R extends object = object, S
   const names = Object.keys(mutations);
 
   const { select, placeholderData } = options;
-  const watch = refetcher.watch;
-  const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names, watch });
+  const { watch, rearm } = refetcher;
+  const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names, watch, rearm });
   return Object.assign(cache, mutations, { [USE]: useResource }) as unknown as Resource<A, D, R, S>;
 }

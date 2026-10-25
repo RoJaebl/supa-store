@@ -22,6 +22,8 @@ export interface ResourceCore<A, D> {
   names: string[];
   /** 화면이 args 를 보기 시작한다(주기 받기) — 풀기 함수를 돌려준다 */
   watch(args: A | undefined, screen: RefetchInterval<A | undefined>): () => void;
+  /** 화면 간격이 바뀌었다 — 그 args 의 타이머를 지금 값으로 다시 건다 */
+  rearm(args: A | undefined): void;
 }
 
 export const QUERY_FIELDS = ["data", "status", "error", "isPlaceholderData", "refetch"];
@@ -75,7 +77,7 @@ function fill(sources: unknown[], args: unknown, prev: Prev<unknown, unknown>[],
 }
 
 export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: object) => unknown {
-  const { cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names, watch } = core;
+  const { cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names, watch, rearm } = core;
   type Options = {
     args?: A | readonly A[];
     pick?: readonly string[];
@@ -112,16 +114,16 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         const { data: got, status, error } = on ? cellOf(a).view : IDLE;
         const before = prev?.byId.get(id);
         const screen = options?.select;
-        // 받은 값이 없으면(받는 중 · 실패) 자리를 채운다. 앞에도 채웠고 화면 placeholderData 가 그대로면 그 값을 쓴다 —
+        // 받는 항목이 받은 값이 없으면(받는 중 · 실패) 자리를 채운다. 앞에도 채웠고 화면 placeholderData 가 그대로면 그 값을 쓴다 —
         // 그려진 뒤 prev 가 바뀌어도 다시 구하지 않아야 새 객체를 짓는 함수가 끝없이 다시 그리지 않는다
         let raw: unknown = got;
         let filled: Item["filled"];
-        if (got === undefined) {
+        if (got === undefined && on) {
           filled = { with: options?.placeholderData };
           raw =
             before?.filled && before.raw !== undefined && before.filled.with === filled.with
               ? before.raw
-              : fill([placeholderData, filled.with], a, prevShown.current, list);
+              : fill([placeholderData, filled.with], a, list ? prevShown.current : prevShown.current.slice(0, 1), list);
         }
         // 자원 select → 화면 select. getSnapshot 은 렌더마다 여러 번 불리므로 받은 값과 화면 select 가 그대로면 앞 결과를 쓴다 —
         // 안 그러면 매번 새 객체를 만드는 select 가 스냅숏을 흔들어 끝없이 다시 그린다. 자원 select 는 core 와 함께 같다
@@ -175,7 +177,8 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         const id = ids[i]!;
         if (!active[i] || done.has(id)) return;
         done.add(id);
-        const moved = before !== null && !before.has(id);
+        // 하나 꼴의 args 가 바뀐 것만 넘어온 것이다 — 목록에 새로 든 args 는 남이 받는 중인 요청을 나눠 쓴다
+        const moved = !list && before !== null && !before.has(id);
         const cell = cellOf(a);
         if (cell.view.status === "ready" || (cell.inflight && !moved)) return;
         load(a, moved).catch(noop);
@@ -201,6 +204,14 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         map.clear();
       };
     }, [core]);
+    // args 는 그대로이고 화면 간격만 바뀌면 다시 건다 — 위 효과는 args 가 바뀔 때만 돈다
+    const intervalKey = argsList.map((a, i) => (active[i] ? `${ids[i]}=${valueOf(options?.refetchInterval, a)}` : "")).join("\n");
+    const armed = React.useRef(intervalKey);
+    React.useEffect(() => {
+      if (armed.current === intervalKey) return;
+      armed.current = intervalKey;
+      argsList.forEach((a, i) => active[i] && rearm(a));
+    }, [intervalKey]);
 
     // 바꾸기마다 훅을 정해진 차례로 부른다 — 꼴 · 고르기와 상관없이 훅 순서가 같다
     const views: Record<string, unknown> = {};

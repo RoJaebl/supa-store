@@ -75,6 +75,8 @@ function collect(ts, program, config) {
   const arrayArgs = [];
   // query 의 첫 매개변수가 배열·튜플(유니온의 한 갈래 포함)인가 — 읽지 못하면 아니라고 본다
   const isArrayArgs = (call) => {
+    // 옛 TypeScript 는 두 검사 함수를 내주지 않는다 — 읽지 못하면 건너뛴다
+    if (typeof checker.isArrayType !== "function" || typeof checker.isTupleType !== "function") return false;
     const fn = call.arguments[0];
     if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return false;
     const def = checker.getReturnTypeOfSignature(checker.getSignatureFromDeclaration(fn));

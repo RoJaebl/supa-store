@@ -236,3 +236,46 @@ it("주기: 서버에서 그릴 때는 타이머를 걸지 않는다", () => {
   expect(vi.getTimerCount()).toBe(0);
   expect(at).toHaveLength(0);
 });
+
+it("주기: args 는 그대로이고 화면 간격만 false → 숫자로 바뀌어도 타이머를 건다", async () => {
+  const { key, at } = counted();
+  const { rerender } = renderHook(({ ms }) => view(key, { refetchInterval: ms }), {
+    initialProps: { ms: false as number | false },
+  });
+  await flush();
+  expect(at).toEqual([0]);
+  await tick(2_000);
+  rerender({ ms: 1_000 });
+  // 받기가 끝난 때부터 센다 — 이미 지났으므로 곧바로
+  await flush();
+  expect(at).toEqual([0, 2_000]);
+  await tick(1_000);
+  expect(at).toEqual([0, 2_000, 3_000]);
+});
+
+it("주기: 화면 간격이 숫자 → false 로 바뀌면 걸린 타이머를 걷고 더 받지 않는다", async () => {
+  const { key, at } = counted();
+  const { rerender } = renderHook(({ ms }) => view(key, { refetchInterval: ms }), {
+    initialProps: { ms: 1_000 as number | false },
+  });
+  await flush();
+  await tick(500);
+  rerender({ ms: false });
+  await flush();
+  expect(vi.getTimerCount()).toBe(0);
+  await tick(5_000);
+  expect(at).toEqual([0]);
+});
+
+it("주기: 간격 함수가 던지면 그 args 는 간격이 없는 것으로 보고 받은 값은 그대로 준다", async () => {
+  const { key, at } = counted({
+    refetchInterval: () => {
+      throw new Error("간격");
+    },
+  });
+  const { result } = renderHook(() => view(key));
+  await flush();
+  expect(result.current).toMatchObject({ data: 1, status: "ready" });
+  await tick(5_000);
+  expect(at).toEqual([0]);
+});
