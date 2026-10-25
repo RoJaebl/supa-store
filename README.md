@@ -62,7 +62,7 @@ createStore("event.saved", () => createEvent<{ id: string }>());
 
 ## 자원 더 쓰기
 
-아래 예는 이 자원을 쓴다. 화면 옵션(`args` · `pick` · `select` · `placeholderData` · `refetchInterval`)은 자원 정의에도 같은 이름으로 적을 수 있다.
+아래 예는 이 자원을 쓴다. 자원 정의의 둘째 인자에는 `auto` · `select` · `placeholderData` · `refetchInterval` 을 적는다. 뒤의 셋은 화면 옵션에도 같은 이름으로 있다.
 
 ```ts
 createStore("api.file.dirLevel", () =>
@@ -112,6 +112,7 @@ useStore("api.file.dirLevel", { args, refetchInterval: (a) => (a.dir === "" ? 10
 - 타이머는 `args` 하나에 하나다. 그 `args` 를 보는 화면이 있는 동안만 돌고, 받기가 끝난 때부터 간격을 센다.
 - 창이 가려지면(`document.visibilityState === "hidden"`) 멈추고, 다시 보일 때 간격이 지났으면 곧바로 한 번 받는다.
 - 실패하면 간격을 두 배씩 늘려 기본 간격의 8배까지 간다. 한 번 성공하면 기본 간격으로 돌아온다.
+- 주기 받기도 받는 동안 `status` 를 `"loading"` 으로 바꾸고 `data` 는 그대로 둔다. `status` 에 스피너를 걸면 주기마다 깜박이므로 `data` 가 있는지로 가른다.
 - 서버 렌더에서는 타이머를 걸지 않는다. `auto: false` 인 자원도 간격이 정해진 `args` 는 주기로 받는다.
 
 ### 자리 채우기
@@ -159,6 +160,8 @@ useStore("api.todos", { select: (titles) => titles.length });                   
 | `onMutate` 낙관적 갱신 · `useInfiniteQuery` | 바꾸기 함수 안에서 `getData` · `setData` |
 
 ```ts
+import type { Cache } from "supa-store/query";
+
 // 캐시를 직접 읽고 쓴다 — store 안에서는 ctx, 밖에서는 getStore
 ctx("api.settings").getData();
 ctx("api.settings").setData((prev) => ({ ...prev!, theme: "dark" }));
