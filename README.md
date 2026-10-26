@@ -10,6 +10,19 @@ npm i supa-store
 
 `typescript >=5.4` 가 필요하다. `react >=18`, `vite`, `next` 는 쓰는 것만 있으면 된다.
 
+npm 판 대신 GitHub 의 커밋을 바로 쓸 수도 있다. 설치할 때 `prepare` 가 `dist/` 를 짓는다. pnpm 이면 그 빌드를 허락한다.
+
+```jsonc
+// package.json
+"supa-store": "github:RoJaebl/supa-store#<커밋>"
+```
+
+```yaml
+# pnpm-workspace.yaml
+allowBuilds:
+  supa-store: true
+```
+
 ## 시작 절차
 
 두 줄이면 된다.
