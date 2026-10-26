@@ -1,6 +1,6 @@
 {
   "name": "supa-store",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/RoJaebl/supa-store.git" },
   "packageManager": "pnpm@11.18.0",
@@ -14,6 +14,7 @@
     "./react": { "types": "./dist/react.d.ts", "default": "./dist/react.js" },
     "./query": { "types": "./dist/query.d.ts", "default": "./dist/query.js" },
     "./stream": { "types": "./dist/stream/index.d.ts", "default": "./dist/stream/index.js" },
+    "./rpc": { "types": "./dist/rpc/index.d.ts", "default": "./dist/rpc/index.js" },
     "./server": { "types": "./dist/server/index.d.ts", "default": "./dist/server/index.js" },
     "./server/node": { "types": "./dist/server/node.d.ts", "default": "./dist/server/node.js" },
     "./server/web": { "types": "./dist/server/web.d.ts", "default": "./dist/server/web.js" },

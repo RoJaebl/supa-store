@@ -23,7 +23,7 @@ allowBuilds:
   "supa-store@https://codeload.github.com/RoJaebl/supa-store/tar.gz/<커밋>": true
 ```
 
-커밋을 바꿀 때는 두 자리의 `<커밋>` 을 함께 바꾼다. npm 판이 나오면 `"supa-store": "^0.3.0"` 으로 바꾸고 `allowBuilds` 줄은 지운다.
+커밋을 바꿀 때는 두 자리의 `<커밋>` 을 함께 바꾼다. npm 판이 나오면 `"supa-store": "^0.4.0"` 으로 바꾸고 `allowBuilds` 줄은 지운다.
 
 ## 시작 절차
 
@@ -362,6 +362,82 @@ afterEach(() => disposeStores()); // 열린 연결을 닫는다(store 는 다음
 ```
 
 `disposeStores()` 는 그려져 있는 화면을 다시 그리지 않는다 — 시험의 뒷정리에 쓴다.
+
+## 프로세스와 다른 서버에 붙기(createJsonRpc)
+
+서버 앱이 띄운 프로세스(언어 서버 · MCP 서버)나 다른 서버에 JSON-RPC 2.0 으로 붙고, 상대가 보낸 알림을 값으로 쌓는다. 끊기면 다시 잇고
+`onConnect` 로 상대와 다시 맞춘다. 하위 경로는 `supa-store/rpc` 하나이고 Node 20 이상의 서버 앱 전용이다(`websocket` 은 `ws` 가 있어야 한다).
+브라우저는 이 연결에 직접 붙지 않고 0.3 의 홉을 거친다.
+
+### 정의
+
+값의 타입은 첫째, 상대가 보내는 알림은 둘째, 요청은 셋째, 보낼 알림은 넷째 타입 인자다. 요청과 보낼 알림은 이름마다 `requests` ·
+`notifications` 에 한 칸이 있어야 하고, 빠지면 타입 오류다. 요청 함수는 인자를 하나만 받는다(그것이 `params` 가 된다).
+
+```ts
+import { createStore } from "supa-store";
+import { createJsonRpc, stdio } from "supa-store/rpc";
+
+type Note = { method: "textDocument/publishDiagnostics"; params: PublishDiagnosticsParams };
+type Cmd = {
+  complete: (p: CompletionParams) => CompletionList;
+  definition: (p: DefinitionParams) => Location[];
+};
+
+createStore("infra.lsp", (set, get, ctx) =>
+  createJsonRpc<{ diagnostics: Record<string, Diagnostic[]> }, Note, Cmd, { didChange: DidChangeTextDocumentParams }>({
+    connect: () => stdio(spawn("typescript-language-server", ["--stdio"]), { framing: "content-length" }),
+    onConnect: async (last, rpc) => {
+      await rpc.request("initialize", { processId: process.pid, rootUri, capabilities: {} });
+      rpc.notify("initialized", {});
+      for (const doc of openDocs()) rpc.notify("textDocument/didOpen", { textDocument: doc }); // 처음이든 다시든 지금 문서를 보낸다
+      return last ?? { diagnostics: {} };
+    },
+    reduce: (value, n) => ({ diagnostics: { ...value.diagnostics, [n.params.uri]: n.params.diagnostics } }),
+    requests: {
+      complete: { method: "textDocument/completion", timeout: 5_000 },
+      definition: { method: "textDocument/definition" },
+    },
+    notifications: { didChange: "textDocument/didChange" },
+    handlers: { "workspace/configuration": () => [{}] }, // 상대가 묻는 요청. 없으면 -32601 로 답한다
+    cancel: (id) => ({ method: "$/cancelRequest", params: { id } }), // 응답 지연으로 끝낸 요청을 상대에게 알린다
+  }),
+);
+```
+
+`framing` 은 메시지를 자르는 법이다. `"content-length"` 는 LSP 의 길이 머리, `"ndjson"` 은 한 줄에 메시지 하나(MCP)다.
+`websocket(url, { headers?, maxPayload? })` 는 JSON-RPC 를 말하는 웹소켓 서버에 붙는다. `ws` 가 없으면 그 문구가 `error` 에 실리고 다시 시도한다. 다른 통로는 `Transport` 꼴로 직접 지어 `connect` 가 돌려주면 된다.
+
+store 로 꺼낸 것은 다른 store 가 `ctx` 로 부른다. 화면에서는 쓰지 않는다.
+
+```ts
+createStore("editor.complete", (set, get, ctx) => ({
+  run: (p: CompletionParams) => ctx("infra.lsp").complete(p),
+}));
+```
+
+### store 없이 바로 쓰기
+
+```ts
+// Out 은 위 정의의 알림 보내기 꼴(여기서는 { didChange: DidChangeTextDocumentParams })
+const lsp = createJsonRpc<Value, Note, Cmd, Out>({ /* 위와 같다 */ });
+
+app.post("/complete", async (req, res) => res.json(await lsp.complete(req.body)));
+lsp.subscribe(() => hop.publish("lsp", lsp.view().data)); // 0.3 의 홉으로 브라우저에 보낸다
+process.on("SIGTERM", () => lsp.close());
+```
+
+- 요청 함수는 결과를 돌려주고, 상대가 실패로 답하면 `RpcError`(`message` · `requestId` · `code` · `data`)를 던진다.
+- 준비 전에 부른 요청은 제한 시간 안에서 기다렸다가 부른 순서대로 나간다. 준비 전에 부른 알림은 버리고 `false` 를 돌려준다
+  (처음 열 때도 다시 이을 때도 같다). 상태를 맞추는 일은 `onConnect` 한 곳이 한다.
+- `stdio` 는 닫을 때(`close()`) 표준 입력을 닫고, `killAfter`(기본 2초) 안에 끝나지 않으면 프로세스를 끝낸다.
+  Windows 에서 `shell: true` 로 띄운 래퍼(예: npx.cmd)는 `kill()` 이 래퍼만 끝내 손자 프로세스가 남을 수 있으니 실행 파일을 직접 띄운다.
+- `request` · `notify` · `view` · `subscribe` · `close` 는 이름이 정해져 있어 요청 · 알림 이름으로 쓸 수 없다.
+
+### 전제
+
+store 꼴은 서버 전용 설정 · 등록부에서만 쓴다. `store-gen` 의 생성 파일이 모든 정의 파일을 import 하므로, 화면과 같은 등록부에 두면
+`child_process` 가 브라우저 묶음에 들어간다. 그런 프로젝트는 위의 바로 쓰는 꼴을 쓴다.
 
 ## 생성 파일
 

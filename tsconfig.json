@@ -18,5 +18,5 @@
     "types": []
   },
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/server"]
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/server", "src/rpc"]
 }
