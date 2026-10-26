@@ -4,7 +4,8 @@ import http from "node:http";
 import { connect, type AddressInfo } from "node:net";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ServerMessage } from "../stream/protocol.js";
-import { createStreamServer, type StreamServer } from "./core.js";
+import { WebSocket as WsClient } from "ws";
+import { createStreamServer, type Conn, type StreamServer } from "./core.js";
 import { attachStream } from "./node.js";
 
 const PATH = "/ws/t";
@@ -381,4 +382,75 @@ it("node: origins 를 주면 목록 밖 Origin 의 웹소켓 Upgrade · SSE · P
   expect((await post(http, evil, { t: "ask", ids: [] })).status).toBe(403);
   const ok = await sseOpen(http, { origin: "https://app.example" });
   expect(ok.res.status).toBe(200);
+});
+
+/** 홉에 붙는 Conn 을 붙잡는다 — 닫을 때의 코드 · 까닭과 그때 쌓여 있던 바이트를 적는다 */
+function grab(stream: StreamServer<any, any, any>) {
+  const conns: Conn[] = [];
+  const closes: Array<{ code: number; reason: string; buffered: number }> = [];
+  const attach = stream.attach;
+  stream.attach = (c) => {
+    conns.push(c);
+    const close = c.close;
+    c.close = (code, reason) => {
+      closes.push({ code, reason, buffered: c.buffered!() });
+      close(code, reason);
+    };
+    attach(c);
+  };
+  return { conns, closes };
+}
+
+/** 닫힐 때까지 큰 바뀜을 보낸다 — 한 번마다 이벤트 고리를 한 바퀴 돌려 소켓이 커널로 흘려보내게 한다
+ *  16 KiB × 4000 이 커널 송신 · 수신 버퍼보다 충분히 커야 한다 — 커널이 다 받아 주면 buffered() 가 오르지 않는다 */
+async function flood(stream: StreamServer<any, string, any>, closes: unknown[], big: string) {
+  for (let i = 0; i < 4000 && closes.length === 0; i++) {
+    stream.publish("default", big);
+    await new Promise((r) => setImmediate(r));
+  }
+}
+
+const LIMIT = 64 * 1024;
+const BIG = "x".repeat(16 * 1024);
+
+it("node: SSE 를 읽지 않는 클라이언트는 쌓인 바이트가 maxBuffered 를 넘으면 4000 으로 닫히고, 그때 쌓인 양은 한도 근처다", async () => {
+  const stream = createStreamServer<number, string>({ snapshot: () => 0, maxBuffered: LIMIT });
+  const g = grab(stream);
+  const { http: url } = await serve(stream);
+  const req = http.get(url, { headers: { accept: "text/event-stream" } });
+  cleanup.push(() => req.destroy());
+  const [res] = (await once(req, "response")) as [http.IncomingMessage];
+  res.pause(); // 읽지 않는다
+  await flood(stream, g.closes, BIG);
+  expect(g.closes).toHaveLength(1);
+  expect(g.closes[0]).toMatchObject({ code: 4000, reason: "버퍼가 넘쳤다" });
+  // 보내기 전에 재므로 한도를 넘긴 것은 마지막 프레임 하나만큼까지
+  expect(g.closes[0]!.buffered).toBeGreaterThan(LIMIT);
+  expect(g.closes[0]!.buffered).toBeLessThanOrEqual(LIMIT + BIG.length + 1024);
+  expect(() => g.conns[0]!.buffered!()).not.toThrow();
+});
+
+it("node: 웹소켓을 읽지 않는 클라이언트는 4000 으로 닫히고, 닫힌 뒤 buffered() 도 던지지 않는다", async () => {
+  const stream = createStreamServer<number, string>({ snapshot: () => 0, maxBuffered: LIMIT });
+  const g = grab(stream);
+  const { ws: url } = await serve(stream);
+  const ws = new WsClient(url);
+  cleanup.push(() => ws.terminate());
+  await once(ws, "open");
+  ws.send(JSON.stringify({ t: "hello" }));
+  await once(ws, "message"); // welcome
+  // ws 의 내부 칸 — ws 메이저가 바뀌면 손본다
+  const sock = (ws as unknown as { _socket: import("node:net").Socket })._socket;
+  sock.pause(); // 읽지 않는다
+  await flood(stream, g.closes, BIG);
+  expect(g.closes).toHaveLength(1);
+  expect(g.closes[0]).toMatchObject({ code: 4000, reason: "버퍼가 넘쳤다" });
+  expect(g.closes[0]!.buffered).toBeGreaterThan(LIMIT);
+  // 다시 읽으면 쌓인 것을 다 받은 뒤 4000 닫기가 닿는다
+  const closed = once(ws, "close") as Promise<[number, Buffer]>;
+  sock.resume();
+  const [code, reason] = await closed;
+  expect(code).toBe(4000);
+  expect(String(reason)).toBe("버퍼가 넘쳤다");
+  expect(() => g.conns[0]!.buffered!()).not.toThrow();
 });
