@@ -49,8 +49,8 @@ export interface Cache<A, D> {
   /** args 하나면 값 하나, 배열이면 같은 순서의 값 배열 */
   getData(args?: A): D | undefined;
   getData(args: readonly A[]): (D | undefined)[];
-  /** 응답이 실어 온 값으로 바로 고친다 — 다시 받지 않는다. 배열이면 args 마다 updater 를 부른다 */
-  setData(updater: D | ((prev: D | undefined, args: A) => D | undefined), args?: A | readonly A[]): void;
+  /** 응답이 실어 온 값으로 바로 고친다 — 다시 받지 않는다. 배열이면 args 마다 updater 를 부른다. undefined 면 그 칸을 비워 idle 로 */
+  setData(updater: D | undefined | ((prev: D | undefined, args: A) => D | undefined), args?: A | readonly A[]): void;
   /** 다시 받는다 — args 를 주면 그 칸만(배열이면 그 칸들만, 빈 배열은 아무것도 안 함), 없으면 받아 둔 칸 모두. 실패는 칸의 error 에 둔다 */
   invalidate(args?: A | readonly A[]): Promise<void>;
   /** 받아서 칸에 넣고 값을 돌려준다 — 이미 받은 칸이면 그 값을 바로 준다(체인에서 쓴다). 실패하면 던진다. 배열이면 하나라도 실패할 때 그 오류로 거절한다 */
@@ -65,9 +65,11 @@ export interface QueryView<D> {
   error: string | null;
   /** 보이는 data 가 받은 값이 아니라 자리를 채운 값이면 true */
   isPlaceholderData: boolean;
+  /** 그 args 의 요청이 진행 중이면 true — 처음 받을 때도. 값이 있는 동안 다시 받아도 status 는 그대로다 */
+  isFetching: boolean;
   refetch(): Promise<void>;
 }
-export type QueryField = "data" | "status" | "error" | "isPlaceholderData" | "refetch";
+export type QueryField = "data" | "status" | "error" | "isPlaceholderData" | "isFetching" | "refetch";
 export interface MutationView<F extends Fn> {
   /** 아무것도 돌려주지 않는다 — 실패는 error 에만 둔다. 결과가 필요하면 mutateAsync */
   mutate(...args: Parameters<F>): void;
@@ -150,7 +152,7 @@ const RESERVED = [...QUERY_FIELDS, "fetch", "getData", "setData", "invalidate"];
 
 interface Cell<A, D> {
   args: A | undefined;
-  view: { data: D | undefined; status: Status; error: string | null };
+  view: { data: D | undefined; status: Status; error: string | null; isFetching: boolean };
   /** 요청 차례 — 이 차례가 아닌 응답은 버린다 */
   seq: number;
   inflight?: Promise<D>;
@@ -210,23 +212,24 @@ export function createResource<A = void, D = never, R extends object = object, S
     const cell = cellOf(args);
     if (cell.inflight && !force) return cell.inflight;
     const seq = ++cell.seq;
-    write(cell, { status: "loading", error: null });
+    // 받은 값이 있으면 status · error 는 그대로 두고 isFetching 만 켠다
+    write(cell, cell.view.data === undefined ? { status: "loading", error: null, isFetching: true } : { isFetching: true });
     // 실행자는 곧바로 돈다 — query 가 동기로 던져도 거절로 바뀐다
     // 이 칸의 마지막 요청이 끝날 때만 주기에 알린다 — setData 로 응답을 버려도 끝은 알린다
-    const end = (ok: boolean) => {
-      if (cell.inflight !== request) return;
-      cell.inflight = undefined;
-      refetcher.settled(args as A, ok);
+    const end = (ok: boolean, view: Partial<Cell<A, D>["view"]>) => {
+      const last = cell.inflight === request;
+      if (last) cell.inflight = undefined;
+      const next = { ...(cell.seq === seq ? view : {}), ...(last ? { isFetching: false } : {}) };
+      if (Object.keys(next).length) write(cell, next);
+      if (last) refetcher.settled(args as A, ok);
     };
     const request: Promise<D> = new Promise<D>((resolve) => resolve(query!.call(defined, args as A))).then(
       (data) => {
-        if (cell.seq === seq) write(cell, { data, status: "ready" });
-        end(true);
+        end(true, { data, status: "ready", error: null });
         return data;
       },
       (e) => {
-        if (cell.seq === seq) write(cell, { status: "error", error: message(e) });
-        end(false);
+        end(false, { status: "error", error: message(e) });
         throw e;
       },
     );

@@ -89,6 +89,22 @@ it("주기: 간격은 받기가 끝난 때부터 센다", async () => {
   expect(at).toEqual([0, 13_000]);
 });
 
+it("주기: 다시 받는 동안 status 는 ready 그대로이고 isFetching 만 켜졌다 꺼진다", async () => {
+  const key = define(() =>
+    createResource(() => ({ query: () => new Promise<number>((r) => setTimeout(() => r(Date.now()), 1_000)) }), {
+      refetchInterval: 10_000,
+    }),
+  );
+  const { result } = renderHook(() => view(key));
+  expect(result.current).toMatchObject({ status: "loading", isFetching: true });
+  await tick(1_000);
+  expect(result.current).toMatchObject({ data: 1_000, status: "ready", isFetching: false });
+  await tick(10_000);
+  expect(result.current).toMatchObject({ data: 1_000, status: "ready", isFetching: true });
+  await tick(1_000);
+  expect(result.current).toMatchObject({ data: 12_000, status: "ready", isFetching: false });
+});
+
 it("주기: 마지막 화면이 떠나면 멈추고, 받는 중에 떠나면 끝나도 다시 걸지 않는다", async () => {
   const { key, at } = counted({ refetchInterval: 1_000 });
   const a = renderHook(() => view(key));

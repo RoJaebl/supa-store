@@ -4,7 +4,7 @@ import type { MutationView, PlaceholderData, Prev, Status } from "./query.js";
 import { type RefetchInterval, valueOf } from "./refetch.js";
 
 type Fn = (...args: any[]) => any;
-type CellView<D> = { data: D | undefined; status: Status; error: string | null };
+type CellView<D> = { data: D | undefined; status: Status; error: string | null; isFetching: boolean };
 
 /** createResource 가 훅에 넘기는 안쪽 */
 export interface ResourceCore<A, D> {
@@ -26,8 +26,8 @@ export interface ResourceCore<A, D> {
   rearm(args: A | undefined): void;
 }
 
-export const QUERY_FIELDS = ["data", "status", "error", "isPlaceholderData", "refetch"];
-export const IDLE: CellView<never> = { data: undefined, status: "idle", error: null };
+export const QUERY_FIELDS = ["data", "status", "error", "isPlaceholderData", "isFetching", "refetch"];
+export const IDLE: CellView<never> = { data: undefined, status: "idle", error: null, isFetching: false };
 export const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export const noop = () => {};
 const subscribeNone = () => noop;
@@ -111,7 +111,7 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         const on = active[i]!;
         const kept = byId.get(id);
         if (kept) return kept.out;
-        const { data: got, status, error } = on ? cellOf(a).view : IDLE;
+        const { data: got, status, error, isFetching } = on ? cellOf(a).view : IDLE;
         const before = prev?.byId.get(id);
         const screen = options?.select;
         // 받는 항목이 받은 값이 없으면(받는 중 · 실패) 자리를 채운다. 앞에도 채웠고 화면 placeholderData 가 그대로면 그 값을 쓴다 —
@@ -133,7 +133,13 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
           if (data !== undefined && select) data = select(data as D, a as A);
           if (data !== undefined && screen) data = screen(data, a);
         }
-        const values: Record<string, unknown> = { data, status, error, isPlaceholderData: filled !== undefined && raw !== undefined };
+        const values: Record<string, unknown> = {
+          data,
+          status,
+          error,
+          isPlaceholderData: filled !== undefined && raw !== undefined,
+          isFetching,
+        };
         const reuse = before?.on === on && fields.every((f) => f === "refetch" || same(before.out[f], values[f]));
         let out = before?.out as Record<string, unknown>;
         if (!reuse) {

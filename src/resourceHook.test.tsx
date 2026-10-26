@@ -58,6 +58,11 @@ it("타입: 목록 꼴은 고른 조회 칸의 배열을, 하나 꼴은 고른 �
   type View = ReturnType<typeof all>;
   expectTypeOf<View["data"]>().toEqualTypeOf<number | undefined>();
   expectTypeOf<View["isPlaceholderData"]>().toEqualTypeOf<boolean>();
+  expectTypeOf<View["isFetching"]>().toEqualTypeOf<boolean>();
+  const fetching = () => useStore("api.types.list", { args: ids(1), pick: ["isFetching"] });
+  expectTypeOf<ReturnType<typeof fetching>>().toEqualTypeOf<Array<{ isFetching: boolean }>>();
+  const oneFetching = () => useStore("api.types.list", { args: { id: 1 }, pick: ["isFetching"] });
+  expectTypeOf<ReturnType<typeof oneFetching>>().toEqualTypeOf<{ isFetching: boolean }>();
   expectTypeOf<View["save"]["mutateAsync"]>().returns.resolves.toEqualTypeOf<number>();
   const one = () => useStore("api.types.list", { args: { id: 1 }, pick: ["data", "save"] });
   expectTypeOf<ReturnType<typeof one>>().toEqualTypeOf<Pick<View, "data" | "save">>();
@@ -92,8 +97,8 @@ it("목록: args 배열이면 같은 순서의 조회 칸 배열을 준다", asy
   expect(q.calls.map((c) => c.args)).toEqual(ids(1, 2));
   await act(async () => q.calls.forEach((c) => c.resolve(c.args.id * 10)));
   expect(result.current).toEqual([
-    { data: 10, status: "ready", error: null, isPlaceholderData: false, refetch: expect.any(Function) },
-    { data: 20, status: "ready", error: null, isPlaceholderData: false, refetch: expect.any(Function) },
+    { data: 10, status: "ready", error: null, isPlaceholderData: false, isFetching: false, refetch: expect.any(Function) },
+    { data: 20, status: "ready", error: null, isPlaceholderData: false, isFetching: false, refetch: expect.any(Function) },
   ]);
 });
 it("목록: 하나 꼴 화면과 목록 꼴 화면이 같은 args 의 요청 하나를 나눠 쓴다", async () => {
@@ -169,7 +174,7 @@ it("pick: 자원에서 pick: [\"data\"] 면 status 만 바뀔 때 다시 그리�
   const shown = result.current;
   expect(shown).toEqual({ data: { n: 1 } });
   const before = renders;
-  // loading 을 거쳐 겉 칸이 같은 새 객체가 와도 그대로다
+  // isFetching 이 켜졌다 꺼지고 겉 칸이 같은 새 객체가 와도 그대로다
   await act(async () => {
     const done = state(key).invalidate();
     q.calls[1]!.resolve({ n: 1 });
@@ -418,6 +423,44 @@ it("keepPreviousData 꼴 2: match 가 참인 앞 항목을 잇는다", async () 
   expect(one.result.current).toMatchObject({ data: "A", isPlaceholderData: true });
   one.rerender({ path: "x" });
   expect(one.result.current.isPlaceholderData).toBe(true);
+});
+it("keepPreviousData 꼴 2 목록: 받는 중에 원래 항목이 새 값을 받아도 처음 채운 값을 쥐고, 받으면 제 값", async () => {
+  const q = controlled<string>();
+  type Path = { repo: string; path: string };
+  const key = define(() => createResource(() => ({ query: (a: Path) => q.fn(a) })));
+  const sameRepo = keepPreviousData((a: Path, p: { args: Path }) => p.args.repo === a.repo);
+  const at = (repo: string, path: string) => ({ repo, path });
+  const { result, rerender } = renderHook(
+    ({ list }) => view(key, { args: list, pick: ["data", "isPlaceholderData"], placeholderData: sameRepo }),
+    { initialProps: { list: [at("r1", "a")] } },
+  );
+  await act(async () => q.calls[0]!.resolve("A1"));
+  // b 가 받는 중이고 a 의 값을 채운다
+  rerender({ list: [at("r1", "a"), at("r1", "b")] });
+  expect(result.current[1]).toEqual({ data: "A1", isPlaceholderData: true });
+  // 그사이 a 가 새 값을 받는다 — b 는 처음 채운 값을 쥔다
+  act(() => state(key).setData("A2", at("r1", "a")));
+  expect(result.current[0]).toEqual({ data: "A2", isPlaceholderData: false });
+  expect(result.current[1]).toEqual({ data: "A1", isPlaceholderData: true });
+  await act(async () => q.calls.find((c) => c.args.path === "b")!.resolve("B"));
+  expect(result.current[1]).toEqual({ data: "B", isPlaceholderData: false });
+});
+it("pick: [\"data\"] 면 isFetching 만 바뀔 때 다시 그리지 않는다", async () => {
+  const q = controlled<number>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() })));
+  let renders = 0;
+  const { result } = renderHook(() => {
+    renders++;
+    return view(key, { pick: ["data"] });
+  });
+  await act(async () => q.calls[0]!.resolve(1));
+  const shown = result.current;
+  const before = renders;
+  act(() => void state(key).invalidate());
+  expect(renders).toBe(before);
+  await act(async () => q.calls[1]!.resolve(1));
+  expect(renders).toBe(before);
+  expect(result.current).toBe(shown);
 });
 it("prev 는 보이던 값이다 — A→B→C 로 빠르게 바꾸면 C 는 A 값을 잇는다", async () => {
   const q = controlled<string>();

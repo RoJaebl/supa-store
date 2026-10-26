@@ -80,7 +80,7 @@ createStore("api.file.dirLevel", () =>
 ```tsx
 const one = useStore("api.file.dirLevel", { args: { repo, dir } });
 const many = useStore("api.file.dirLevel", { args: dirs.map((dir) => ({ repo, dir })), pick: ["data", "status"] });
-// many: { data, status }[] — 목록의 pick · omit 은 조회 칸(data · status · error · isPlaceholderData · refetch)만 고른다
+// many: { data, status }[] — 목록의 pick · omit 은 조회 칸(data · status · error · isPlaceholderData · isFetching · refetch)만 고른다
 ```
 
 `Cache`(`getData` · `invalidate` · `fetch` · `setData`)도 배열을 받는다. `invalidate([])` 는 아무것도 하지 않고, `invalidate()` 는 받아 둔 것 모두를 다시 받는다.
@@ -98,7 +98,7 @@ save.mutate("a");                          // 칸만 고친다
 const n = await save.mutateAsync("a");     // 결과를 받고, 실패는 catch 로 받는다
 ```
 
-바꾸기 이름은 `data` · `status` · `error` · `isPlaceholderData` · `refetch` · `fetch` · `getData` · `setData` · `invalidate` 와 겹칠 수 없다.
+바꾸기 이름은 `data` · `status` · `error` · `isPlaceholderData` · `isFetching` · `refetch` · `fetch` · `getData` · `setData` · `invalidate` 와 겹칠 수 없다.
 
 ### 주기적으로 다시 받기
 
@@ -112,7 +112,7 @@ useStore("api.file.dirLevel", { args, refetchInterval: (a) => (a.dir === "" ? 10
 - 타이머는 `args` 하나에 하나다. 그 `args` 를 보는 화면이 있는 동안만 돌고, 받기가 끝난 때부터 간격을 센다.
 - 창이 가려지면(`document.visibilityState === "hidden"`) 멈추고, 다시 보일 때 간격이 지났으면 곧바로 한 번 받는다.
 - 실패하면 간격을 두 배씩 늘려 기본 간격의 8배까지 간다. 한 번 성공하면 기본 간격으로 돌아온다.
-- 주기 받기도 받는 동안 `status` 를 `"loading"` 으로 바꾸고 `data` 는 그대로 둔다. `status` 에 스피너를 걸면 주기마다 깜박이므로 `data` 가 있는지로 가른다.
+- 받은 값이 있는 `args` 를 다시 받는 동안(주기 받기 · `refetch` · `invalidate`) `status` 는 그대로다 — `ready` 는 `ready`, 실패한 뒤면 `error`. `"loading"` 은 받은 값이 없을 때뿐이다. 새로 고치는 표시는 요청이 진행 중이면 `true` 인 `isFetching` 에 건다.
 - 서버 렌더에서는 타이머를 걸지 않는다. `auto: false` 인 자원도 간격이 정해진 `args` 는 주기로 받는다.
 
 ### 자리 채우기
@@ -177,7 +177,7 @@ createResource((cache: Cache<void, Settings>) => ({
       cache.setData(saved);
       return saved;
     } catch (e) {
-      cache.setData(() => prev);
+      cache.setData(prev); // 받은 적 없던 칸이면 undefined 라 idle 로 돌아간다
       throw e;
     }
   },
@@ -205,7 +205,8 @@ createStore("api.graph", (set, get, ctx) => {
 
 - `mutate` 는 이제 결과를 돌려주지 않는다. `await x.mutate(...)` 의 결과를 쓰던 코드는 `mutateAsync` 로 바꾼다.
 - `args` 를 배열 타입으로 지은 자원은 생성기가 실패시킨다. 객체로 묶는다.
-- `QueryView` 에 `isPlaceholderData` 칸이 늘었다. 정의 파일은 고치지 않아도 된다.
+- `QueryView` 에 `isPlaceholderData` · `isFetching` 칸이 늘었다. 정의 파일은 고치지 않아도 된다.
+- 값이 있는 `args` 를 다시 받는 동안 `status` 가 `"loading"` 으로 바뀌지 않는다. `refetch` · `invalidate` 뒤에 `status === "loading"` 을 기다리던 코드는 `isFetching` 을 본다.
 
 ## 생성 파일
 
