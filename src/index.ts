@@ -1,5 +1,7 @@
 /** 상태에 이 표식으로 함수를 두면 useStore 가 꺼내기를 그 함수에 맡긴다 — 그 함수는 훅이다 */
 export const USE: unique symbol = Symbol.for("supa-store.use") as never;
+/** 상태 객체에 `[DISPOSE]: () => void` 가 있으면 그 store 를 다시 짓기 직전과 disposeStores 에서 부른다 */
+export const DISPOSE: unique symbol = Symbol.for("supa-store.dispose") as never;
 
 export type SetState<T> = (partial: Partial<T> | ((now: T) => Partial<T>)) => void;
 export type GetState<T> = () => T;
@@ -52,6 +54,8 @@ interface Entry {
   listeners: Set<() => void>;
   api: StoreApi<any>;
   build(): void;
+  /** 지어져 있으면 앞 상태의 [DISPOSE] 를 부른다. 던져도 삼킨다 — 다시 짓기를 막지 않는다 */
+  dispose(): void;
 }
 
 // 번들러(Next·Vite)가 process.env.NODE_ENV 를 글자로 바꾼다. Node 타입을 들이지 않으려고 모양만 선언한다
@@ -123,6 +127,14 @@ function makeEntry(key: string, definition: Creator): Entry {
         return () => void listeners.delete(listener);
       },
     },
+    dispose() {
+      if (!entry.built) return;
+      try {
+        state?.[DISPOSE]?.();
+      } catch (error) {
+        console.error(`[DISPOSE] 가 던졌다: ${key}`, error);
+      }
+    },
     build() {
       if (building.includes(key)) throw new Error(`순환한다: ${[...building, key].join(" → ")}`);
       building.push(key);
@@ -151,6 +163,7 @@ function rebuild(keys: Iterable<string>): void {
   };
   for (const key of keys) mark(entryOf(key));
   const again = [...stale].filter((entry) => entry.built);
+  again.forEach((entry) => entry.dispose());
   stale.forEach((entry) => (entry.built = false));
   again.forEach(ensure);
   again.forEach((entry) => entry.listeners.forEach((l) => l()));
@@ -192,6 +205,14 @@ export function getStore<K extends StateKey>(key: K): StoreApi<StateOf<K>> {
 export function resetStores(): void {
   registry.forEach((entry) => (entry.override = undefined));
   rebuild(registry.keys());
+}
+
+/** 지어진 모든 store 의 [DISPOSE] 를 부르고 지어지지 않은 상태로 되돌린다. 다시 짓지 않는다(다음에 꺼낼 때 짓는다) — 구독자는 남는다 */
+export function disposeStores(): void {
+  registry.forEach((entry) => {
+    entry.dispose();
+    entry.built = false;
+  });
 }
 
 /** 등록된 key 전부, 정렬해서 — 출력 스냅숏이 쓴다 */

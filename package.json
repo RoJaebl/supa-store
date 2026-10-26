@@ -1,10 +1,11 @@
 {
   "name": "supa-store",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/RoJaebl/supa-store.git" },
   "packageManager": "pnpm@11.18.0",
   "type": "module",
+  "engines": { "node": ">=20" },
   "types": "./dist/index.d.ts",
   "bin": { "store-gen": "./tools/cli.mjs" },
   "files": ["dist", "plugin", "tools/*.cjs", "tools/*.mjs", "tools/*.d.mts", "!tools/*.test.mjs"],
@@ -12,30 +13,37 @@
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
     "./react": { "types": "./dist/react.d.ts", "default": "./dist/react.js" },
     "./query": { "types": "./dist/query.d.ts", "default": "./dist/query.js" },
+    "./stream": { "types": "./dist/stream/index.d.ts", "default": "./dist/stream/index.js" },
+    "./server": { "types": "./dist/server/index.d.ts", "default": "./dist/server/index.js" },
+    "./server/node": { "types": "./dist/server/node.d.ts", "default": "./dist/server/node.js" },
+    "./server/web": { "types": "./dist/server/web.d.ts", "default": "./dist/server/web.js" },
     "./config": { "types": "./dist/config.d.ts", "default": "./dist/config.js" },
     "./vite": { "types": "./tools/vite.d.mts", "default": "./tools/vite.mjs" },
     "./next": { "types": "./tools/next.d.mts", "default": "./tools/next.mjs" },
     "./plugin": "./tools/plugin.cjs"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.server.json",
     "test": "pnpm build && vitest run && node --test \"tools/!(pack).test.mjs\"",
     "test:pack": "node --test tools/pack.test.mjs",
     "prepublishOnly": "pnpm test && pnpm test:pack",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.test.json"
   },
-  "peerDependencies": { "next": ">=14", "react": ">=18", "typescript": ">=5.4", "vite": ">=6" },
-  "peerDependenciesMeta": { "next": { "optional": true }, "react": { "optional": true }, "vite": { "optional": true } },
+  "peerDependencies": { "next": ">=14", "react": ">=18", "typescript": ">=5.4", "vite": ">=6", "ws": ">=8" },
+  "peerDependenciesMeta": { "next": { "optional": true }, "react": { "optional": true }, "vite": { "optional": true }, "ws": { "optional": true } },
   "devDependencies": {
     "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",
+    "@types/node": "^24.19.2",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
+    "@types/ws": "^8.18.2",
     "jsdom": "^30.1.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "typescript": "^5.8.0",
     "vite": "^8.3.5",
-    "vitest": "^3.1.0"
+    "vitest": "^3.1.0",
+    "ws": "^8.22.0"
   }
 }

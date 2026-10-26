@@ -298,3 +298,20 @@ createStore("api.x.r", () => createResource(() => ({ query: async () => 1 })));`
   assert.ok(line, "api.x.r 가 찍힌다");
   assert.doesNotMatch(line, /\bany\b/);
 });
+
+test("createStream 을 돌려주는 정의의 상태 타입도 any 없이 찍힌다", () => {
+  const tsconfig = JSON.parse(read("tsconfig.json"));
+  tsconfig.compilerOptions.paths["supa-store/stream"] = [posix(resolve(here, "../src/stream/index.ts"))];
+  write("tsconfig.json", JSON.stringify(tsconfig));
+  write(
+    "src/x/_state/s.state.ts",
+    `import { createStore } from "supa-store";
+import { createStream } from "supa-store/stream";
+createStore("infra.s", () => createStream<string, { chunk: string }, { open(cwd: string): string }>({ url: "ws://x", reduce: (o, c) => o + c.chunk, commands: { open: {} } }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const line = read("src/store.gen.ts").split("\n").find((l) => l.includes('"infra.s"'));
+  assert.ok(line, "infra.s 가 찍힌다");
+  assert.doesNotMatch(line, /\bany\b/);
+  assert.match(line, /open/);
+});

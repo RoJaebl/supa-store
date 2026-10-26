@@ -30,7 +30,7 @@ export const QUERY_FIELDS = ["data", "status", "error", "isPlaceholderData", "is
 export const IDLE: CellView<never> = { data: undefined, status: "idle", error: null, isFetching: false };
 export const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export const noop = () => {};
-const subscribeNone = () => noop;
+export const subscribeNone = () => noop;
 
 const plain = (x: unknown): x is object => {
   if (typeof x !== "object" || x === null) return false;
@@ -38,7 +38,7 @@ const plain = (x: unknown): x is object => {
   return proto === Object.prototype || proto === null;
 };
 /** 겉 한 겹 견주기 — 칸마다 Object.is, 둘 다 배열이거나 둘 다 보통 객체면 그 겉 칸도 Object.is. 깊이 견주지 않는다 */
-function same(a: unknown, b: unknown): boolean {
+export function same(a: unknown, b: unknown): boolean {
   if (Object.is(a, b)) return true;
   // Date · Map · 클래스 인스턴스는 Object.keys 가 값을 보이지 않으므로 Object.is 로만 본다
   if (!(Array.isArray(a) && Array.isArray(b)) && !(plain(a) && plain(b))) return false;
@@ -233,8 +233,14 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
   };
 }
 
-/** 바꾸기 하나의 화면별 상태. 화면 안에서 요청 차례를 세어 늦게 온 응답을 버린다 */
-function useMutation(fn: Fn): MutationView<Fn> {
+/**
+ * 바꾸기 하나의 화면별 상태. 화면 안에서 요청 차례를 세어 늦게 온 응답을 버린다.
+ * more 는 같은 차례 세기로 다른 부르기를 돌리는 칸을 더한다(연결 명령의 retry)
+ */
+export function useMutation(
+  fn: Fn,
+  more?: (run: (call: () => unknown) => Promise<unknown>) => object,
+): MutationView<Fn> {
   const [state, setState] = React.useState<{ pending: boolean; error: string | null; data: unknown }>({
     pending: false,
     error: null,
@@ -242,11 +248,11 @@ function useMutation(fn: Fn): MutationView<Fn> {
   });
   const seq = React.useRef(0);
   // 밀린 호출은 칸을 건드리지 않지만 자기 Promise 는 자기 결과로 끝난다
-  const run = async (args: unknown[]) => {
+  const run = async (call: () => unknown) => {
     const mine = ++seq.current;
     setState((s) => ({ ...s, pending: true, error: null }));
     try {
-      const data = await fn(...args);
+      const data = await call();
       if (mine === seq.current) setState({ pending: false, error: null, data });
       return data;
     } catch (e) {
@@ -257,12 +263,13 @@ function useMutation(fn: Fn): MutationView<Fn> {
   return {
     ...state,
     mutate(...args) {
-      run(args).catch(noop);
+      run(() => fn(...args)).catch(noop);
     },
-    mutateAsync: (...args) => run(args),
+    mutateAsync: (...args) => run(() => fn(...args)),
     reset() {
       seq.current += 1;
       setState({ pending: false, error: null, data: undefined });
     },
+    ...more?.(run),
   };
 }
