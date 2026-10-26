@@ -32,8 +32,8 @@ test("묶음을 템플릿에 설치해 시작 절차 두 줄로 개발 서버와
     run(`npm install "${tgz}"`, app);
     // tsserver 가 node10 방식으로 찾는 중계 폴더가 설치본에 있다(exports 를 거치지 않는다)
     assert.ok(existsSync(join(app, "node_modules/supa-store/plugin/index.js")));
-    // 0.3 의 하위 경로가 exports 로 풀린다
-    run(`node --input-type=module -e "for (const p of [\\"stream\\", \\"server\\", \\"server/node\\", \\"server/web\\"]) await import(\\"supa-store/\\" + p)"`, app);
+    // 0.3 · 0.4 의 하위 경로가 exports 로 풀린다
+    run(`node --input-type=module -e "for (const p of [\\"stream\\", \\"server\\", \\"server/node\\", \\"server/web\\", \\"rpc\\"]) await import(\\"supa-store/\\" + p)"`, app);
 
     // 3. 시작 절차 두 줄
     const file = (rel) => join(app, rel);

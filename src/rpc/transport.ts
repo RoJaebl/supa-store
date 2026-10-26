@@ -1,6 +1,7 @@
-// 통로를 여는 도우미(스펙 §6.2) — 표준 입출력을 가진 프로세스와 웹소켓. 서버 전용이라 node · ws 를 바로 들인다
+// 통로를 여는 도우미(스펙 §6.2) — 표준 입출력을 가진 프로세스와 웹소켓. ws 는 선택 peer 라 websocket() 을 부를 때에야 들인다(stdio 만 쓰면 없어도 된다)
 import type { Readable, Writable } from "node:stream";
-import { WebSocket } from "ws";
+import { createRequire } from "node:module";
+import type { WebSocket as WS } from "ws";
 import { DEFAULTS } from "../stream/protocol.js";
 import { TIMING } from "../stream/client.js";
 import { createReader, encode, type Framing } from "./framing.js";
@@ -94,6 +95,7 @@ type Timing = { pingMs: number; idleMs: number };
 /** 프레임 하나가 메시지 하나. 열리기 전에 보낸 것은 열린 뒤 보낸다. url 이 틀리면 동기로 던진다(ws 의 생성자) */
 export function websocket(url: string, options: { headers?: Record<string, string>; maxPayload?: number } = {}): Transport {
   const { pingMs, idleMs } = (options as { [TIMING]?: Timing })[TIMING] ?? DEFAULTS;
+  const { WebSocket } = createRequire(import.meta.url)("ws") as { WebSocket: typeof WS };
   const ws = new WebSocket(url, { headers: options.headers, maxPayload: options.maxPayload ?? 1024 * 1024 });
   const queue: string[] = [];
   let ping: ReturnType<typeof setInterval> | undefined;
