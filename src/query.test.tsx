@@ -49,7 +49,7 @@ it("타입: cache 를 쓰면 (cache: Cache<A, D>) 로 적고, 상태와 화면�
   expectTypeOf(resource).not.toHaveProperty("query");
   // cache 를 쓰지 않으면 적지 않아도 query 에서 추론한다
   const plain = createResource(() => ({ query: async (id: string) => id.length }));
-  expectTypeOf(plain.fetch).parameter(0).toEqualTypeOf<string | undefined>();
+  expectTypeOf(plain.fetch("a")).toEqualTypeOf<Promise<number>>();
   expectTypeOf(plain.getData()).toEqualTypeOf<number | undefined>();
 });
 
@@ -73,6 +73,8 @@ it("타입: useStore 로 꺼낸 바꾸기의 data 는 any 가 아니다", () => 
   expectTypeOf<View["add"]["data"]>().not.toBeAny();
   expectTypeOf<View["add"]["data"]>().toEqualTypeOf<number | undefined>();
   expectTypeOf<View["data"]>().toEqualTypeOf<number[] | undefined>();
+  expectTypeOf<View["add"]["mutateAsync"]>().returns.resolves.toEqualTypeOf<number>();
+  expectTypeOf<View["add"]["mutate"]>().returns.toEqualTypeOf<void>();
 });
 
 // ── event ─────────────────────────────────────────────
@@ -133,9 +135,10 @@ it("조회: 같은 칸을 보는 두 화면이 요청 하나를 나눠 쓴다", 
   const one = renderHook(() => view(key));
   const two = renderHook(() => view(key));
   expect(q.fn).toHaveBeenCalledTimes(1);
-  expect(one.result.current.status).toBe("loading");
+  // 받은 값이 없는 처음 받기만 loading 이다
+  expect(one.result.current).toMatchObject({ status: "loading", isFetching: true });
   await act(async () => q.calls[0]!.d.resolve(7));
-  expect(one.result.current).toMatchObject({ data: 7, status: "ready", error: null });
+  expect(one.result.current).toMatchObject({ data: 7, status: "ready", error: null, isFetching: false });
   expect(two.result.current.data).toBe(7);
 });
 it("조회: 자원을 다시 지으면(overrideStore·재등록) 화면이 새 자원으로 다시 받는다", async () => {
@@ -147,15 +150,40 @@ it("조회: 자원을 다시 지으면(overrideStore·재등록) 화면이 새 �
   await flush();
   expect(result.current).toMatchObject({ data: "new", status: "ready" });
 });
-it("조회: 다시 받는 동안 앞선 data 를 남긴다", async () => {
+it("조회: 다시 받는 동안 앞선 data 와 ready 를 남기고 isFetching 만 켠다", async () => {
   const q = controlled<number>();
   const key = define(() => createResource(() => ({ query: () => q.fn() })));
   const { result } = renderHook(() => view(key));
   await act(async () => q.calls[0]!.d.resolve(1));
   act(() => void result.current.refetch());
-  expect(result.current).toMatchObject({ data: 1, status: "loading" });
+  expect(result.current).toMatchObject({ data: 1, status: "ready", isFetching: true });
   await act(async () => q.calls[1]!.d.resolve(2));
-  expect(result.current).toMatchObject({ data: 2, status: "ready" });
+  expect(result.current).toMatchObject({ data: 2, status: "ready", isFetching: false });
+});
+it("조회: 실패한 뒤 다시 받는 동안 error 와 앞선 data 를 남기고, 성공하면 ready", async () => {
+  const q = controlled<number>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() })));
+  const { result } = renderHook(() => view(key));
+  await act(async () => q.calls[0]!.d.resolve(1));
+  await act(async () => {
+    const done = result.current.refetch();
+    q.calls[1]!.d.reject(new Error("닿지 않는다"));
+    await done;
+  });
+  act(() => void result.current.refetch());
+  expect(result.current).toMatchObject({ data: 1, status: "error", error: "닿지 않는다", isFetching: true });
+  await act(async () => q.calls[2]!.d.resolve(2));
+  expect(result.current).toMatchObject({ data: 2, status: "ready", error: null, isFetching: false });
+});
+it("조회: invalidate 로 다시 받는 동안에도 status 는 ready 다", async () => {
+  const q = controlled<number>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() })));
+  const { result } = renderHook(() => view(key));
+  await act(async () => q.calls[0]!.d.resolve(1));
+  act(() => void state(key).invalidate());
+  expect(result.current).toMatchObject({ data: 1, status: "ready", isFetching: true });
+  await act(async () => q.calls[1]!.d.resolve(2));
+  expect(result.current).toMatchObject({ data: 2, status: "ready", isFetching: false });
 });
 it("조회: 실패해도 앞선 data 를 남기고 error 를 둔다", async () => {
   const q = controlled<number>();
@@ -223,6 +251,43 @@ it("조회: fetch(args) 는 이미 받은 칸이면 다시 받지 않고 값을 
   expect(query).toHaveBeenCalledTimes(1);
 });
 
+it("조회: 다시 받는 중에 fetch 하면 앞 값이 아니라 새 값을 기다려 준다", async () => {
+  const q = controlled<number>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() })));
+  const first = state(key).fetch();
+  q.calls[0]!.d.resolve(1);
+  expect(await first).toBe(1);
+  void state(key).invalidate();
+  const during = state(key).fetch();
+  q.calls[1]!.d.resolve(2);
+  expect(await during).toBe(2);
+  expect(q.fn).toHaveBeenCalledTimes(2);
+});
+it("조회: 기다리던 요청을 다른 요청이 밀어내면 fetch 는 마지막 요청의 값을 준다", async () => {
+  const q = controlled<number>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() })));
+  const first = state(key).fetch();
+  q.calls[0]!.d.resolve(1);
+  await first;
+  void state(key).invalidate();
+  const during = state(key).fetch();
+  void state(key).invalidate();
+  q.calls[1]!.d.resolve(2);
+  await flush();
+  q.calls[2]!.d.resolve(3);
+  expect(await during).toBe(3);
+});
+it("조회: 받는 중에 setData(undefined) 로 비워도 fetch 는 받은 응답을 준다", async () => {
+  const q = controlled<number>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() }), { auto: false }));
+  void state(key).fetch();
+  // 진행 중인 요청을 기다리는 fetch
+  const pending = state(key).fetch();
+  state(key).setData(undefined);
+  q.calls[0]!.d.resolve(5);
+  expect(await pending).toBe(5);
+  expect(state(key).getData()).toBeUndefined();
+});
 it("조회: setData 앞에 떠난 조회 응답이 늦게 와도 setData 의 값을 덮지 않는다", async () => {
   const q = controlled<number[]>();
   const key = define(() => createResource(() => ({ query: () => q.fn() })));
@@ -243,14 +308,36 @@ it("조회: 받는 중에 setData 로 값을 비우면 칸이 idle 로 돌아가
     await pending;
   });
   expect(result.current).toMatchObject({ data: undefined, status: "idle", error: null });
-  void state(key).fetch().catch(() => {});
+  act(() => void state(key).fetch().catch(() => {}));
   expect(q.fn).toHaveBeenCalledTimes(2);
+  expect(result.current).toMatchObject({ status: "loading", isFetching: true });
 });
 it("조회: idle 칸에 setData 하면 ready 가 된다", () => {
   const key = define(() => createResource(() => ({ query: async () => 1 }), { auto: false }));
   const { result } = renderHook(() => view(key));
   act(() => state(key).setData(5));
   expect(result.current).toMatchObject({ data: 5, status: "ready", error: null });
+});
+it("조회: 값 꼴 setData(undefined) 는 updater 꼴처럼 칸을 비워 idle 로 되돌린다", () => {
+  const key = define(() => createResource(() => ({ query: async (id: string) => id }), { auto: false }));
+  const { result } = renderHook(() => view(key, { args: "A" }));
+  act(() => state(key).setData("a", "A"));
+  expect(result.current).toMatchObject({ data: "a", status: "ready" });
+  act(() => state(key).setData(undefined, "A"));
+  expect(result.current).toMatchObject({ data: undefined, status: "idle", error: null });
+});
+it("타입: 값 꼴 setData 도 undefined 를 받는다 — 낙관적 갱신을 setData(prev) 로 되돌린다", () => {
+  createResource((cache: Cache<void, number[]>) => ({
+    query: async () => [1],
+    async add(value: number) {
+      const prev = cache.getData();
+      cache.setData((list) => [...(list ?? []), value]);
+      cache.setData(prev);
+      cache.setData(undefined);
+    },
+  }));
+  // @ts-expect-error 값의 모양은 그대로 본다
+  createResource((cache: Cache<void, number[]>) => ({ query: async () => [1], go: async () => cache.setData("x") }));
 });
 
 // ── 바꾸기 ────────────────────────────────────────────
@@ -269,21 +356,76 @@ it("바꾸기: 진행·오류·결과는 부른 화면의 것이다", async () =
   act(() => one.result.current.save.reset());
   expect(one.result.current.save.data).toBeUndefined();
 });
-it("바꾸기: mutate 는 실패해도 던지지 않고 error 를 둔다", async () => {
+it("바꾸기: mutate 는 아무것도 돌려주지 않고, 실패는 error 칸에만 둔다", async () => {
   const key = define(() =>
     createResource(() => ({
-      save: async () => {
-        throw new Error("저장하지 못했다");
+      save: async (_x: number) => {
+        throw new Error("실패");
       },
     })),
   );
   const { result } = renderHook(() => view(key));
-  let out: unknown = "unset";
-  await act(async () => {
-    out = await result.current.save.mutate();
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown) => unhandled.push(e);
+  const proc = (globalThis as any).process; // 시험 환경에는 node 타입이 없다
+  proc.on("unhandledRejection", onUnhandled);
+  try {
+    let out: unknown = "unset";
+    await act(async () => {
+      out = result.current.save.mutate(1);
+    });
+    await new Promise((r) => setTimeout(r, 0)); // 처리되지 않은 거절은 한 틱 뒤에 보고된다
+    expect(out).toBeUndefined();
+    expect(result.current.save).toMatchObject({ pending: false, error: "실패" });
+    expect(unhandled).toEqual([]);
+  } finally {
+    proc.off("unhandledRejection", onUnhandled);
+  }
+});
+it("바꾸기: mutateAsync 는 결과를 돌려주고 data 칸에도 둔다", async () => {
+  const m = controlled<number>();
+  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
+  const { result } = renderHook(() => view(key));
+  let p!: Promise<number>;
+  act(() => {
+    p = result.current.save.mutateAsync(2);
   });
-  expect(out).toBeUndefined();
-  expect(result.current.save).toMatchObject({ pending: false, error: "저장하지 못했다" });
+  expect(result.current.save.pending).toBe(true);
+  await act(async () => m.calls[0]!.d.resolve(20));
+  expect(await p).toBe(20);
+  expect(result.current.save).toMatchObject({ pending: false, data: 20, error: null });
+});
+it("바꾸기: mutateAsync 는 실패하면 원래 오류 객체를 던지고 error 칸에 문구를 둔다", async () => {
+  const e = new Error("x");
+  const key = define(() =>
+    createResource(() => ({
+      save: async () => {
+        throw e;
+      },
+    })),
+  );
+  const { result } = renderHook(() => view(key));
+  let p!: Promise<unknown>;
+  act(() => {
+    p = result.current.save.mutateAsync();
+  });
+  await expect(p).rejects.toBe(e);
+  await flush();
+  expect(result.current.save).toMatchObject({ pending: false, error: "x" });
+});
+it("바꾸기: 뒤 요청에 밀린 mutateAsync 도 자기 결과를 돌려주지만 칸은 덮지 않는다", async () => {
+  const m = controlled<string>();
+  const key = define(() => createResource(() => ({ go: (x: string) => m.fn(x) })));
+  const { result } = renderHook(() => view(key));
+  let first!: Promise<string>;
+  act(() => {
+    first = result.current.go.mutateAsync("첫째");
+  });
+  act(() => void result.current.go.mutateAsync("둘째"));
+  await act(async () => m.calls[1]!.d.resolve("둘째"));
+  await act(async () => m.calls[0]!.d.resolve("첫째"));
+  expect(await first).toBe("첫째");
+  expect(result.current.go).toMatchObject({ pending: false, data: "둘째" });
 });
 it("바꾸기: 화면 안에서 늦게 온 응답은 버린다", async () => {
   const m = controlled<string>();
@@ -329,13 +471,54 @@ it("this: 메서드 꼴은 this.다른함수() 를 부를 수 있고, 화살표 
   const { result } = renderHook(() => view(key));
   let out: unknown;
   await act(async () => {
-    out = await result.current.quad.mutate(2);
+    out = await result.current.quad.mutateAsync(2);
   });
   expect(out).toBe(8);
 });
-it("이름: 바꾸기 이름이 data·status·error·refetch 면 지을 때 던진다", () => {
-  for (const name of ["data", "status", "error", "refetch"]) {
+it("이름: 바꾸기 이름이 조회 칸(data·status·error·isPlaceholderData·isFetching·refetch)이면 지을 때 던진다", () => {
+  for (const name of ["data", "status", "error", "isPlaceholderData", "isFetching", "refetch"]) {
     const key = define(() => createResource(() => ({ [name]: async () => 1 })));
     expect(() => state(key)).toThrow(name);
   }
+});
+
+// ── Cache 목록 ─────────────────────────────────────────
+
+it("Cache 목록: getData 는 같은 순서의 배열을 준다", async () => {
+  const r = createResource(() => ({ query: async ({ id }: { id: number }) => id * 10 }));
+  await r.fetch({ id: 1 });
+  expect(r.getData([{ id: 1 }, { id: 2 }])).toEqual([10, undefined]);
+  expect(r.getData([])).toEqual([]);
+  expectTypeOf(r.getData([{ id: 1 }])).toEqualTypeOf<(number | undefined)[]>();
+  expectTypeOf(r.fetch([{ id: 1 }])).toEqualTypeOf<Promise<number[]>>();
+});
+
+it("Cache 목록: fetch 는 값 배열을 주고, 하나라도 실패하면 그 오류로 거절한다", async () => {
+  const r = createResource(() => ({
+    query: async ({ id }: { id: number }) => {
+      if (id === 2) throw new Error("둘");
+      return id;
+    },
+  }));
+  await expect(r.fetch([{ id: 1 }, { id: 3 }])).resolves.toEqual([1, 3]);
+  await expect(r.fetch([{ id: 1 }, { id: 2 }])).rejects.toThrow("둘");
+  await expect(r.fetch([])).resolves.toEqual([]);
+});
+
+it("Cache 목록: invalidate([a, b]) 는 그 둘만 다시 받고, invalidate([]) 는 아무것도 하지 않는다", async () => {
+  const query = vi.fn(async ({ id }: { id: number }) => id);
+  const r = createResource(() => ({ query }));
+  await r.fetch([{ id: 1 }, { id: 2 }, { id: 3 }]);
+  query.mockClear();
+  await r.invalidate([{ id: 1 }, { id: 2 }]);
+  expect(query.mock.calls.map(([a]) => a.id).sort()).toEqual([1, 2]);
+  query.mockClear();
+  await r.invalidate([]);
+  expect(query).not.toHaveBeenCalled();
+});
+
+it("Cache 목록: setData 의 updater 는 args 마다 (prev, args) 로 불린다", () => {
+  const r = createResource(() => ({ query: async ({ id }: { id: number }) => id }));
+  r.setData((_prev, args) => args.id + 100, [{ id: 1 }, { id: 2 }]);
+  expect(r.getData([{ id: 1 }, { id: 2 }])).toEqual([101, 102]);
 });

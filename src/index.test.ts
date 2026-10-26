@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { createStore, getStore, overrideStore, pickFrom, registeredKeys, resetStores } from "./index.js";
+import { createStore, DISPOSE, disposeStores, getStore, overrideStore, pickFrom, registeredKeys, resetStores } from "./index.js";
 
 declare module "./index.js" {
   interface StateTypes {
@@ -16,6 +16,9 @@ declare module "./index.js" {
     "infra.reader": { read: () => string };
     ev: { on: (f: () => void) => void; emit: () => void };
     listener: object;
+    "dispose.a": { n: number };
+    "dispose.plain": { n: number };
+    "dispose.reader": { read: () => number; n: number };
   }
 }
 
@@ -180,4 +183,79 @@ it("resetStores 는 전부 무른 뒤 다시 짓는다", () => {
   reaction.mockClear();
   getStore("ev").getState().emit();
   expect(reaction).toHaveBeenCalledTimes(1);
+});
+
+// [DISPOSE] — 상태에 달린 정리 함수
+it("dispose: 기호는 USE 와 같은 꼴의 Symbol.for(\"supa-store.dispose\") 다", () => {
+  expect(DISPOSE).toBe(Symbol.for("supa-store.dispose"));
+});
+const disposers: Array<ReturnType<typeof vi.fn>> = [];
+createStore("dispose.a", () => {
+  const fn = vi.fn();
+  disposers.push(fn);
+  return { n: 0, [DISPOSE]: fn };
+});
+createStore("dispose.plain", () => ({ n: 0 }));
+const readerDisposers: Array<ReturnType<typeof vi.fn>> = [];
+createStore("dispose.reader", (_set, _get, ctx) => {
+  const fn = vi.fn();
+  readerDisposers.push(fn);
+  const src = ctx("dispose.a");
+  return { n: 0, read: () => (src as { n: number }).n, [DISPOSE]: fn };
+});
+
+it("dispose: 다시 지을 때 앞 상태의 [DISPOSE] 를 한 번 부른다", () => {
+  disposeStores();
+  disposers.length = 0;
+  getStore("dispose.a").getState();
+  overrideStore("dispose.a", () => ({ n: 1 }));
+  expect(disposers).toHaveLength(1);
+  expect(disposers[0]).toHaveBeenCalledTimes(1);
+});
+it("dispose: resetStores 도 앞 [DISPOSE] 를 부르고 곧바로 다시 짓는다", () => {
+  disposeStores();
+  disposers.length = 0;
+  getStore("dispose.a").getState();
+  resetStores();
+  expect(disposers[0]).toHaveBeenCalledTimes(1);
+  expect(disposers).toHaveLength(2);
+});
+it("dispose: disposeStores 는 [DISPOSE] 를 부르고 다시 짓지 않는다 — 다음 getState 때 새로 짓는다", () => {
+  disposeStores();
+  disposers.length = 0;
+  getStore("dispose.a").getState();
+  disposeStores();
+  expect(disposers[0]).toHaveBeenCalledTimes(1);
+  expect(disposers).toHaveLength(1);
+  getStore("dispose.a").getState();
+  expect(disposers).toHaveLength(2);
+  expect(disposers[0]).toHaveBeenCalledTimes(1);
+});
+it("dispose: [DISPOSE] 가 던져도 다시 짓기는 이어진다", () => {
+  disposeStores();
+  disposers.length = 0;
+  getStore("dispose.a").getState();
+  disposers[0]!.mockImplementation(() => {
+    throw new Error("boom");
+  });
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  expect(() => resetStores()).not.toThrow();
+  expect(err).toHaveBeenCalledTimes(1);
+  err.mockRestore();
+  expect(disposers).toHaveLength(2);
+  expect(getStore("dispose.a").getState().n).toBe(0);
+});
+it("dispose: [DISPOSE] 가 없는 0.2 의 상태는 그대로다", () => {
+  getStore("dispose.plain").setState({ n: 5 });
+  resetStores();
+  expect(getStore("dispose.plain").getState().n).toBe(0);
+  expect(() => disposeStores()).not.toThrow();
+});
+it("dispose: ctx 로 읽은 store 가 다시 지어지면 읽던 store 의 [DISPOSE] 도 부른다", () => {
+  disposeStores();
+  readerDisposers.length = 0;
+  getStore("dispose.reader").getState();
+  overrideStore("dispose.a", () => ({ n: 9 }));
+  expect(readerDisposers[0]).toHaveBeenCalledTimes(1);
+  expect(readerDisposers).toHaveLength(2);
 });
