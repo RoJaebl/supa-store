@@ -41,19 +41,24 @@ export function makeStreamHook(client: StreamClient<unknown>, names: string[]): 
 /** 0.2 의 MutationView 에 retry 를 더한다 — 이 화면의 이 명령 칸에서 마지막 실패의 요청 id · 인자만 쥔다(스펙 §14 의 21) */
 function useCommand(client: StreamClient<unknown>, name: string): MutationView<Fn> {
   const failed = React.useRef<{ id: string; args: unknown[] } | null>(null);
-  const send = (args: unknown[], id?: string) =>
-    client.command(name, args, id).then(
+  /** 보낸 차례와 쥔 실패를 마지막으로 정한 차례 — 늦게 온 앞 부르기가 뒤 부르기의 결과를 덮지 않게 */
+  const order = React.useRef({ sent: 0, settled: 0 });
+  const send = (args: unknown[], id?: string) => {
+    const mine = ++order.current.sent;
+    const latest = () => mine > order.current.settled && ((order.current.settled = mine), true);
+    return client.command(name, args, id).then(
       (data) => {
-        // 다시 보낸 것이 풀렸다 — 다시 보낼 실패가 없다
-        if (id !== undefined && failed.current?.id === id) failed.current = null;
+        // 이 칸의 성공(mutate · mutateAsync · retry)이면 다시 보낼 실패가 없다
+        if (latest()) failed.current = null;
         return data;
       },
       (e: CommandError) => {
-        failed.current = { id: e.requestId, args };
+        if (latest()) failed.current = { id: e.requestId, args };
         throw e;
       },
     );
-  return useMutation(
+  };
+  const view = useMutation(
     (...args: unknown[]) => send(args),
     (run) => ({
       // 같은 id 면 홉은 다시 돌리지 않고 쥔 답을 준다. 앱의 ok: false 는 같은 실패가 돌아온다 — 새로 부르려면 mutate
@@ -63,4 +68,13 @@ function useCommand(client: StreamClient<unknown>, name: string): MutationView<F
       },
     }),
   );
+  return {
+    ...view,
+    // reset 은 쥔 실패도 지운다 — 도는 중이던 것의 결과도 다시 쥐지 않는다
+    reset() {
+      failed.current = null;
+      order.current.settled = order.current.sent;
+      view.reset();
+    },
+  };
 }

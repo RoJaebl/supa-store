@@ -265,9 +265,10 @@ describe.each(both)("%s", (transport) => {
   it("client: auth() 를 다시 이을 때마다 부르고, 토큰이 주소에 실리지 않는다", async () => {
     const tokens: Array<string | undefined> = [];
     const stream = createStreamServer({
-      authorize: (ctx) => (tokens.push(ctx.token), ctx.token),
+      // 신원은 토큰이 바뀌어도 같다 — SSE 의 POST 는 그 연결의 신원과 같아야 받는다
+      authorize: (ctx) => (tokens.push(ctx.token), "me"),
       snapshot: () => 0,
-      commands: { who: (ctx) => ctx.identity },
+      commands: { token: (ctx) => ctx.token },
     });
     const s = await serve(stream);
     const urls: string[] = [];
@@ -276,13 +277,14 @@ describe.each(both)("%s", (transport) => {
     let n = 0;
     const c = open({ url: s.url(transport), transport, auth: async () => `t${++n}` });
     await settled(c);
-    expect(await c.command("who", [])).toBe("t1");
+    const first = await c.command("token", []);
     s.kill();
     await until(c, (v) => v.isFetching);
     await settled(c);
-    expect(await c.command("who", [])).toBe("t2");
-    // 웹소켓은 hello 로, SSE 는 GET 과 POST 마다 Authorization 으로
-    expect([...new Set(tokens)]).toEqual(["t1", "t2"]);
+    // 다시 이은 연결은 새 토큰으로 섰다
+    expect(await c.command("token", [])).not.toBe(first);
+    // 웹소켓은 hello 로, SSE 는 GET 과 POST 마다 Authorization 으로 — 부를 때마다 auth() 의 새 값
+    expect(tokens).toEqual(transport === "ws" ? ["t1", "t2"] : ["t1", "t2", "t3", "t4"]);
     expect(urls.length).toBeGreaterThan(1);
     expect(urls.every((u) => u === PATH)).toBe(true);
   });
@@ -619,4 +621,21 @@ it("client: close() 뒤 타이머 · 연결 · 리스너가 남지 않는다", a
   expect(ws.onclose).toBeNull();
   expect(vi.getTimerCount()).toBe(0);
   await expect(p).resolves.toMatchObject({ message: TEXT.unknown });
+});
+
+it("client: SSE 의 POST 마다 auth() 를 다시 불러 새 토큰을 싣는다 — 연 때의 토큰을 다시 쓰지 않는다", async () => {
+  let current = "t1";
+  const stream = createStreamServer<number>({
+    // 가장 최근 토큰만 받는다 — 신원은 같다
+    authorize: (ctx) => (ctx.token === current ? "me" : ctx.reject("낡은 토큰")),
+    snapshot: () => 0,
+    commands: { ok: () => 1 },
+  });
+  const s = await serve(stream);
+  const c = open<number>({ url: s.url("sse"), transport: "sse", auth: () => current });
+  await settled(c);
+  current = "t2";
+  expect(await c.command("ok", [])).toBe(1);
+  current = "t3";
+  expect(await c.command("ok", [])).toBe(1);
 });

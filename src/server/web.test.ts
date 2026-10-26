@@ -178,3 +178,37 @@ it("web: 클라이언트가 본문 읽기를 그만두면(abort) 그 연결이 �
   b.abort();
   await vi.waitFor(() => expect(onB).toHaveBeenCalled());
 });
+
+it("web: 겉의 send 는 JSON 으로 쓸 수 없는 메시지에 던지지 않고 그 연결을 닫는다. POST 의 본문이면 500", async () => {
+  const threw: string[] = [];
+  const stub: StreamServer<any, any, any> = {
+    publish() {},
+    close() {},
+    attach(conn: Conn) {
+      conn.send({ t: "welcome", epoch: "e", version: 0, connection: "k" });
+      try {
+        conn.send({ t: "snapshot", version: 0, value: 1n });
+      } catch {
+        threw.push(conn.kind);
+      }
+    },
+    handlePost: async () => ({ status: 200, body: { n: 1n } }),
+  };
+  const h = streamHandler(stub);
+  const c = await sseOpen(h);
+  expect((await c.messages(2)).map((m) => m.t)).toEqual(["welcome", "close"]);
+  expect(threw).toEqual([]);
+  const res = await post(h, {}, {}).catch(() => null);
+  expect(res?.status).toBe(500);
+});
+
+it("web: origins 를 주면 목록 밖 Origin 의 SSE · POST 는 403, Origin 이 없거나 목록 안이면 받는다", async () => {
+  const stream = createStreamServer({ snapshot: () => 0 });
+  cleanup.push(() => stream.close());
+  const h = streamHandler(stream, { origins: ["https://app.example"] });
+  const evil = { origin: "https://evil.example" };
+  expect((await h(new Request(URL_, { headers: { accept: "text/event-stream", ...evil } }))).status).toBe(403);
+  expect((await post(h, evil, { t: "ask", ids: [] })).status).toBe(403);
+  expect((await sseOpen(h, { origin: "https://app.example" })).res.status).toBe(200);
+  expect((await sseOpen(h)).res.status).toBe(200);
+});

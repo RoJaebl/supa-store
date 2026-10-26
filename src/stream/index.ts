@@ -46,7 +46,11 @@ export type StreamOptions<V, C, Cmd> = Omit<ClientOptions<V, C>, "commands"> & {
 
 /** 상대 주소는 location 으로 푼다 — 웹소켓이면 http → ws, https → wss */
 function absolute(url: string, transport: "ws" | "sse" | undefined): string {
-  if (URL.canParse(url)) return url;
+  // URL.canParse 는 쓰지 않는다 — 그것이 없는 옛 브라우저에서도 돌게
+  try {
+    new URL(url);
+    return url;
+  } catch {}
   if (typeof location === "undefined" || !location)
     throw new Error(`상대 주소를 풀 location 이 없다: ${url} — ws(s):// 또는 http(s):// 로 적는다`);
   const u = new URL(url, location.href);

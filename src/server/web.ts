@@ -38,8 +38,12 @@ async function readBody(req: Request): Promise<string | undefined> {
 
 /** 홉 하나를 Web 표준 처리기로 — GET(Accept text/event-stream)은 SSE, POST 는 command · ask · answer
  *  - SSE 의 첫 send 나 close 가 올 때까지 응답을 돌려주지 않는다 — Response 의 상태는 돌려줄 때 정해지므로,
- *    첫 send 전의 close 는 401(4001) 또는 503(그 밖)로 답한다. 기다림은 홉의 hello · 인증 흐름이 끊는다 */
-export function streamHandler(stream: StreamServer<any, any, any>): (req: Request) => Promise<Response> {
+ *    첫 send 전의 close 는 401(4001) 또는 503(그 밖)로 답한다. 기다림은 홉의 hello · 인증 흐름이 끊는다
+ *  - origins 를 주면 Origin 헤더가 있고 목록에 없는 요청은 403 — 쿠키 인증이면 둔다(node.ts 와 같다) */
+export function streamHandler(
+  stream: StreamServer<any, any, any>,
+  o: { origins?: string[] } = {},
+): (req: Request) => Promise<Response> {
   const sse = (req: Request) =>
     new Promise<Response>((respond) => {
       const enc = new TextEncoder();
@@ -64,6 +68,13 @@ export function streamHandler(stream: StreamServer<any, any, any>): (req: Reques
         headers: headersOf(req),
         send(m: ServerMessage) {
           if (ended) return;
+          let frame: string;
+          try {
+            frame = sseFrame(m);
+          } catch {
+            // JSON 으로 쓸 수 없는 메시지 — 던지지 않고 그 연결만 닫는다
+            return conn.close(CLOSE.COME_BACK, "JSON 으로 쓸 수 없는 메시지");
+          }
           if (!started) {
             started = true;
             respond(
@@ -78,7 +89,7 @@ export function streamHandler(stream: StreamServer<any, any, any>): (req: Reques
               }),
             );
           }
-          ctl.enqueue(enc.encode(sseFrame(m)));
+          ctl.enqueue(enc.encode(frame));
         },
         close(code: number, reason: string) {
           if (ended) return;
@@ -108,11 +119,19 @@ export function streamHandler(stream: StreamServer<any, any, any>): (req: Reques
     }
     // command 는 reply, ask 는 fate 의 배열(JSON), answer 는 204, 실패는 글자(연결의 약속 5)
     if (out.status === 204) return new Response(null, { status: 204 });
-    if (out.status === 200) return Response.json(out.body);
+    if (out.status === 200)
+      try {
+        return Response.json(out.body);
+      } catch {
+        return text(500, "JSON 으로 쓸 수 없는 메시지");
+      }
     return text(out.status, String(out.body));
   };
 
   return async (req) => {
+    const origin = req.headers.get("origin");
+    // Origin 이 없으면(브라우저 밖) 받는다 — 남의 사이트가 연 요청만 막는다
+    if (o.origins && origin !== null && !o.origins.includes(origin)) return text(403);
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket")
       return text(426, 'Web 표준 처리기는 SSE 만 받는다 — transport: "sse" 를 쓴다');
     if (req.method === "GET" && req.headers.get("accept")?.includes("text/event-stream")) return sse(req);

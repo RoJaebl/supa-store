@@ -186,6 +186,9 @@ it("resetStores 는 전부 무른 뒤 다시 짓는다", () => {
 });
 
 // [DISPOSE] — 상태에 달린 정리 함수
+it("dispose: 기호는 USE 와 같은 꼴의 Symbol.for(\"supa-store.dispose\") 다", () => {
+  expect(DISPOSE).toBe(Symbol.for("supa-store.dispose"));
+});
 const disposers: Array<ReturnType<typeof vi.fn>> = [];
 createStore("dispose.a", () => {
   const fn = vi.fn();

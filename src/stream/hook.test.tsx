@@ -12,6 +12,7 @@ import { useStore } from "../react.js";
 import { createStreamServer, type StreamServer } from "../server/core.js";
 import { attachStream } from "../server/node.js";
 import { TIMING } from "./client.js";
+import { NO_FAILURE } from "./hook.js";
 import { createStream, type Stream, type StreamCommandView } from "./index.js";
 import { TEXT } from "./protocol.js";
 
@@ -221,6 +222,38 @@ it("stream: retry() 는 마지막 실패를 같은 요청 id 로 다시 보내�
   expect(bad).toBe(1);
 });
 
+it("stream: 쥔 실패는 그 명령 칸의 뒤이은 성공(mutate · mutateAsync)과 reset() 이 지운다", async () => {
+  let ran = 0;
+  const stream = createStreamServer<number>({
+    snapshot: () => 0,
+    commands: {
+      flaky: (_ctx, ok: boolean) => {
+        ran++;
+        if (!ok) throw new Error("앱이 거절했다");
+        return "ok";
+      },
+    },
+  });
+  const s = await serve(stream);
+  const key = define({ url: s.url, commands: { flaky: {} } });
+  const { result } = renderHook(() => view(key, { pick: ["status", "flaky"] }));
+  await waitFor(() => expect(result.current.status).toBe("ready"));
+  // 실패 뒤 mutateAsync 의 성공
+  await act(() => expect(result.current.flaky.mutateAsync(false)).rejects.toThrow("앱이 거절했다"));
+  await act(async () => expect(await result.current.flaky.mutateAsync(true)).toBe("ok"));
+  await act(() => expect(result.current.flaky.retry()).rejects.toThrow(NO_FAILURE));
+  // 실패 뒤 mutate 의 성공
+  await act(() => expect(result.current.flaky.mutateAsync(false)).rejects.toThrow("앱이 거절했다"));
+  act(() => result.current.flaky.mutate(true));
+  await waitFor(() => expect(result.current.flaky).toMatchObject({ pending: false, data: "ok" }));
+  await act(() => expect(result.current.flaky.retry()).rejects.toThrow(NO_FAILURE));
+  // 실패 뒤 reset
+  await act(() => expect(result.current.flaky.mutateAsync(false)).rejects.toThrow("앱이 거절했다"));
+  act(() => result.current.flaky.reset());
+  await act(() => expect(result.current.flaky.retry()).rejects.toThrow(NO_FAILURE));
+  expect(ran).toBe(5);
+});
+
 it("stream: store 끼리는 ctx(key).open(...) 으로 부르고 실패하면 던진다", async () => {
   const stream = adder();
   const s = await serve(stream);
@@ -304,4 +337,16 @@ it("stream: 상대 주소는 location 으로 푼다 — 없으면 createStream �
   await waitFor(() => expect(result.current.data).toBe(7));
   vi.stubGlobal("location", undefined);
   expect(() => createStream({ url: PATH, open: "always" })).toThrow(/상대 주소/);
+});
+
+it("stream: URL.canParse 가 없는 브라우저에서도 절대 주소를 그대로 쓴다", async () => {
+  const stream = createStreamServer<number>({ snapshot: () => 3 });
+  const s = await serve(stream);
+  const canParse = URL.canParse;
+  // @ts-expect-error 옛 브라우저 흉내
+  delete URL.canParse;
+  cleanup.push(() => void (URL.canParse = canParse));
+  const key = define({ url: s.url });
+  const { result } = renderHook(() => view(key, { pick: ["data"] }));
+  await waitFor(() => expect(result.current.data).toBe(3));
 });

@@ -27,6 +27,7 @@ const fit = (reason: string) => {
 };
 
 const DETACHED = "서버가 떼어 낸다";
+const UNWRITABLE = "JSON 으로 쓸 수 없는 메시지";
 
 /** 이미 붙은 서버 — 한 서버에 둘을 붙이면 앞 처리기를 걷고 되돌리는 일이 서로 겹치므로 막는다 */
 const attached = new WeakSet<Server>();
@@ -34,11 +35,18 @@ const attached = new WeakSet<Server>();
 /** 한 Node http 서버의 한 path 에 웹소켓 · SSE · POST 를 붙인다. 돌려준 함수가 떼어 낸다
  *  - 서버 하나에 한 번만 붙는다 — 두 번째 attachStream 은 던진다. 여러 줄기가 필요하면 서버를 나누거나 한 홉에 채널로 가른다
  *  - 붙기 전의 request 리스너(Express 등)는 우리 처리기 뒤로 옮겨 그 path 밖의 요청을 받게 하고, 떼어 내면 되돌린다
+ *  - origins 를 주면 Origin 헤더가 있고 목록에 없는 요청은 403 — 웹소켓은 CORS 를 따르지 않으므로 쿠키 인증이면 둔다
  *  ponytail: 한 서버 한 번. 한 서버에 path 여럿이 필요해지면 서버마다 path 표 하나를 쥐는 꼴로 넓힌다 */
-export function attachStream(server: Server, o: { path: string; stream: StreamServer<any, any, any> }): () => void {
+export function attachStream(
+  server: Server,
+  o: { path: string; stream: StreamServer<any, any, any>; origins?: string[] },
+): () => void {
   if (attached.has(server)) throw new Error("이 서버에는 이미 attachStream 이 붙어 있다 — 서버 하나에 한 번만 붙인다");
   attached.add(server);
-  const { path, stream } = o;
+  const { path, stream, origins } = o;
+  /** Origin 이 없으면(브라우저 밖) 받는다 — 남의 사이트가 연 요청만 막는다 */
+  const foreign = (req: IncomingMessage) =>
+    !!origins && req.headers.origin !== undefined && !origins.includes(req.headers.origin);
   /** 지금 열린 연결의 닫기 — 떼어 낼 때 모두 부른다 */
   const open = new Set<() => void>();
   const track = (shut: () => void, onGone: (fn: () => void) => void) => {
@@ -85,7 +93,14 @@ export function attachStream(server: Server, o: { path: string; stream: StreamSe
             connection: "keep-alive",
           });
         }
-        res.write(sseFrame(m));
+        let frame: string;
+        try {
+          frame = sseFrame(m);
+        } catch {
+          // JSON 으로 쓸 수 없는 메시지 — 던지지 않고 그 연결만 닫는다
+          return close(CLOSE.COME_BACK, UNWRITABLE);
+        }
+        res.write(frame);
       },
       close,
       onMessage() {}, // SSE 는 받는 줄이 없다 — command · ask · answer 는 POST 로 온다
@@ -117,14 +132,22 @@ export function attachStream(server: Server, o: { path: string; stream: StreamSe
       }
       // command 는 reply, ask 는 fate 의 배열(JSON), answer 는 204, 실패는 글자(연결의 약속 5)
       if (out.status === 204) return void res.writeHead(204).end();
-      if (out.status === 200)
-        return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(out.body));
+      if (out.status === 200) {
+        // 이 리스너에서 던지면 프로세스가 죽는다 — 쓸 수 없는 본문은 500
+        let json: string | undefined;
+        try {
+          json = JSON.stringify(out.body);
+        } catch {}
+        if (json !== undefined) return void res.writeHead(200, { "content-type": "application/json" }).end(json);
+        out = { status: 500, body: UNWRITABLE };
+      }
       res.writeHead(out.status, { "content-type": "text/plain; charset=utf-8" }).end(String(out.body));
     });
   };
 
   const onRequest = (req: IncomingMessage, res: ServerResponse) => {
     if (!ours(req)) return fallthrough(req, res);
+    if (foreign(req)) return void res.writeHead(403).end();
     if (req.method === "GET" && req.headers.accept?.includes("text/event-stream")) return sse(req, res);
     if (req.method === "POST") return post(req, res);
     fallthrough(req, res);
@@ -139,7 +162,17 @@ export function attachStream(server: Server, o: { path: string; stream: StreamSe
     const conn: Conn = {
       kind: "ws",
       headers: headersOf(req),
-      send: (m) => void (ws.readyState === ws.OPEN && ws.send(JSON.stringify(m))),
+      send(m) {
+        if (ws.readyState !== ws.OPEN) return;
+        let text: string;
+        try {
+          text = JSON.stringify(m);
+        } catch {
+          // JSON 으로 쓸 수 없는 메시지 — 던지지 않고 그 연결만 닫는다
+          return close(CLOSE.COME_BACK, UNWRITABLE);
+        }
+        ws.send(text);
+      },
       close,
       onMessage: (fn) =>
         void ws.on("message", (data) => {
@@ -159,16 +192,18 @@ export function attachStream(server: Server, o: { path: string; stream: StreamSe
   };
 
   const onUpgrade = async (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    // ws 를 들이는 동안이나 받기 전에 소켓이 깨져도 프로세스가 죽지 않게
-    socket.on("error", () => socket.destroy());
     if (!ours(req)) {
       // 다른 upgrade 리스너가 없으면 아무도 받지 않으므로 끊는다
       if (server.listenerCount("upgrade") === 1) socket.destroy();
       return;
     }
+    // ws 를 들이는 동안이나 받기 전에 소켓이 깨져도 프로세스가 죽지 않게 — 남의 path 의 소켓은 그 주인이 듣는다
+    socket.on("error", () => socket.destroy());
+    if (foreign(req)) return void socket.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
     let ws: WebSocketServer;
     try {
-      ws = await (wss ??= import("ws").then((m) => new m.WebSocketServer({ noServer: true })));
+      // 메시지 하나의 위 끝도 POST 본문과 같다 — 넘으면 ws 가 1009 로 닫는다
+      ws = await (wss ??= import("ws").then((m) => new m.WebSocketServer({ noServer: true, maxPayload: BODY_MAX })));
     } catch {
       wss = undefined;
       const text = "웹소켓을 받으려면 ws 를 설치한다(pnpm add ws)";

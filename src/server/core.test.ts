@@ -539,3 +539,49 @@ it("SSE: POST 의 신원을 JSON 으로 쓸 수 없으면 500", async () => {
   expect(res.status).toBe(500);
   s.close();
 });
+
+// ── JSON 으로 쓸 수 없는 값(BigInt · 순환) — 한 값이 프로세스를 죽이지 않게 홉이 한 자리에서 거른다 ──
+
+it("홉: JSON 으로 쓸 수 없는 명령 결과는 ok: false 로 답하고, ask 도 그 실패를 준다", async () => {
+  const loop: Record<string, unknown> = {};
+  loop.self = loop;
+  const s = createStreamServer({ snapshot: () => 0, commands: { big: () => 1n, loop: () => loop } });
+  const c = await join(s);
+  c.emit({ t: "command", id: "b", name: "big", args: [] });
+  c.emit({ t: "command", id: "l", name: "loop", args: [] });
+  await flush();
+  c.emit({ t: "ask", ids: ["b"] });
+  await flush();
+  expect(c.of("reply")).toEqual([
+    { t: "reply", id: "b", ok: false, error: expect.stringContaining("JSON"), version: 0 },
+    { t: "reply", id: "l", ok: false, error: expect.stringContaining("JSON"), version: 0 },
+  ]);
+  expect(c.of("fate")).toEqual([{ t: "fate", id: "b", state: "done", ok: false, error: expect.stringContaining("JSON"), version: 0 }]);
+  // 보낸 것은 모두 JSON 으로 쓸 수 있다
+  for (const m of c.sent) expect(() => JSON.stringify(m)).not.toThrow();
+  s.close();
+});
+
+it("홉: JSON 으로 쓸 수 없는 snapshot 은 그 연결만 4000 으로 닫는다", async () => {
+  const s = createStreamServer({ snapshot: (ctx) => (ctx.channel === "boom" ? { n: 1n } : "s") });
+  const bad = await join(s, { channel: "boom" });
+  expect(bad.closed?.code).toBe(4000);
+  expect(bad.of("snapshot")).toHaveLength(0);
+  const good = await join(s);
+  expect(good.of("snapshot")).toEqual([{ t: "snapshot", version: 0, value: "s" }]);
+  s.close();
+});
+
+it("홉: JSON 으로 쓸 수 없는 publish 는 부른 쪽에 던지고 버전 · 기록에 남기지 않는다", async () => {
+  const s = createStreamServer<number, unknown>({ snapshot: () => 0 });
+  const c = await join(s);
+  const { epoch } = welcomeOf(c);
+  expect(() => s.publish("default", 1n)).toThrow(/JSON/);
+  expect(c.of("change")).toHaveLength(0);
+  s.publish("default", 2);
+  expect(c.of("change")).toEqual([{ t: "change", version: 1, change: 2 }]);
+  // 따라잡기에도 남지 않는다
+  const again = await join(s, { epoch, version: 0 });
+  expect(again.of("change")).toEqual([{ t: "change", version: 1, change: 2 }]);
+  s.close();
+});

@@ -1,7 +1,7 @@
 /** 상태에 이 표식으로 함수를 두면 useStore 가 꺼내기를 그 함수에 맡긴다 — 그 함수는 훅이다 */
 export const USE: unique symbol = Symbol.for("supa-store.use") as never;
 /** 상태 객체에 `[DISPOSE]: () => void` 가 있으면 그 store 를 다시 짓기 직전과 disposeStores 에서 부른다 */
-export const DISPOSE: unique symbol = Symbol.for("supa-store/dispose") as never;
+export const DISPOSE: unique symbol = Symbol.for("supa-store.dispose") as never;
 
 export type SetState<T> = (partial: Partial<T> | ((now: T) => Partial<T>)) => void;
 export type GetState<T> = () => T;

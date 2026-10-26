@@ -327,12 +327,11 @@ export function connect<V, C>(o: ClientOptions<V, C>): StreamClient<V> {
   const sse = (link: Link, token: string | undefined) => {
     // POST 도 같은 신호로 — 연결을 버리면 날아가는 POST 도 함께 끊는다
     const abort = new AbortController();
-    const base: Record<string, string> = { [HEADER.channel]: channel };
-    if (token) base[HEADER.authorization] = `Bearer ${token}`;
     link.stop = () => abort.abort();
-    link.send = (m) => void post(link, m, abort.signal, { ...base, [HEADER.connection]: link.connection ?? "" });
+    link.send = (m) => void post(link, m, abort.signal, { [HEADER.channel]: channel, [HEADER.connection]: link.connection ?? "" });
 
-    const headers: Record<string, string> = { ...base, accept: "text/event-stream" };
+    const headers: Record<string, string> = { [HEADER.channel]: channel, accept: "text/event-stream" };
+    if (token) headers[HEADER.authorization] = `Bearer ${token}`;
     if (version >= 0) {
       headers[HEADER.epoch] = epoch!;
       headers[HEADER.lastEventId] = String(version);
@@ -368,6 +367,12 @@ export function connect<V, C>(o: ClientOptions<V, C>): StreamClient<V> {
   const post = async (link: Link, m: ClientMessage, signal: AbortSignal, headers: Record<string, string>) => {
     let res: Response;
     let body: string;
+    // POST 마다 auth() 를 다시 부른다 — 짧게 사는 토큰이 갱신되면 연 때의 것이 아니라 새 것을 싣는다
+    // auth() 가 던지면 토큰 없이 보낸다 — 홉이 거절하면 아래의 막힌 길로 간다
+    const token = await Promise.resolve()
+      .then(() => o.auth?.())
+      .catch(() => undefined);
+    if (token) headers = { ...headers, [HEADER.authorization]: `Bearer ${token}` };
     try {
       res = await fetch(o.url, {
         method: "POST",

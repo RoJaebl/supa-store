@@ -106,6 +106,16 @@ const messageOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const identityKey = (v: unknown) => JSON.stringify(v) ?? "undefined";
 const keyOf = (who: string, id: string) => `${who}\n${id}`;
 const isStr = (v: unknown) => v === undefined || typeof v === "string";
+/** 보내기 전에 JSON 으로 써 본다 — BigInt · 순환 같은 값 하나가 전송의 겉에서 던져 프로세스를 죽이지 않게. 쓸 수 있으면 undefined
+ *  ponytail: 보낼 때 한 번 더 쓰므로 두 번 직렬화한다. 큰 값이 잦아지면 쓴 글자를 Conn 으로 넘긴다 */
+const unwritable = (what: string, v: unknown) => {
+  try {
+    JSON.stringify(v);
+    return undefined;
+  } catch (e) {
+    return `${what} JSON 으로 쓸 수 없다: ${messageOf(e)}`;
+  }
+};
 
 /** 밖에서 온 메시지의 꼴을 본다 — 홉이 그 칸을 믿고 쓰기 전에 */
 function valid(m: unknown): m is ClientMessage {
@@ -253,6 +263,8 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
       let value: V;
       try {
         value = o.snapshot(ctx);
+        const bad = unwritable("snapshot 을", value);
+        if (bad) throw new Error(bad);
       } catch (e) {
         // 그 연결만 닫는다 — 홉과 다른 연결은 산다
         return shut(s, CLOSE.COME_BACK, `snapshot 실패: ${messageOf(e)}`);
@@ -278,7 +290,9 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
     ran.promise = (async () => {
       let out: Outcome;
       try {
-        out = { ok: true, result: await o.commands![m.name]!(live.ctx, ...m.args) };
+        const result = await o.commands![m.name]!(live.ctx, ...m.args);
+        const bad = unwritable("명령의 결과를", result);
+        out = bad ? { ok: false, error: bad } : { ok: true, result };
       } catch (e) {
         out = { ok: false, error: messageOf(e) };
       }
@@ -326,6 +340,9 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
   const hop: StreamServer<V, C, Id> = {
     publish(name, change) {
       if (down) return;
+      // 버전을 올리기 전에 본다 — 쓸 수 없는 바뀜이 기록에 남아 따라잡기마다 다시 터지지 않게 부른 쪽에 던진다
+      const bad = unwritable("바뀜을", change);
+      if (bad) throw new TypeError(bad);
       const ch = chan(name);
       const version = ++ch.version;
       ch.history.push({ version, change, at: Date.now() });

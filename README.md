@@ -250,7 +250,7 @@ const { data, status, isFetching, error, open } = useStore("infra.terminal", { p
 await open.mutateAsync("/repo"); // 실패하면 던진다
 ```
 
-연결의 칸(`data` · `status` · `isFetching` · `error`)과 명령마다의 칸(`mutate` · `mutateAsync` · `status` · `error` · `retry` …)이 있다.
+연결의 칸(`data` · `status` · `isFetching` · `error`)과 명령마다의 칸(`mutate` · `mutateAsync` · `pending` · `error` · `data` · `reset` · `retry`)이 있다.
 다른 store 에서는 `getStore("infra.terminal").getState().open("/repo")` 처럼 명령 함수로 부르고, 실패하면 던진다.
 
 ### 연결 상태
@@ -306,6 +306,8 @@ export const terminal = createStreamServer<string, Change>({
 `snapshot` 은 동기 함수다(`async` 로 적지 않는다). 비동기로 읽어야 하는 값은 미리 쥐어 두고 `snapshot` 이 그것을 돌려준다.
 `publish(channel, change)` 는 그 채널에 붙은 모두에게 보낸다. 채널마다 버전 · 기록 · 답 기록을 따로 쥐므로 사람마다 다른 값은 채널에 신원을 넣어 나눈다.
 명령 안의 `ctx.request(method, params)` 는 클라이언트의 `handlers` 에 묻는다.
+보내는 값은 JSON 으로 쓸 수 있어야 한다. 쓸 수 없는 값(BigInt · 순환 객체 · 프로세스 핸들)이면 명령은 `ok: false` 로 답하고, `snapshot` 은 그
+연결만 「곧 다시 와라」로 닫고, `publish` 는 버전을 올리지 않고 부른 쪽에 던진다.
 
 ### 두 진입점
 
@@ -324,13 +326,18 @@ export const POST = streamHandler(terminal); // 명령 · ask · answer
 
 - `attachStream` 의 웹소켓은 선택 peer `ws`(`>=8`)로 받는다. 설치하지 않았으면 SSE 만 받는다. **http 서버 하나에 `attachStream` 은 한 번만** 건다.
 - **Web 표준 진입점은 SSE 만 받는다.** 웹소켓으로 갈아타는 길은 런타임마다 달라 두지 않았다. 이런 틀의 앱은 클라이언트를 `transport: "sse"` 로 적는다.
+- 명령의 `POST` 본문과 웹소켓 메시지 하나는 1 MiB 까지 받는다(넘으면 413, 웹소켓은 1009 로 닫는다).
 - 서버 쪽은 Node 20 이상(전역 `crypto` · `fetch`)이 필요하다.
 
 ### 인증
 
-`auth()` 의 값은 웹소켓이면 `hello.auth` 로, SSE 와 명령의 `POST` 면 `Authorization` 헤더로 싣고, 다시 이을 때마다 `auth()` 를 다시 부른다.
+`auth()` 의 값은 웹소켓이면 `hello.auth` 로, SSE 와 명령의 `POST` 면 `Authorization` 헤더로 싣고, 다시 이을 때마다(SSE 는 `POST` 마다도) `auth()` 를 다시 부른다.
 **토큰을 주소의 쿼리에 싣지 않는다.** `auth` 가 없으면 쿠키만 쓴다. 서버의 `authorize` 가 거절하면 「다시 오지 마라」로 닫혀 다시 잇지 않는다.
 웹소켓은 10초 안에 `hello` 가 오지 않아도 서버가 닫는다.
+
+**쿠키로 인증하면 `origins` 를 둔다.** 웹소켓은 CORS 를 따르지 않으므로 남의 사이트가 사용자의 쿠키로 연결을 열 수 있다.
+`attachStream(server, { path, stream, origins: ["https://app.example"] })` · `streamHandler(stream, { origins })` 는 `Origin` 헤더가
+있고 목록에 없는 요청을 403 으로 막는다(`Origin` 이 없는 브라우저 밖의 요청은 받는다). 또는 `authorize` 에서 `ctx.headers.origin` 을 본다.
 
 ### 시험에서
 
@@ -338,6 +345,8 @@ export const POST = streamHandler(terminal); // 명령 · ask · answer
 import { disposeStores } from "supa-store";
 afterEach(() => disposeStores()); // 열린 연결을 닫는다(store 는 다음에 꺼낼 때 다시 짓는다)
 ```
+
+`disposeStores()` 는 그려져 있는 화면을 다시 그리지 않는다 — 시험의 뒷정리에 쓴다.
 
 ## 생성 파일
 

@@ -16,9 +16,9 @@ afterEach(async () => {
 });
 
 /** 실제 http 서버를 띄우고 attachStream 을 붙인다 — prior 는 붙이기 전에 있던 요청 처리기 */
-async function serve(stream: StreamServer<any, any, any>, prior?: http.RequestListener) {
+async function serve(stream: StreamServer<any, any, any>, prior?: http.RequestListener, origins?: string[]) {
   const server = http.createServer(prior);
-  const detach = attachStream(server, { path: PATH, stream });
+  const detach = attachStream(server, { path: PATH, stream, origins });
   server.listen(0);
   await once(server, "listening");
   const base = `127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -268,13 +268,117 @@ it("node: POST 본문이 1 MiB 를 넘으면 413 을 받는다", async () => {
 });
 
 /** 날 소켓으로 웹소켓 Upgrade 요청을 보낸다 — 브라우저 꼴 클라이언트가 못 보내는 것을 보내려고 */
-function rawUpgrade(wsUrl: string) {
+function rawUpgrade(wsUrl: string, extra = "") {
   const url = new URL(wsUrl);
   const sock = connect(Number(url.port), url.hostname);
   cleanup.push(() => sock.destroy());
   sock.write(
     `GET ${PATH} HTTP/1.1\r\nHost: ${url.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
-      `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+      `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n${extra}\r\n`,
   );
   return sock;
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** 이 시험 동안 잡히지 않은 거절 · 예외를 모은다 — 하나라도 있으면 실제 서버에서는 프로세스가 죽는다 */
+function watchProcess() {
+  const caught: unknown[] = [];
+  const note = (e: unknown) => void caught.push(e);
+  process.on("unhandledRejection", note);
+  process.on("uncaughtException", note);
+  cleanup.push(() => (process.off("unhandledRejection", note), process.off("uncaughtException", note)));
+  return caught;
+}
+
+it("node: JSON 으로 쓸 수 없는 값(BigInt)이 명령 결과 · snapshot · publish 에 와도 프로세스는 산다", async () => {
+  const caught = watchProcess();
+  let bad = false;
+  const stream = createStreamServer<unknown, unknown>({ snapshot: () => (bad ? { n: 1n } : 0), commands: { big: () => 1n } });
+  const { http, ws } = await serve(stream);
+  // 웹소켓 command
+  const c = await wsOpen(ws);
+  c.send({ t: "hello" });
+  await c.until(2);
+  c.send({ t: "command", id: "w1", name: "big", args: [] });
+  expect((await c.until(3))[2]).toMatchObject({ t: "reply", id: "w1", ok: false });
+  // SSE 의 POST command
+  const e = await sseOpen(http);
+  const [w] = await e.messages(1);
+  const connection = (w as Extract<ServerMessage, { t: "welcome" }>).connection;
+  const res = await post(http, { "x-supa-connection": connection }, { t: "command", id: "s1", name: "big", args: [] });
+  expect(res.status).toBe(200);
+  expect(await res.json()).toMatchObject({ id: "s1", ok: false });
+  // publish 는 부른 쪽에 던지고 연결에는 아무것도 가지 않는다
+  expect(() => stream.publish("default", 1n)).toThrow();
+  // snapshot — 그 연결만 4000
+  bad = true;
+  const d = await wsOpen(ws);
+  d.send({ t: "hello" });
+  expect((await d.closed).code).toBe(4000);
+  const f = await sseOpen(http);
+  expect((await f.messages(2))[1]).toMatchObject({ t: "close", code: 4000 });
+  await sleep(20);
+  expect(caught).toEqual([]);
+  // 앞서 연 연결은 그대로 산다
+  bad = false;
+  stream.publish("default", 5);
+  expect((await c.until(4))[3]).toEqual({ t: "change", version: 1, change: 5 });
+});
+
+it("node: 겉의 send 는 JSON 으로 쓸 수 없는 메시지에 던지지 않고 그 연결을 4000 으로 닫는다. POST 의 본문이면 500", async () => {
+  const caught = watchProcess();
+  const threw: string[] = [];
+  const stub: StreamServer<any, any, any> = {
+    publish() {},
+    close() {},
+    attach(conn) {
+      conn.send({ t: "welcome", epoch: "e", version: 0, connection: "k" });
+      try {
+        conn.send({ t: "snapshot", version: 0, value: 1n });
+      } catch {
+        threw.push(conn.kind);
+      }
+    },
+    handlePost: async () => ({ status: 200, body: { n: 1n } }),
+  };
+  const { http, ws } = await serve(stub);
+  const c = await wsOpen(ws);
+  const code = await Promise.race([c.closed.then((e) => e.code), sleep(1000).then(() => "열린 채")]);
+  expect(code).toBe(4000);
+  expect(c.got.map((m) => m.t)).toEqual(["welcome"]);
+  const e = await sseOpen(http);
+  expect((await e.messages(2)).map((m) => m.t)).toEqual(["welcome", "close"]);
+  const res = await fetch(http, { method: "POST", body: "{}", signal: AbortSignal.timeout(1000) }).catch(() => null);
+  expect(res?.status).toBe(500);
+  await sleep(20);
+  expect(threw).toEqual([]);
+  expect(caught).toEqual([]);
+});
+
+it("node: 웹소켓 메시지가 1 MiB 를 넘으면 1009 로 닫는다 — POST 와 같은 위 끝", async () => {
+  const stream = createStreamServer({ snapshot: () => 0 });
+  const { ws } = await serve(stream);
+  const c = await wsOpen(ws);
+  c.ws.send("x".repeat((1 << 20) + 1));
+  const code = await Promise.race([c.closed.then((e) => e.code), sleep(2000).then(() => "열린 채")]);
+  expect(code).toBe(1009);
+});
+
+it("node: origins 를 주면 목록 밖 Origin 의 웹소켓 Upgrade · SSE · POST 는 403, Origin 이 없거나 목록 안이면 받는다", async () => {
+  const stream = createStreamServer({ snapshot: () => 0 });
+  const { http, ws } = await serve(stream, undefined, ["https://app.example"]);
+  const head = async (extra: string) => {
+    const sock = rawUpgrade(ws, extra);
+    const [d] = await once(sock, "data");
+    return String(d).split("\r\n")[0];
+  };
+  expect(await head("Origin: https://evil.example\r\n")).toMatch(/^HTTP\/1\.1 403/);
+  expect(await head("Origin: https://app.example\r\n")).toMatch(/^HTTP\/1\.1 101/);
+  expect(await head("")).toMatch(/^HTTP\/1\.1 101/);
+  const evil = { origin: "https://evil.example" };
+  expect((await fetch(http, { headers: { accept: "text/event-stream", ...evil } })).status).toBe(403);
+  expect((await post(http, evil, { t: "ask", ids: [] })).status).toBe(403);
+  const ok = await sseOpen(http, { origin: "https://app.example" });
+  expect(ok.res.status).toBe(200);
+});
