@@ -28,7 +28,16 @@ const fit = (reason: string) => {
 
 const DETACHED = "서버가 떼어 낸다";
 
+/** 이미 붙은 서버 — 한 서버에 둘을 붙이면 앞 처리기를 걷고 되돌리는 일이 서로 겹치므로 막는다 */
+const attached = new WeakSet<Server>();
+
+/** 한 Node http 서버의 한 path 에 웹소켓 · SSE · POST 를 붙인다. 돌려준 함수가 떼어 낸다
+ *  - 서버 하나에 한 번만 붙는다 — 두 번째 attachStream 은 던진다. 여러 줄기가 필요하면 서버를 나누거나 한 홉에 채널로 가른다
+ *  - 붙기 전의 request 리스너(Express 등)는 우리 처리기 뒤로 옮겨 그 path 밖의 요청을 받게 하고, 떼어 내면 되돌린다
+ *  ponytail: 한 서버 한 번. 한 서버에 path 여럿이 필요해지면 서버마다 path 표 하나를 쥐는 꼴로 넓힌다 */
 export function attachStream(server: Server, o: { path: string; stream: StreamServer<any, any, any> }): () => void {
+  if (attached.has(server)) throw new Error("이 서버에는 이미 attachStream 이 붙어 있다 — 서버 하나에 한 번만 붙인다");
+  attached.add(server);
   const { path, stream } = o;
   /** 지금 열린 연결의 닫기 — 떼어 낼 때 모두 부른다 */
   const open = new Set<() => void>();
@@ -70,7 +79,9 @@ export function attachStream(server: Server, o: { path: string; stream: StreamSe
           started = true;
           res.writeHead(200, {
             "content-type": "text/event-stream; charset=utf-8",
-            "cache-control": "no-cache",
+            // 프록시(nginx 등)가 쌓아 두거나 고치지 않고 곧바로 흘리게
+            "cache-control": "no-cache, no-transform",
+            "x-accel-buffering": "no",
             connection: "keep-alive",
           });
         }
@@ -90,8 +101,10 @@ export function attachStream(server: Server, o: { path: string; stream: StreamSe
     req.on("data", (c: Buffer) => {
       size += c.length;
       if (size > BODY_MAX) {
-        res.writeHead(413).end();
-        req.destroy();
+        if (res.headersSent) return;
+        // 답을 다 보낸 뒤에 끊는다 — 먼저 끊으면 413 이 닿지 않는다
+        res.on("finish", () => req.destroy());
+        res.writeHead(413, { connection: "close" }).end();
       } else chunks.push(c);
     });
     req.on("end", async () => {
@@ -120,6 +133,9 @@ export function attachStream(server: Server, o: { path: string; stream: StreamSe
   /** 웹소켓 하나를 Conn 으로 — 메시지는 JSON 글자 하나, 꼴은 홉이 본다 */
   const wsConn = (ws: WebSocket, req: IncomingMessage) => {
     const close = (code: number, reason: string) => ws.close(code, fit(reason));
+    // 망가진 프레임(가리지 않은 프레임 · 너무 큼 · 틀린 UTF-8)이면 ws 가 error 를 낸다 — 듣지 않으면 프로세스가 죽는다
+    // ws 는 그 뒤 close 를 내므로 정리는 onClose 가 한다
+    ws.on("error", () => {});
     const conn: Conn = {
       kind: "ws",
       headers: headersOf(req),
@@ -131,7 +147,8 @@ export function attachStream(server: Server, o: { path: string; stream: StreamSe
           try {
             m = JSON.parse(String(data));
           } catch {
-            return; // JSON 이 아니면 버린다
+            // JSON 이 아니면 버린다 — 꼴이 틀린 메시지를 홉이 버리는 것과 같다(연결은 살린다)
+            return;
           }
           fn(m);
         }),
@@ -142,6 +159,8 @@ export function attachStream(server: Server, o: { path: string; stream: StreamSe
   };
 
   const onUpgrade = async (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    // ws 를 들이는 동안이나 받기 전에 소켓이 깨져도 프로세스가 죽지 않게
+    socket.on("error", () => socket.destroy());
     if (!ours(req)) {
       // 다른 upgrade 리스너가 없으면 아무도 받지 않으므로 끊는다
       if (server.listenerCount("upgrade") === 1) socket.destroy();
@@ -172,5 +191,7 @@ export function attachStream(server: Server, o: { path: string; stream: StreamSe
     for (const fn of prior) server.on("request", fn);
     for (const shut of [...open]) shut();
     open.clear();
+    void wss?.then((w) => w.close(), () => {});
+    attached.delete(server);
   };
 }

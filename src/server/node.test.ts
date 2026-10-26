@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { once } from "node:events";
 import http from "node:http";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ServerMessage } from "../stream/protocol.js";
 import { createStreamServer, type StreamServer } from "./core.js";
@@ -104,6 +104,9 @@ it("node: SSE 로 같은 메시지를 data: 한 줄 JSON 으로 받고, snapshot
   const c = await sseOpen(http);
   expect(c.res.status).toBe(200);
   expect(c.res.headers.get("content-type")).toMatch(/^text\/event-stream/);
+  // 프록시가 쌓아 두거나 고치지 않게
+  expect(c.res.headers.get("cache-control")).toBe("no-cache, no-transform");
+  expect(c.res.headers.get("x-accel-buffering")).toBe("no");
   const [welcome, snapshot] = await c.until(2);
   // welcome 에는 id 가 없다 — 버전이 없는 메시지로 Last-Event-ID 를 덮지 않게
   expect(welcome!.id).toBeUndefined();
@@ -225,14 +228,7 @@ it("node: ws 가 없으면 웹소켓 Upgrade 는 「ws 를 설치한다」로 �
   const stream = createStreamServer({ snapshot: () => 0 });
   const { http, ws } = await serve(stream);
   // 브라우저 꼴 클라이언트는 실패의 본문을 주지 않으므로 날 소켓으로 Upgrade 를 보내 응답을 읽는다
-  const { connect } = await import("node:net");
-  const url = new URL(ws);
-  const sock = connect(Number(url.port), url.hostname);
-  cleanup.push(() => sock.destroy());
-  sock.write(
-    `GET ${PATH} HTTP/1.1\r\nHost: ${url.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
-      `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
-  );
+  const sock = rawUpgrade(ws);
   let text = "";
   sock.on("data", (d) => (text += d));
   await once(sock, "end");
@@ -241,3 +237,44 @@ it("node: ws 가 없으면 웹소켓 Upgrade 는 「ws 를 설치한다」로 �
   const c = await sseOpen(http);
   expect((await c.messages(2)).map((m) => m.t)).toEqual(["welcome", "snapshot"]);
 });
+
+it("node: 망가진 웹소켓 프레임이 와도 프로세스는 살고 새 연결을 받는다", async () => {
+  const stream = createStreamServer({ snapshot: () => 0 });
+  const { ws } = await serve(stream);
+  const sock = rawUpgrade(ws);
+  const [head] = await once(sock, "data");
+  expect(String(head)).toMatch(/^HTTP\/1\.1 101/);
+  // 클라이언트 프레임은 가려야(mask) 한다 — 가리지 않은 프레임이면 ws 가 error 를 낸다
+  sock.write(Buffer.from([0x81, 0x01, 0x41]));
+  await once(sock, "close");
+  const c = await wsOpen(ws);
+  c.send({ t: "hello" });
+  expect((await c.until(2)).map((m) => m.t)).toEqual(["welcome", "snapshot"]);
+});
+
+it("node: 한 서버에 두 번 붙이면 던지고, 떼어 낸 뒤에는 다시 붙는다", async () => {
+  const stream = createStreamServer({ snapshot: () => 0 });
+  const { server, detach } = await serve(stream);
+  expect(() => attachStream(server, { path: "/other", stream })).toThrow(/한 번만/);
+  detach();
+  attachStream(server, { path: "/other", stream })();
+});
+
+it("node: POST 본문이 1 MiB 를 넘으면 413 을 받는다", async () => {
+  const stream = createStreamServer({ snapshot: () => 0 });
+  const { http } = await serve(stream);
+  const res = await fetch(http, { method: "POST", body: "x".repeat((1 << 20) + 1) });
+  expect(res.status).toBe(413);
+});
+
+/** 날 소켓으로 웹소켓 Upgrade 요청을 보낸다 — 브라우저 꼴 클라이언트가 못 보내는 것을 보내려고 */
+function rawUpgrade(wsUrl: string) {
+  const url = new URL(wsUrl);
+  const sock = connect(Number(url.port), url.hostname);
+  cleanup.push(() => sock.destroy());
+  sock.write(
+    `GET ${PATH} HTTP/1.1\r\nHost: ${url.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+      `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+  );
+  return sock;
+}
