@@ -22,7 +22,7 @@ export function helloFromHeaders(headers: Record<string, string | undefined>): E
     t: "hello",
     channel: headers[HEADER.channel] || undefined,
     epoch: headers[HEADER.epoch] || undefined,
-    version: Number.isInteger(version) ? version : undefined,
+    version: Number.isInteger(version) && version! >= 0 ? version : undefined,
     auth: tokenOf(headers),
   };
 }

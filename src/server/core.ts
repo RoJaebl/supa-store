@@ -7,7 +7,8 @@ import { helloFromHeaders, tokenOf } from "./sse.js";
  *  - headers: 연결을 연 요청의 헤더, 이름은 소문자. SSE 는 이것이 곧 hello 다(Authorization · X-Supa-Channel · X-Supa-Epoch ·
  *    Last-Event-ID) — 그래서 SSE 는 onMessage 를 부르지 않아도 되고, 홉은 attach 하자마자 인증한다
  *  - close: 웹소켓은 닫기 코드로, SSE 는 close 메시지를 쓰고 응답을 끝낸다. SSE 에서 첫 send 전에 close 가 오면
- *    아직 응답 머리를 쓰지 않았으므로 HTTP 상태로 답한다(4001 → 401)
+ *    아직 응답 머리를 쓰지 않았으므로 HTTP 상태로 답한다 — 4001 → 401, 그 밖의 코드 → 503. 홉은 무엇을 보냈는지 모르므로
+ *    이 판정은 전송의 겉(node · web)이 한다
  *  - onClose: 상대가 끊었을 때, 그리고 close 를 부른 뒤에 — 여러 번 불려도 된다 */
 export interface Conn {
   send(m: ServerMessage): void;
@@ -72,13 +73,15 @@ type Posted = Extract<ClientMessage, { t: "command" | "ask" | "answer" }>;
 
 class Rejection extends Error {}
 
-/** 답 기록 하나 — reply 가 없으면 아직 도는 중 */
+/** 답 기록 하나 — reply 가 없으면 아직 도는 중. 키는 신원과 요청 id 를 함께(keyOf) */
 interface Ran {
+  /** 시작한 때, 끝나면 끝난 때 — 쥐는 기간은 답을 낸 때부터 센다 */
   at: number;
   promise: Promise<Reply>;
   reply?: Reply;
 }
 interface Channel {
+  name: string;
   version: number;
   history: Array<{ version: number; change: unknown; at: number }>;
   replies: Map<string, Ran>;
@@ -92,12 +95,14 @@ interface Session<Id> {
   ping?: ReturnType<typeof setInterval>;
   requests: Map<string, { resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout> }>;
   /** welcome 을 보낸 뒤에 선다 */
-  live?: { channel: Channel; identity: Id; ctx: ConnCtx<Id> };
+  live?: { channel: Channel; who: string; ctx: ConnCtx<Id> };
 }
 
 const messageOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
-// ponytail: 신원 비교는 JSON 글자로 — 키 순서가 다른 객체는 다른 신원으로 본다
-const sameIdentity = (a: unknown, b: unknown) => Object.is(a, b) || JSON.stringify(a) === JSON.stringify(b);
+// ponytail: 신원은 JSON 글자로 가른다 — 키 순서가 다른 객체는 다른 신원, JSON 으로 쓸 수 없는 신원(순환)은 던진다
+const identityKey = (v: unknown) => JSON.stringify(v) ?? "undefined";
+const keyOf = (who: string, id: string) => `${who}\n${id}`;
+const isStr = (v: unknown) => v === undefined || typeof v === "string";
 
 /** 밖에서 온 메시지의 꼴을 본다 — 홉이 그 칸을 믿고 쓰기 전에 */
 function valid(m: unknown): m is ClientMessage {
@@ -109,8 +114,14 @@ function valid(m: unknown): m is ClientMessage {
     case "ask":
       return Array.isArray(x.ids) && x.ids.every((id) => typeof id === "string");
     case "answer":
-      return typeof x.id === "string";
+      return typeof x.id === "string" && typeof x.ok === "boolean" && (x.ok || typeof x.error === "string");
     case "hello":
+      return (
+        isStr(x.channel) &&
+        isStr(x.epoch) &&
+        isStr(x.auth) &&
+        (x.version === undefined || (Number.isInteger(x.version) && (x.version as number) >= 0))
+      );
     case "pong":
       return true;
     default:
@@ -126,10 +137,12 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
   const channels = new Map<string, Channel>();
   /** connection id → 붙은 연결(hello 전 것까지) */
   const sessions = new Map<string, Session<Id>>();
+  /** close() 뒤 — 새 연결은 4000 으로 닫고 publish 는 하지 않는다 */
+  let down = false;
 
   const chan = (name: string) => {
     let ch = channels.get(name);
-    if (!ch) channels.set(name, (ch = { version: 0, history: [], replies: new Map(), sessions: new Set() }));
+    if (!ch) channels.set(name, (ch = { name, version: 0, history: [], replies: new Map(), sessions: new Set() }));
     return ch;
   };
 
@@ -150,7 +163,12 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
     clearTimeout(s.helloTimer);
     clearInterval(s.ping);
     sessions.delete(s.id);
-    s.live?.channel.sessions.delete(s);
+    const ch = s.live?.channel;
+    if (ch) {
+      ch.sessions.delete(s);
+      // 클라이언트가 지은 이름의 빈 채널이 쌓이지 않게 — 버전이 오른 채널은 기록이 버전을 지키므로 남긴다
+      if (ch.version === 0 && ch.sessions.size === 0 && ch.replies.size === 0) channels.delete(ch.name);
+    }
     for (const r of s.requests.values()) {
       clearTimeout(r.timer);
       r.reject(new Error(TEXT.commandFailed));
@@ -175,7 +193,7 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
   const identify = async (a: AuthCtx) => {
     const identity = (await o.authorize?.(a)) as Id;
     const channel = o.channel ? o.channel({ ...a, identity }) : (a.channel ?? "default");
-    return { identity, channel };
+    return { identity, channel, key: identityKey(identity) };
   };
 
   const request = (s: Session<Id>, method: string, params: unknown[] = []) => {
@@ -193,7 +211,7 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
 
   /** hello(SSE 는 헤더)를 받아 인증하고 welcome 뒤 따라잡기 — 따라잡을 기록이 없으면 snapshot */
   const welcome = async (s: Session<Id>, hello: Extract<ClientMessage, { t: "hello" }>) => {
-    let who: { identity: Id; channel: string };
+    let who: { identity: Id; channel: string; key: string };
     try {
       who = await identify(authCtx(hello.auth, hello.channel, s.conn.headers));
     } catch (e) {
@@ -202,12 +220,13 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
     if (s.closed) return;
     const ch = chan(who.channel);
     const ctx: ConnCtx<Id> = {
-      ...who,
+      identity: who.identity,
+      channel: who.channel,
       token: hello.auth,
       connection: s.id,
       request: (method, params) => request(s, method, params),
     };
-    s.live = { channel: ch, identity: who.identity, ctx };
+    s.live = { channel: ch, who: who.key, ctx };
     ch.sessions.add(s);
     trim(ch);
     s.conn.send({ t: "welcome", epoch, version: ch.version, connection: s.id });
@@ -234,7 +253,9 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
     const live = s.live!;
     const ch = live.channel;
     trim(ch);
-    const had = ch.replies.get(m.id);
+    // 다른 신원의 같은 id 는 다른 기록이다 — 남의 답을 받지도, 남의 명령을 막지도 않는다
+    const key = keyOf(live.who, m.id);
+    const had = ch.replies.get(key);
     if (had) return had.promise;
     const ran = { at: Date.now() } as Ran;
     ran.promise = (async () => {
@@ -246,15 +267,20 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
       } catch (e) {
         out = { ok: false, error: messageOf(e) };
       }
+      // 쥐는 기간은 답을 낸 때부터 — 오래 돈 명령이 끝나자마자 잘려 다시 돌지 않게
+      // 뒤로 옮겨 trim 이 앞에서부터 at 차례로 자르게 한다
+      ran.at = Date.now();
+      ch.replies.delete(key);
+      ch.replies.set(key, ran);
       // 답할 때의 버전 — 명령이 낸 바뀜이 이미 들어 있다
       return (ran.reply = { t: "reply", id: m.id, ...out, version: ch.version });
     })();
-    ch.replies.set(m.id, ran);
+    ch.replies.set(key, ran);
     return ran.promise;
   };
 
-  const fate = (ch: Channel, id: string): Fate => {
-    const r = ch.replies.get(id);
+  const fate = (ch: Channel, who: string, id: string): Fate => {
+    const r = ch.replies.get(keyOf(who, id));
     if (!r) return { t: "fate", id, state: "unknown-id" };
     if (!r.reply) return { t: "fate", id, state: "running" };
     const { t: _, ...rest } = r.reply;
@@ -274,8 +300,9 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
   const dispatch = async (s: Session<Id>, m: Posted): Promise<Reply | Fate[] | null> => {
     if (m.t === "command") return run(s, m);
     if (m.t === "ask") {
-      trim(s.live!.channel);
-      return m.ids.map((id) => fate(s.live!.channel, id));
+      const { channel, who } = s.live!;
+      trim(channel);
+      return m.ids.map((id) => fate(channel, who, id));
     }
     answer(s, m);
     return null;
@@ -283,6 +310,7 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
 
   return {
     publish(name, change) {
+      if (down) return;
       const ch = chan(name);
       const version = ++ch.version;
       ch.history.push({ version, change, at: Date.now() });
@@ -291,6 +319,7 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
     },
 
     attach(conn) {
+      if (down) return conn.close(CLOSE.COME_BACK, "서버가 내려갔다");
       const s: Session<Id> = { id: crypto.randomUUID(), conn, closed: false, requests: new Map() };
       sessions.set(s.id, s);
       conn.onClose(() => drop(s));
@@ -300,14 +329,19 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
       let greeted = false;
       conn.onMessage((m) => {
         if (s.closed || !valid(m)) return;
-        // hello 를 받기 전까지 다른 메시지는 처리하지 않는다
-        if (!greeted) {
-          if (m.t !== "hello") return;
+        if (!greeted && m.t === "hello") {
           greeted = true;
           clearTimeout(s.helloTimer);
           return void welcome(s, m);
         }
-        if (!s.live || m.t === "hello" || m.t === "pong") return;
+        if (m.t === "hello" || m.t === "pong") return;
+        // welcome 전의 command · ask 는 처리하지 않고 실패로 답한다 — 클라이언트가 영영 기다리지 않게
+        if (!s.live) {
+          if (m.t === "answer") return;
+          for (const id of m.t === "command" ? [m.id] : m.ids)
+            s.conn.send({ t: "reply", id, ok: false, error: TEXT.commandFailed, version: 0 });
+          return;
+        }
         void dispatch(s, m).then((out) => {
           if (s.closed || !out) return;
           for (const x of Array.isArray(out) ? out : [out]) s.conn.send(x);
@@ -326,22 +360,25 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
       const s = sessions.get(req.headers[HEADER.connection] ?? "");
       if (!s?.live) return { status: 404, body: "그 연결이 없다" };
       // POST 마다 다시 인증하고, 신원과 채널이 그 연결의 것과 같은지 본다
-      let who: { identity: Id; channel: string };
+      let who: { identity: Id; channel: string; key: string };
       try {
+        // 신원을 JSON 으로 쓸 수 없으면 identify 가 던진다 → 500
         who = await identify(authCtx(tokenOf(req.headers), req.headers[HEADER.channel] || undefined, req.headers));
       } catch (e) {
         return e instanceof Rejection ? { status: 401, body: e.message } : { status: 500, body: messageOf(e) };
       }
       if (s.closed) return { status: 404, body: "그 연결이 없다" };
       const live = s.live;
-      if (!sameIdentity(who.identity, live.identity) || who.channel !== live.ctx.channel)
+      if (who.key !== live.who || who.channel !== live.ctx.channel)
         return { status: 403, body: "그 연결의 신원 · 채널이 아니다" };
       const out = await dispatch(s, m);
       return out === null ? { status: 204, body: null } : { status: 200, body: out };
     },
 
     close() {
+      down = true;
       for (const s of [...sessions.values()]) shut(s, CLOSE.COME_BACK, "서버가 내려간다");
+      channels.clear();
     },
   };
 }

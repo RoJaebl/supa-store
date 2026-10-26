@@ -202,12 +202,16 @@ it("홉: authorize 가 거절하면 4001 로 닫는다. hello 가 10초 안에 �
   const good = await join(s, { auth: "좋은" });
   expect(good.of("snapshot")).toEqual([{ t: "snapshot", version: 0, value: "나" }]);
 
-  // hello 전의 다른 메시지는 처리하지 않는다
+  // hello 전의 다른 메시지는 처리하지 않는다 — command · ask 에는 실패로 답한다
   const silent = fakeConn();
   s.attach(silent);
-  silent.emit({ t: "ask", ids: ["x"] });
+  silent.emit({ t: "ask", ids: ["x", "y"] });
+  silent.emit({ t: "command", id: "c", name: "아무거나", args: [] });
+  silent.emit({ t: "answer", id: "a", ok: true, result: 1 });
   await vi.advanceTimersByTimeAsync(9_999);
-  expect(silent.sent).toEqual([]);
+  expect(silent.sent).toEqual(
+    ["x", "y", "c"].map((id) => ({ t: "reply", id, ok: false, error: "연결 끊김. 명령 실패", version: 0 })),
+  );
   expect(silent.closed).toBeUndefined();
   await vi.advanceTimersByTimeAsync(1);
   expect(silent.closed?.code).toBe(4000);
@@ -237,6 +241,11 @@ it("홉: ctx.request 는 클라이언트의 answer 로 풀리고, 30초 안에 �
   await flush();
   const [req] = c.of("request");
   expect(req).toEqual({ t: "request", id: expect.any(String), method: "confirm", params: ["지울까?"] });
+  // 꼴이 틀린 answer 는 버린다
+  c.emit({ t: "answer", id: req!.id, ok: "예" } as any);
+  c.emit({ t: "answer", id: req!.id, ok: false } as any);
+  await flush();
+  expect(c.of("reply")).toHaveLength(0);
   c.emit({ t: "answer", id: req!.id, ok: true, result: "예" });
   await flush();
   expect(c.of("reply")).toEqual([{ t: "reply", id: "r1", ok: true, result: "예", version: 0 }]);
@@ -379,4 +388,126 @@ it("sseFrame: 메시지 하나를 data: 한 줄 JSON 으로 쓰고, snapshot · 
   expect(sseFrame({ t: "change", version: 3, change: { a: 1 } })).toBe('id: 3\ndata: {"t":"change","version":3,"change":{"a":1}}\n\n');
   expect(sseFrame({ t: "snapshot", version: 0, value: "줄\n바꿈" })).toBe('id: 0\ndata: {"t":"snapshot","version":0,"value":"줄\\n바꿈"}\n\n');
   expect(sseFrame({ t: "ping" })).toBe('data: {"t":"ping"}\n\n');
+});
+
+it("홉: 답 기록은 답을 낸 때부터 5분을 쥔다 — 그 안에는 같은 id 를 다시 돌리지 않는다", async () => {
+  let calls = 0;
+  const s = createStreamServer({
+    snapshot: () => 0,
+    commands: { long: () => (calls++, new Promise((r) => setTimeout(() => r("끝"), 290_000))) },
+  });
+  const c = await join(s);
+  const fates = async () => {
+    c.emit({ t: "ask", ids: ["r"] });
+    await flush();
+    return c.of("fate").at(-1)?.state;
+  };
+  c.emit({ t: "command", id: "r", name: "long", args: [] });
+  await vi.advanceTimersByTimeAsync(290_000); // 끝났다
+  await vi.advanceTimersByTimeAsync(200_000); // 시작부터는 490초, 끝난 뒤로는 200초
+  expect(await fates()).toBe("done");
+  c.emit({ t: "command", id: "r", name: "long", args: [] });
+  await flush();
+  expect(calls).toBe(1);
+  expect(c.of("reply")).toHaveLength(2);
+  await vi.advanceTimersByTimeAsync(100_001); // 끝난 뒤로 5분이 지났다
+  expect(await fates()).toBe("unknown-id");
+  s.close();
+});
+
+it("홉: hello 의 칸이 틀린 꼴이면 받지 않는다", async () => {
+  const s = createStreamServer({ snapshot: () => 0 });
+  for (const bad of [{ channel: 5 }, { epoch: {} }, { auth: 1 }, { version: -1 }, { version: 1.5 }]) {
+    const c = fakeConn();
+    s.attach(c);
+    c.emit({ t: "hello", ...bad } as any);
+    await flush();
+    expect(c.of("welcome")).toHaveLength(0);
+  }
+  await vi.advanceTimersByTimeAsync(10_000);
+  s.close();
+});
+
+it("홉: 버전이 0 이고 연결 · 답 기록이 없는 채널만 지운다 — 기록이 있는 채널은 남는다", async () => {
+  const del = vi.spyOn(Map.prototype, "delete");
+  const s = createStreamServer<number, string>({ snapshot: () => 0, commands: { hit: () => 1 } });
+  const { epoch } = welcomeOf(await join(s, { channel: "빈" }));
+  const deleted = () => del.mock.calls.map((a) => a[0]);
+  // 빈 채널의 마지막 연결이 떠나면 채널을 지운다
+  const empty = await join(s, { channel: "빈2" });
+  empty.close(1000, "");
+  expect(deleted()).toContain("빈2");
+  // 버전이 오른 채널은 남아 따라잡기가 된다
+  const pub = await join(s, { channel: "p" });
+  s.publish("p", "x");
+  pub.close(1000, "");
+  expect(deleted()).not.toContain("p");
+  expect((await join(s, { channel: "p", epoch, version: 0 })).of("change")).toHaveLength(1);
+  // 답 기록이 있는 채널도 남아 같은 id 를 다시 돌리지 않는다
+  const r = await join(s, { channel: "r" });
+  r.emit({ t: "command", id: "q", name: "hit", args: [] });
+  await flush();
+  r.close(1000, "");
+  expect(deleted()).not.toContain("r");
+  del.mockRestore();
+  s.close();
+});
+
+it("홉: 답 기록은 신원마다 따로다 — 다른 신원의 같은 id 는 새로 돌고, ask 는 unknown-id", async () => {
+  let calls = 0;
+  const s = createStreamServer({ authorize: (ctx) => ctx.token, snapshot: () => 0, commands: { hit: (ctx) => `${ctx.identity}:${++calls}` } });
+  const kim = await join(s, { auth: "kim" });
+  const lee = await join(s, { auth: "lee" });
+  kim.emit({ t: "command", id: "same", name: "hit", args: [] });
+  await flush();
+  lee.emit({ t: "ask", ids: ["same"] });
+  lee.emit({ t: "command", id: "same", name: "hit", args: [] });
+  await flush();
+  expect(lee.of("fate")).toEqual([{ t: "fate", id: "same", state: "unknown-id" }]);
+  expect(kim.of("reply")[0]).toMatchObject({ result: "kim:1" });
+  expect(lee.of("reply")[0]).toMatchObject({ result: "lee:2" });
+  s.close();
+});
+
+it("홉: 끊기면 기다리던 ctx.request 는 연결 끊김. 명령 실패 로 거절된다", async () => {
+  let seen = "";
+  const s = createStreamServer({
+    snapshot: () => 0,
+    commands: { q: (ctx) => ctx.request("pick").catch((e: Error) => void (seen = e.message)) },
+  });
+  const c = await join(s);
+  c.emit({ t: "command", id: "r", name: "q", args: [] });
+  await flush();
+  expect(c.of("request")).toHaveLength(1);
+  c.close(1000, "");
+  await flush();
+  expect(seen).toBe("연결 끊김. 명령 실패");
+  expect(vi.getTimerCount()).toBe(0);
+  s.close();
+});
+
+it("홉: close 뒤 attach 는 곧바로 4000 으로 닫고 publish 는 아무것도 하지 않는다", async () => {
+  const s = createStreamServer({ snapshot: () => 0 });
+  s.close();
+  expect(() => s.publish("default", 1)).not.toThrow();
+  const c = fakeConn();
+  s.attach(c);
+  expect(c.closed?.code).toBe(4000);
+  expect(c.sent).toEqual([]);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("SSE: POST 의 신원을 JSON 으로 쓸 수 없으면 500", async () => {
+  const loop: any = {};
+  loop.self = loop;
+  const s = createStreamServer({ authorize: (ctx) => (ctx.token === "loop" ? loop : ctx.token), snapshot: () => 0 });
+  const conn = fakeConn("sse", { authorization: "Bearer kim" });
+  s.attach(conn);
+  await flush();
+  const res = await s.handlePost({
+    headers: { authorization: "Bearer loop", "x-supa-connection": welcomeOf(conn).connection },
+    body: JSON.stringify({ t: "ask", ids: [] }),
+  });
+  expect(res.status).toBe(500);
+  s.close();
 });
