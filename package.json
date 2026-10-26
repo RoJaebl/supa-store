@@ -24,6 +24,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.server.json",
+    "prepare": "tsc -p tsconfig.json && tsc -p tsconfig.server.json",
     "test": "pnpm build && vitest run && node --test \"tools/!(pack).test.mjs\"",
     "test:pack": "node --test tools/pack.test.mjs",
     "prepublishOnly": "pnpm test && pnpm test:pack",
