@@ -10,13 +10,14 @@ import { helloFromHeaders, tokenOf } from "./sse.js";
  *    아직 응답 머리를 쓰지 않았으므로 HTTP 상태로 답한다 — 4001 → 401, 그 밖의 코드 → 503. 홉은 무엇을 보냈는지 모르므로
  *    이 판정은 전송의 겉(node · web)이 한다
  *  - onClose: 상대가 끊었을 때, 그리고 close 를 부른 뒤에 — 여러 번 불려도 된다
- *  - buffered: 아직 나가지 못한 바이트 수 — 홉이 보내기 직전에 maxBuffered 와 견준다 */
+ *  - buffered: 아직 나가지 못한 바이트 수 — 홉이 보내기 직전에 maxBuffered 와 견준다.
+ *    모르면 비워 둔다 — 그러면 한도를 재지 않는다 */
 export interface Conn {
   send(m: ServerMessage): void;
   close(code: number, reason: string): void;
   onMessage(fn: (m: ClientMessage) => void): void;
   onClose(fn: () => void): void;
-  buffered(): number;
+  buffered?(): number;
   kind: "ws" | "sse";
   headers: Record<string, string | undefined>;
 }
@@ -215,7 +216,7 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
   /** 연결에 보내는 자리는 여기 하나 — 이미 쌓인 양이 한도를 넘었으면 보내지 않고 닫는다. 보냈으면 true */
   const send = (s: Session<Id>, m: ServerMessage) => {
     if (s.closed) return false;
-    if (s.conn.buffered() > maxBuffered) {
+    if ((s.conn.buffered?.() ?? 0) > maxBuffered) {
       shut(s, CLOSE.COME_BACK, "버퍼가 넘쳤다");
       return false;
     }

@@ -393,7 +393,7 @@ function grab(stream: StreamServer<any, any, any>) {
     conns.push(c);
     const close = c.close;
     c.close = (code, reason) => {
-      closes.push({ code, reason, buffered: c.buffered() });
+      closes.push({ code, reason, buffered: c.buffered!() });
       close(code, reason);
     };
     attach(c);
@@ -401,7 +401,8 @@ function grab(stream: StreamServer<any, any, any>) {
   return { conns, closes };
 }
 
-/** 닫힐 때까지 큰 바뀜을 보낸다 — 한 번마다 이벤트 고리를 한 바퀴 돌려 소켓이 커널로 흘려보내게 한다 */
+/** 닫힐 때까지 큰 바뀜을 보낸다 — 한 번마다 이벤트 고리를 한 바퀴 돌려 소켓이 커널로 흘려보내게 한다
+ *  16 KiB × 4000 이 커널 송신 · 수신 버퍼보다 충분히 커야 한다 — 커널이 다 받아 주면 buffered() 가 오르지 않는다 */
 async function flood(stream: StreamServer<any, string, any>, closes: unknown[], big: string) {
   for (let i = 0; i < 4000 && closes.length === 0; i++) {
     stream.publish("default", big);
@@ -426,7 +427,7 @@ it("node: SSE 를 읽지 않는 클라이언트는 쌓인 바이트가 maxBuffer
   // 보내기 전에 재므로 한도를 넘긴 것은 마지막 프레임 하나만큼까지
   expect(g.closes[0]!.buffered).toBeGreaterThan(LIMIT);
   expect(g.closes[0]!.buffered).toBeLessThanOrEqual(LIMIT + BIG.length + 1024);
-  expect(() => g.conns[0]!.buffered()).not.toThrow();
+  expect(() => g.conns[0]!.buffered!()).not.toThrow();
 });
 
 it("node: 웹소켓을 읽지 않는 클라이언트는 4000 으로 닫히고, 닫힌 뒤 buffered() 도 던지지 않는다", async () => {
@@ -438,6 +439,7 @@ it("node: 웹소켓을 읽지 않는 클라이언트는 4000 으로 닫히고, �
   await once(ws, "open");
   ws.send(JSON.stringify({ t: "hello" }));
   await once(ws, "message"); // welcome
+  // ws 의 내부 칸 — ws 메이저가 바뀌면 손본다
   const sock = (ws as unknown as { _socket: import("node:net").Socket })._socket;
   sock.pause(); // 읽지 않는다
   await flood(stream, g.closes, BIG);
@@ -450,5 +452,5 @@ it("node: 웹소켓을 읽지 않는 클라이언트는 4000 으로 닫히고, �
   const [code, reason] = await closed;
   expect(code).toBe(4000);
   expect(String(reason)).toBe("버퍼가 넘쳤다");
-  expect(() => g.conns[0]!.buffered()).not.toThrow();
+  expect(() => g.conns[0]!.buffered!()).not.toThrow();
 });

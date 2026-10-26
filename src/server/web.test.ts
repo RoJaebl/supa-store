@@ -222,20 +222,20 @@ it("web: 본문을 읽지 않으면 buffered() 가 쌓이고 읽으면 줄며, m
   stream.attach = (c) => void (conns.push(c), attach(c));
   const c = await sseOpen(streamHandler(stream));
   const conn = conns[0]!;
-  const before = conn.buffered(); // welcome · snapshot 이 읽히지 않고 있다
+  const before = conn.buffered!(); // welcome · snapshot 이 읽히지 않고 있다
   expect(before).toBeGreaterThan(0);
   stream.publish("default", "x".repeat(1000));
-  expect(conn.buffered()).toBeGreaterThan(before + 1000);
+  expect(conn.buffered!()).toBeGreaterThan(before + 1000);
   await c.until(3);
-  expect(conn.buffered()).toBe(0);
+  expect(conn.buffered!()).toBe(0);
   // 다시 읽지 않고 큰 바뀜을 보낸다 — 한도를 넘긴 뒤의 publish 에서 닫힌다
   const big = "x".repeat(16 * 1024);
   for (let i = 0; i < 10; i++) stream.publish("default", big);
-  expect(conn.buffered()).toBeGreaterThan(LIMIT);
-  expect(conn.buffered()).toBeLessThan(LIMIT + 2 * big.length);
+  expect(conn.buffered!()).toBeGreaterThan(LIMIT);
+  expect(conn.buffered!()).toBeLessThan(LIMIT + 2 * big.length);
   const rest = await c.messages(100);
   expect(rest.at(-1)).toEqual({ t: "close", code: 4000, reason: "버퍼가 넘쳤다" });
   // 앞의 작은 것 하나 + 큰 것 넷(넷째 뒤 쌓인 양이 처음 한도를 넘는다) — 다섯째 publish 에서 닫힌다
   expect(rest.filter((m) => m.t === "change")).toHaveLength(1 + 4);
-  expect(() => conn.buffered()).not.toThrow();
+  expect(() => conn.buffered!()).not.toThrow();
 });

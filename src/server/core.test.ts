@@ -641,6 +641,24 @@ it("홉: maxBuffered 를 주지 않으면 4 MiB, Infinity 면 재지 않는다",
   t.close();
 });
 
+it("홉: buffered 가 없는 Conn(JS 로 짓거나 as Conn)도 attach · publish 가 던지지 않고 한도를 재지 않는다", async () => {
+  const s = createStreamServer<number, number>({ snapshot: () => 0, maxBuffered: 0 });
+  const ws = fakeConn();
+  const sse = fakeConn("sse");
+  delete (ws as Partial<typeof ws>).buffered;
+  delete (sse as Partial<typeof sse>).buffered;
+  s.attach(ws);
+  ws.emit({ t: "hello" });
+  s.attach(sse);
+  await flush();
+  s.publish("default", 1);
+  for (const c of [ws, sse]) {
+    expect(c.of("change")).toHaveLength(1);
+    expect(c.closed).toBeUndefined();
+  }
+  s.close();
+});
+
 it("홉: 웹소켓이 60초 동안 아무것도 보내지 않으면 다음 ping 자리에서 4000 · 응답이 없다 로 닫는다", async () => {
   const s = createStreamServer({ snapshot: () => 0, commands: { noop: () => 1 } });
   const quiet = await join(s);
