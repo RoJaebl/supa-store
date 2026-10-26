@@ -668,3 +668,41 @@ createStore("ui.el", () => ({ el: null as El | null }));`,
   );
   assert.throws(() => generate(ts, loadConfig(ts, root)), (e) => /ui\.el/.test(e.message) && /any 가 남는다/.test(e.message));
 });
+test("자기에게 export * as 하는 순환에서도 점이 가장 적은 ns 길을 찍는다", () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  write("node_modules/cyc/package.json", JSON.stringify({ name: "cyc", exports: { ".": { types: "./index.d.ts" } } }));
+  write("node_modules/cyc/index.d.ts", `export * as s0 from "./index.js";\nexport * as inner from "./inner.js";`);
+  write("node_modules/cyc/inner.d.ts", "export interface X { x: 1 }");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { inner } from "cyc";
+createStore("ui.c", () => ({ x: null as inner.X | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  assert.match(read("src/store.gen.ts"), /x: import\("cyc"\)\.inner\.X \| null/);
+  assert.deepEqual(genDiagnostics(), []);
+});
+test("갈래 둘의 ns 순환이 파일 스물을 거쳐도 열쇠가 불지 않고 곧바로 끝난다", { timeout: 30000 }, () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  write("node_modules/cyc/package.json", JSON.stringify({ name: "cyc", exports: { ".": { types: "./index.d.ts" } } }));
+  write("node_modules/cyc/index.d.ts", `export * from "./f0.js";`);
+  for (let i = 0; i < 20; i++) {
+    const tail = i < 19 ? `export * from "./f${i + 1}.js";` : `export * as inner from "./leaf.js";`;
+    write(`node_modules/cyc/f${i}.d.ts`, `export * as s0 from "./f${i}.js";\nexport * as s1 from "./f${i}.js";\n${tail}\nexport interface I${i} { i: ${i} }`);
+  }
+  write("node_modules/cyc/leaf.d.ts", "export interface Deep { d: 1 }");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { I7, inner } from "cyc";
+createStore("ui.c", () => ({ i: null as I7 | null, d: null as inner.Deep | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /i: import\("cyc"\)\.I7 \| null/);
+  assert.match(out, /d: import\("cyc"\)\.inner\.Deep \| null/);
+  assert.deepEqual(genDiagnostics(), []);
+});
