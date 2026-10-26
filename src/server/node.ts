@@ -80,7 +80,8 @@ export function attachStream(
     };
     const conn: Conn = {
       kind: "sse",
-      buffered: () => 0,
+      // 응답과 그 소켓에 쌓인 바이트 — 끝난 뒤에도 던지지 않는다
+      buffered: () => res.writableLength,
       headers: headersOf(req),
       send(m: ServerMessage) {
         if (res.writableEnded) return;
@@ -162,7 +163,8 @@ export function attachStream(
     ws.on("error", () => {});
     const conn: Conn = {
       kind: "ws",
-      buffered: () => 0,
+      // ws 가 아직 소켓에 넘기지 못한 바이트 — 닫힌 뒤에도 읽힌다
+      buffered: () => ws.bufferedAmount,
       headers: headersOf(req),
       send(m) {
         if (ws.readyState !== ws.OPEN) return;
