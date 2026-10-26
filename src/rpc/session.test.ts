@@ -253,3 +253,80 @@ describe("notify", () => {
     expect(Object.keys(sent[1] as object)).not.toContain("params");
   });
 });
+
+describe("고침 1 — 직렬화 · 답의 꼴 · 타이머", () => {
+  it("handler 가 글자로 바뀌지 않는 값을 돌려주면 -32603 으로 답하고 처리되지 않은 거절이 없다", async () => {
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      const { sent, receive } = open({ big: () => 1n });
+      receive({ jsonrpc: "2.0", id: 1, method: "big" });
+      await tick();
+      await tick();
+      expect(sent).toEqual([{ jsonrpc: "2.0", id: 1, error: { code: -32603, message: expect.any(String) } }]);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("result 도 error 도 없는 답, error 가 객체가 아닌 답, id 가 null · 글자인 답은 버린다", async () => {
+    const { s, receive } = open();
+    const p = s.request("m", {}, 1_000);
+    receive({ jsonrpc: "2.0", id: 1 });
+    receive({ jsonrpc: "2.0", id: 1, error: "x" });
+    receive({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+    receive({ jsonrpc: "2.0", id: "1", result: "글자" });
+    receive({ jsonrpc: "2.0", id: 1, result: "ok" });
+    await expect(p).resolves.toBe("ok");
+  });
+
+  it("상대 error 의 message 가 글자가 아니면 고정 문구다", async () => {
+    const { s, receive } = open();
+    const a = s.request("m", {}, 1_000);
+    const b = s.request("m", {}, 1_000);
+    receive({ jsonrpc: "2.0", id: 1, error: { code: -32000 } });
+    receive({ jsonrpc: "2.0", id: 2, error: { message: 3 } });
+    await expect(a).rejects.toMatchObject({ message: "상대 오류 -32000", code: -32000 });
+    await expect(b).rejects.toMatchObject({ message: "상대 오류", code: undefined });
+  });
+
+  it("답이 오면 타이머가 걷히고, 답 뒤의 닫힘은 그 요청을 건드리지 않는다", async () => {
+    vi.useFakeTimers();
+    const { s, receive, end } = open();
+    const p = s.request("m", {}, 1_000);
+    expect(vi.getTimerCount()).toBe(1);
+    receive({ jsonrpc: "2.0", id: 1, result: 1 });
+    expect(vi.getTimerCount()).toBe(0);
+    end();
+    await expect(p).resolves.toBe(1);
+  });
+
+  it("NaN · Infinity · 2^31 이상의 제한 시간에는 타이머를 걸지 않는다", () => {
+    vi.useFakeTimers();
+    const { s } = open();
+    for (const t of [NaN, Infinity, 2 ** 31]) void s.request("m", {}, t);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancel 이 던져도 삼키고 응답 지연으로 끝난다", async () => {
+    vi.useFakeTimers();
+    const { s } = open();
+    const p = s.request("m", {}, 10, () => {
+      throw new Error("x");
+    });
+    expect(() => vi.advanceTimersByTime(10)).not.toThrow();
+    await expect(p).rejects.toMatchObject({ message: TEXT.timeout });
+  });
+
+  it("params 가 글자로 바뀌지 않으면 그 오류로 거절하고 기다림 · 타이머를 남기지 않는다", async () => {
+    vi.useFakeTimers();
+    const { s, sent, end } = open();
+    await expect(s.request("m", 1n, 1_000)).rejects.toBeInstanceOf(TypeError);
+    expect(sent).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    const q = s.request("n", {}, 1_000);
+    end();
+    await expect(q).rejects.toMatchObject({ requestId: 2 });
+  });
+});

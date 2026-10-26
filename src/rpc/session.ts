@@ -47,16 +47,18 @@ export function openSession(t: Transport, o: SessionOptions): Session {
   const answer = (id: string | number, method: string, params: unknown) => {
     const h = o.handlers && Object.hasOwn(o.handlers, method) ? o.handlers[method] : undefined;
     if (!h) return send({ id, error: { code: -32601, message: "Method not found" } });
+    const internal = (e: unknown) => ({ error: { code: -32603, message: e instanceof Error ? e.message : String(e) } });
+    /** 값이 글자로 바뀌지 않으면(BigInt · 순환) 그 문구로 답한다 */
+    const reply = (m: object) => {
+      try {
+        send({ id, ...m });
+      } catch (e) {
+        send({ id, ...internal(e) });
+      }
+    };
     new Promise((r) => r(h(params))).then(
-      (result) => send({ id, result: result ?? null }),
-      (e) =>
-        send({
-          id,
-          error: {
-            code: -32603,
-            message: e instanceof Error ? e.message : String(e),
-          },
-        }),
+      (result) => reply({ result: result ?? null }),
+      (e) => reply(internal(e)),
     );
   };
 
@@ -71,13 +73,15 @@ export function openSession(t: Transport, o: SessionOptions): Session {
       return;
     }
     const p = typeof m.id === "number" ? pending.get(m.id) : undefined;
-    if (!p) return; // 늦은 답 · 모르는 id
+    if (!p || !("result" in m || isObject(m.error))) return; // 늦은 답 · 모르는 id · 답이 아닌 꼴
     const id = m.id as number;
     pending.delete(id);
     clearTimeout(p.timer);
     if (isObject(m.error)) {
       const { message, code, data } = m.error;
-      p.reject(new RpcError(String(message), id, typeof code === "number" ? code : undefined, data));
+      const c = typeof code === "number" ? code : undefined;
+      const text = typeof message === "string" ? message : c === undefined ? "상대 오류" : `상대 오류 ${c}`;
+      p.reject(new RpcError(text, id, c, data));
     } else p.resolve(m.result);
   };
 
@@ -103,13 +107,21 @@ export function openSession(t: Transport, o: SessionOptions): Session {
       return new Promise((resolve, reject) => {
         const p: Pending = { resolve, reject };
         pending.set(id, p);
-        if (timeout < Infinity)
+        try {
+          send({ id, method, params });
+        } catch (e) {
+          pending.delete(id); // params 가 글자로 바뀌지 않으면 남기지 않고 그 오류로 거절한다
+          throw e;
+        }
+        // setTimeout 은 NaN · 2^31-1 넘는 값을 곧바로 터뜨린다
+        if (Number.isFinite(timeout) && timeout <= 2_147_483_647)
           p.timer = setTimeout(() => {
             pending.delete(id);
             reject(new RpcError(TEXT.timeout, id));
-            if (cancel) send(cancel(id));
+            try {
+              if (cancel) send(cancel(id));
+            } catch {}
           }, timeout);
-        send({ id, method, params });
       });
     },
     notify: (method, params) => send(params === undefined ? { method } : { method, params }),
