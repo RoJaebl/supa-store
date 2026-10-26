@@ -109,7 +109,8 @@ function collect(ts, program, config) {
           if (!typeNode) throw new Error(`${key.text}(${posix(source.fileName)}) 의 타입을 글자로 옮기지 못한다 — 반환 타입을 적는다`);
           const text = printer.printNode(ts.EmitHint.Unspecified, typeNode, source).replace(/\r?\n\s*/g, " ");
           const hasAny = (n) => n.kind === ts.SyntaxKind.AnyKeyword || !!ts.forEachChild(n, hasAny);
-          entries.push({ file: posix(source.fileName), key: key.text, text, any: hasAny(typeNode) });
+          // 반환 타입을 적은 정의는 사람이 타입을 정한 것이라 라이브러리 기본 타입 인자의 any 를 허용한다
+          entries.push({ file: posix(source.fileName), key: key.text, text, any: !fn.type && hasAny(typeNode) });
         }
       }
       ts.forEachChild(node, visit);
@@ -131,9 +132,9 @@ const bare = (p) => posix(p).replace(/^\.\//, "").replace(/(?:\.d)?\.[cm]?[jt]sx
 const DECL = /\.d\.[cm]?ts$/;
 
 // 패키지 안 .d.ts 하나를 한 번만 읽어 자기 선언 · 이름 있는 재내보내기 · export * 대상을 따로 둔다
-// links 는 [내보내는 이름, 대상 파일, 대상에서의 이름]
+// links 는 [내보내는 이름, 대상 파일, 대상에서의 이름], nss 는 export * as 의 [네임스페이스 이름, 대상 파일]
 function readExports(ts, pkgDir, file, ctx) {
-  const info = { own: new Map(), links: [], stars: [], deps: [] };
+  const info = { own: new Map(), links: [], stars: [], nss: [], deps: [] };
   ctx.parsed.set(file, info);
   let source;
   try {
@@ -167,6 +168,8 @@ function readExports(ts, pkgDir, file, ctx) {
       const target = st.moduleSpecifier && ts.isStringLiteral(st.moduleSpecifier) ? resolveRel(st.moduleSpecifier.text) : undefined;
       if (!st.exportClause) {
         if (target) info.stars.push(target);
+      } else if (ts.isNamespaceExport(st.exportClause)) {
+        if (target) info.nss.push([st.exportClause.name.text, target]);
       } else if (ts.isNamedExports(st.exportClause)) {
         for (const el of st.exportClause.elements) {
           const from = (el.propertyName ?? el.name).text;
@@ -205,6 +208,8 @@ function exportTables(ts, pkgDir, entries, ctx) {
       for (const [as, target, from] of info.links) names.set(as, tables.get(target)?.get(from) ?? { file: bare(target), name: from });
       // export * 는 이름 있는 내보내기를 덮지 않는다
       for (const target of info.stars) for (const [k, v] of tables.get(target) ?? []) if (!names.has(k)) names.set(k, v);
+      // export * as ns 는 대상의 이름을 「ns.이름」으로 싣는다
+      for (const [ns, target] of info.nss) for (const [k, v] of tables.get(target) ?? []) names.set(`${ns}.${k}`, v);
       if (!same(names, tables.get(file))) changed = true;
       next.set(file, names);
     }
@@ -289,6 +294,8 @@ function packageImport(ts, config, spec, name) {
     return { spec: file === entry || file === "index" ? pkgName : `${pkgName}/${file}`, name };
   }
   const open = (sub) => !excluded.some((x) => starMatch(x, sub) !== null);
+  // 네임스페이스 길(ns.이름)은 이름 붙은 길이 어디에도 없을 때만 쓴다
+  let viaNs;
   for (const r of routes) {
     if (r.star) {
       // 별 패턴은 파일 자체가 진입이다
@@ -301,9 +308,13 @@ function packageImport(ts, config, spec, name) {
     // 진입 파일 자신에 선언된 것(export = 의 네임스페이스 · default 포함)은 그 진입에서 그대로 닿는다
     if (r.entry === file) return { spec: at(r.subpath), name };
     if (!name) continue;
-    for (const [as, o] of r.names) if (o.file === file && o.name === name) return { spec: at(r.subpath), name: as };
+    for (const [as, o] of r.names) {
+      if (o.file !== file || o.name !== name) continue;
+      if (!as.includes(".")) return { spec: at(r.subpath), name: as };
+      viaNs ??= { spec: at(r.subpath), name: as };
+    }
   }
-  return undefined;
+  return viaNs;
 }
 
 function render(entries, config, ts) {

@@ -597,3 +597,74 @@ createStore("ui.p", () => ({ p: null as Pick | null }));`,
     root = outer;
   }
 });
+test("export * as ns 로만 닿는 타입은 ns 를 거쳐 찍고 대상의 재내보내기도 따라간다", () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  write("node_modules/nsx/package.json", JSON.stringify({ name: "nsx", exports: { ".": { types: "./index.d.ts" } } }));
+  write("node_modules/nsx/index.d.ts", `export * as inner from "./inner.js";`);
+  write("node_modules/nsx/inner.d.ts", `export interface Deep { d: 1 }\nexport * from "./more.js";`);
+  write("node_modules/nsx/more.d.ts", "export interface More { m: 1 }");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { inner } from "nsx";
+createStore("ui.n", () => ({ d: null as inner.Deep | null, m: null as inner.More | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /d: import\("nsx"\)\.inner\.Deep \| null/);
+  assert.match(out, /m: import\("nsx"\)\.inner\.More \| null/);
+  assert.doesNotMatch(out, NO_PATH);
+  assert.deepEqual(genDiagnostics(), []);
+});
+test("같은 이름이 이름 붙은 길로도 나가면 ns 길보다 그것을 쓴다", () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  // 앞선 진입은 ns 로만, 뒤의 진입은 이름 그대로 내보낸다
+  write("node_modules/nsx/package.json", JSON.stringify({ name: "nsx", exports: { ".": { types: "./index.d.ts" }, "./flat": { types: "./flat.d.ts" } } }));
+  write("node_modules/nsx/index.d.ts", `export * as inner from "./inner.js";`);
+  write("node_modules/nsx/flat.d.ts", `export type { Deep } from "./inner.js";`);
+  write("node_modules/nsx/inner.d.ts", "export interface Deep { d: 1 }");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { inner } from "nsx";
+createStore("ui.n", () => ({ d: null as inner.Deep | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /d: import\("nsx\/flat"\)\.Deep \| null/);
+  assert.deepEqual(genDiagnostics(), []);
+});
+
+// 기본 타입 인자에 any 를 품은 라이브러리 타입 — React.ReactElement 의 JSXElementConstructor<any> 와 같은 꼴
+const anyDefaultPackage = () => {
+  write("node_modules/el/package.json", JSON.stringify({ name: "el", exports: { ".": { types: "./index.d.ts" } } }));
+  write("node_modules/el/index.d.ts", "export type Ctor<P> = (props: P) => null;\nexport interface El<T = Ctor<any>> { type: T }");
+};
+test("반환 타입을 적은 정의는 라이브러리 기본 타입 인자의 any 를 거부하지 않는다", () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  anyDefaultPackage();
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { El } from "el";
+createStore("ui.el", (set, get, ctx): { el: El | null } => ({ el: null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  assert.match(read("src/store.gen.ts"), /"ui\.el": \{ el: import\("el"\)\.El<.*any.*> \| null; \};/);
+  assert.deepEqual(genDiagnostics(), []);
+});
+test("반환 타입이 없으면 같은 필드도 any 로 거부한다", () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  anyDefaultPackage();
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { El } from "el";
+createStore("ui.el", () => ({ el: null as El | null }));`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), (e) => /ui\.el/.test(e.message) && /any 가 남는다/.test(e.message));
+});
