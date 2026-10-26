@@ -128,19 +128,31 @@ function relativeFromOut(config, file) {
 }
 
 const bare = (p) => posix(p).replace(/^\.\//, "").replace(/(?:\.d)?\.[cm]?[jt]sx?$/, "");
-const DECL = /\.d\.[cm]?ts$|\.[cm]?tsx?$/;
+const DECL = /\.d\.[cm]?ts$/;
 
 // 패키지 안 .d.ts 가 내보내는 이름 → { file: 패키지 안 경로(확장자 없음), name: 원래 이름 }
-function exportedNames(ts, pkgDir, file, seen) {
+// ctx 는 한 패키지 분석 동안 공유한다 — memo 가 없으면 여러 파일이 같은 파일을 export * 하는 구조에서 지수로 다시 읽는다
+function exportedNames(ts, pkgDir, file, ctx) {
+  if (ctx.memo.has(file)) return ctx.memo.get(file);
   const names = new Map();
-  if (seen.has(file)) return names;
-  seen.add(file);
-  let source;
-  try {
-    source = ts.createSourceFile(file, readFileSync(join(pkgDir, file), "utf8"), ts.ScriptTarget.Latest);
-  } catch {
+  const onStack = ctx.stack.indexOf(file);
+  if (onStack >= 0) {
+    // 순환 — 이 자리 위의 결과는 아직 덜 찼으므로 그 위까지는 memo 에 넣지 않는다
+    ctx.low = Math.min(ctx.low, onStack);
     return names;
   }
+  let source;
+  try {
+    const path = join(pkgDir, file);
+    source = ts.createSourceFile(file, readFileSync(path, "utf8"), ts.ScriptTarget.Latest);
+    ctx.files.add(path);
+  } catch {
+    ctx.memo.set(file, names);
+    return names;
+  }
+  const depth = ctx.stack.push(file) - 1;
+  const outerLow = ctx.low;
+  ctx.low = Infinity;
   // 상대 지정자만 따라간다 — ./x.js 는 ./x.d.ts, ./x 는 ./x.d.ts · ./x/index.d.ts 로 푼다
   const resolveRel = (spec) => {
     if (!spec.startsWith(".")) return null;
@@ -148,7 +160,7 @@ function exportedNames(ts, pkgDir, file, seen) {
     const tries = [".d.ts", ".d.mts", ".d.cts", ".ts", "/index.d.ts"].map((ext) => base + ext);
     return tries.find((t) => existsSync(join(pkgDir, t))) ?? null;
   };
-  const origin = (target, name) => (target ? exportedNames(ts, pkgDir, target, seen).get(name) ?? { file: bare(target), name } : null);
+  const origin = (target, name) => (target ? exportedNames(ts, pkgDir, target, ctx).get(name) ?? { file: bare(target), name } : null);
   const here = bare(file);
   const imported = new Map(); // 지역 이름 → 원래 선언
   for (const st of source.statements) {
@@ -182,23 +194,35 @@ function exportedNames(ts, pkgDir, file, seen) {
     for (const d of decls) if (d.name && ts.isIdentifier(d.name)) names.set(d.name.text, { file: here, name: d.name.text });
   }
   // export * 는 이름 있는 내보내기를 덮지 않는다
-  for (const target of stars) for (const [k, v] of exportedNames(ts, pkgDir, target, seen)) if (!names.has(k)) names.set(k, v);
-  seen.delete(file);
+  for (const target of stars) for (const [k, v] of exportedNames(ts, pkgDir, target, ctx)) if (!names.has(k)) names.set(k, v);
+  ctx.stack.pop();
+  if (ctx.low >= depth) ctx.memo.set(file, names);
+  ctx.low = Math.min(outerLow, ctx.low);
   return names;
 }
 
-// 패키지마다 진입 분석을 한 번만 짓는다 — package.json 이 바뀌면(재설치) 다시 짓는다
+// 패키지마다 진입 분석을 한 번만 짓는다 — package.json 이나 읽은 .d.ts 가 바뀌면(재설치 · link 한 패키지의 재빌드) 다시 짓는다
 const packageCache = new Map();
+const stampOf = (files) =>
+  [...files]
+    .map((f) => {
+      try {
+        return statSync(f).mtimeMs;
+      } catch {
+        return -1;
+      }
+    })
+    .join(",");
 function packageEntries(ts, pkgDir) {
-  let pkg = {};
-  let stamp = 0;
-  try {
-    stamp = statSync(join(pkgDir, "package.json")).mtimeMs;
-    pkg = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
-  } catch {}
+  const pkgJson = join(pkgDir, "package.json");
   const hit = packageCache.get(pkgDir);
-  if (hit && hit.stamp === stamp) return hit.value;
-  let value = { pkg, routes: [], excluded: [] };
+  if (hit && hit.stamp === stampOf(hit.files)) return hit.value;
+  let pkg = {};
+  try {
+    pkg = JSON.parse(readFileSync(pkgJson, "utf8"));
+  } catch {}
+  const ctx = { memo: new Map(), stack: [], low: Infinity, files: new Set([pkgJson]) };
+  const value = { pkg, routes: [], excluded: [] };
   if (pkg.exports) {
     const exp = pkg.exports;
     const map = typeof exp === "object" && !Array.isArray(exp) && Object.keys(exp).some((k) => k.startsWith(".")) ? exp : { ".": exp };
@@ -214,12 +238,12 @@ function packageEntries(ts, pkgDir) {
         if (target.includes("*")) value.routes.push({ subpath, star: bare(target).split("*") });
         else if (DECL.test(target)) {
           const file = posix(target).replace(/^\.\//, "");
-          value.routes.push({ subpath, entry: bare(file), names: exportedNames(ts, pkgDir, file, new Set()) });
+          value.routes.push({ subpath, entry: bare(file), names: exportedNames(ts, pkgDir, file, ctx) });
         }
       }
     }
   }
-  packageCache.set(pkgDir, { stamp, value });
+  packageCache.set(pkgDir, { files: ctx.files, stamp: stampOf(ctx.files), value });
   return value;
 }
 
@@ -259,10 +283,9 @@ function packageImport(ts, config, spec, name) {
       continue;
     }
     if (!open(r.subpath)) continue;
-    if (!name) {
-      if (r.entry === file) return { spec: at(r.subpath), name };
-      continue;
-    }
+    // 진입 파일 자신에 선언된 것(export = 의 네임스페이스 · default 포함)은 그 진입에서 그대로 닿는다
+    if (r.entry === file) return { spec: at(r.subpath), name };
+    if (!name) continue;
     for (const [as, o] of r.names) if (o.file === file && o.name === name) return { spec: at(r.subpath), name: as };
   }
   return undefined;

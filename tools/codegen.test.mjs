@@ -487,3 +487,69 @@ createStore("ui.f", () => ({ i: null as Inner | null }));`,
   assert.match(out, /i: import\("fake\/x"\)\.Inner \| null/);
   assert.deepEqual(genDiagnostics(), []);
 });
+test("여러 파일이 같은 파일을 export * 하는 다이아몬드 구조도 파일마다 한 번만 읽는다", () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  const DEPTH = 10;
+  write("node_modules/dia/package.json", JSON.stringify({ name: "dia", exports: { ".": { types: "./index.d.ts" } } }));
+  write("node_modules/dia/index.d.ts", `export * from "./l0a.js";\nexport * from "./l0b.js";`);
+  for (let i = 0; i < DEPTH; i++)
+    for (const side of ["a", "b"])
+      write(`node_modules/dia/l${i}${side}.d.ts`, i + 1 < DEPTH ? `export * from "./l${i + 1}a.js";\nexport * from "./l${i + 1}b.js";` : "export interface Bottom { b: 1 }");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { Bottom } from "dia";
+createStore("ui.d", () => ({ b: null as Bottom | null }));`,
+  );
+  // 이 패키지의 파일을 몇 번 읽는지 센다 — 컴파일러가 따로 읽는 것은 세지 않는다
+  let parses = 0;
+  const counted = Object.create(ts, {
+    createSourceFile: { value: (name, ...rest) => (/l\d+[ab]|index/.test(name) && !/supa-store|src\//.test(name) && parses++, ts.createSourceFile(name, ...rest)) },
+  });
+  generate(counted, loadConfig(ts, root));
+  assert.match(read("src/store.gen.ts"), /b: import\("dia"\)\.Bottom \| null/);
+  assert.ok(parses <= 1 + 2 * DEPTH, `${parses} 번 읽었다`);
+});
+test("진입 파일 자신에 선언된 export = 의 네임스페이스 · export default 도 그 진입으로 찍는다", () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  write("node_modules/eq/package.json", JSON.stringify({ name: "eq", exports: { ".": { types: "./index.d.ts" } } }));
+  write("node_modules/eq/index.d.ts", "declare function eq(): void;\ndeclare namespace eq { interface Opts { a: 1 } }\nexport = eq;");
+  write("node_modules/defi/package.json", JSON.stringify({ name: "defi", exports: { ".": { types: "./index.d.ts" } } }));
+  write("node_modules/defi/index.d.ts", "export default interface Conf { c: 1 }");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type eq from "eq";
+import type Conf from "defi";
+createStore("ui.q", () => ({ o: null as eq.Opts | null, c: null as Conf | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /o: import\("eq"\)\.Opts \| null/);
+  assert.match(out, /c: import\("defi"\)\.default \| null/);
+  assert.deepEqual(genDiagnostics(), []);
+});
+test("프로젝트가 node_modules 아래에 있어도 프로젝트 안 파일은 상대 경로로 둔다", () => {
+  const outer = root;
+  root = join(outer, "node_modules", "app");
+  try {
+    write("package.json", "{}");
+    nodeModulesProject();
+    installed("node_modules/supa-store");
+    write("src/types.ts", "export type Pick = { p: 1 };");
+    write(
+      "src/a.state.ts",
+      `import { createStore } from "supa-store";
+import type { Pick } from "./types";
+createStore("ui.p", () => ({ p: null as Pick | null }));`,
+    );
+    generate(ts, loadConfig(ts, root));
+    const out = read("src/store.gen.ts");
+    assert.match(out, /p: import\("\.\/types"\)\.Pick \| null/);
+    assert.deepEqual(genDiagnostics(), []);
+  } finally {
+    root = outer;
+  }
+});
