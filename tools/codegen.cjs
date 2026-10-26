@@ -1,6 +1,6 @@
 // 생성기 핵심 — CLI·Next 래퍼·tsserver 플러그인이 함께 쓴다. 플러그인이 CommonJS 여야 하므로 이 파일도 CommonJS 다
 const { createRequire } = require("node:module");
-const { existsSync, mkdirSync, readFileSync, writeFileSync } = require("node:fs");
+const { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } = require("node:fs");
 const { basename, dirname, join, relative, resolve } = require("node:path");
 
 // src/config.ts 의 defaults 와 같다 — dist 는 ESM 이라 여기서 부를 수 없다
@@ -68,7 +68,9 @@ function loadConfig(ts, fromDir) {
 function collect(ts, program, config) {
   const checker = program.getTypeChecker();
   const printer = ts.createPrinter({ removeComments: true });
-  const flags = ts.NodeBuilderFlags.NoTruncation | ts.NodeBuilderFlags.UseFullyQualifiedType;
+  // node_modules 안의 타입(supa-store 자신의 Resource 포함)은 이 깃발 없이는 글자로 옮기지 못하고 undefined 가 된다
+  const flags =
+    ts.NodeBuilderFlags.NoTruncation | ts.NodeBuilderFlags.UseFullyQualifiedType | ts.NodeBuilderFlags.AllowNodeModulesRelativePaths;
   const entries = [];
   const broken = [];
   const loose = [];
@@ -104,6 +106,7 @@ function collect(ts, program, config) {
         else if (key && fn && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) {
           const type = checker.getReturnTypeOfSignature(checker.getSignatureFromDeclaration(fn));
           const typeNode = checker.typeToTypeNode(type, undefined, flags);
+          if (!typeNode) throw new Error(`${key.text}(${posix(source.fileName)}) 의 타입을 글자로 옮기지 못한다 — 반환 타입을 적는다`);
           const text = printer.printNode(ts.EmitHint.Unspecified, typeNode, source).replace(/\r?\n\s*/g, " ");
           const hasAny = (n) => n.kind === ts.SyntaxKind.AnyKeyword || !!ts.forEachChild(n, hasAny);
           entries.push({ file: posix(source.fileName), key: key.text, text, any: hasAny(typeNode) });
@@ -124,12 +127,195 @@ function relativeFromOut(config, file) {
   return rel.startsWith(".") ? rel : `./${rel}`;
 }
 
-function render(entries, config) {
+const bare = (p) => posix(p).replace(/^\.\//, "").replace(/(?:\.d)?\.[cm]?[jt]sx?$/, "");
+const DECL = /\.d\.[cm]?ts$/;
+
+// 패키지 안 .d.ts 하나를 한 번만 읽어 자기 선언 · 이름 있는 재내보내기 · export * 대상을 따로 둔다
+// links 는 [내보내는 이름, 대상 파일, 대상에서의 이름]
+function readExports(ts, pkgDir, file, ctx) {
+  const info = { own: new Map(), links: [], stars: [], deps: [] };
+  ctx.parsed.set(file, info);
+  let source;
+  try {
+    const path = join(pkgDir, file);
+    source = ts.createSourceFile(file, readFileSync(path, "utf8"), ts.ScriptTarget.Latest);
+    ctx.files.add(path);
+  } catch {
+    return info;
+  }
+  // 상대 지정자만 따라간다 — ./x.js 는 ./x.d.ts, ./x 는 ./x.d.ts · ./x/index.d.ts 로 푼다. .cjs · .d.cts 계열은 .d.cts 를, .mjs · .d.mts 계열은 .d.mts 를 먼저 본다
+  const resolveRel = (spec) => {
+    if (!spec.startsWith(".")) return null;
+    const base = posix(join(dirname(file), spec)).replace(/\.[cm]?js$/, "");
+    const family = /\.cjs$/.test(spec) || (!/\.m?js$/.test(spec) && /\.d\.cts$/.test(file)) ? ".d.cts" : /\.mjs$/.test(spec) || (!/\.c?js$/.test(spec) && /\.d\.mts$/.test(file)) ? ".d.mts" : ".d.ts";
+    const tries = [family, ".d.ts", ".d.mts", ".d.cts", ".ts", "/index.d.ts"].map((ext) => base + ext);
+    const hit = tries.find((t) => existsSync(join(pkgDir, t))) ?? null;
+    if (hit) info.deps.push(hit);
+    return hit;
+  };
+  const here = bare(file);
+  const imported = new Map(); // 지역 이름 → [대상 파일, 대상에서의 이름]
+  for (const st of source.statements) {
+    if (!ts.isImportDeclaration(st) || !ts.isStringLiteral(st.moduleSpecifier)) continue;
+    const named = st.importClause?.namedBindings;
+    if (!named || !ts.isNamedImports(named)) continue;
+    const target = resolveRel(st.moduleSpecifier.text);
+    if (target) for (const el of named.elements) imported.set(el.name.text, [target, (el.propertyName ?? el.name).text]);
+  }
+  for (const st of source.statements) {
+    if (ts.isExportDeclaration(st)) {
+      const target = st.moduleSpecifier && ts.isStringLiteral(st.moduleSpecifier) ? resolveRel(st.moduleSpecifier.text) : undefined;
+      if (!st.exportClause) {
+        if (target) info.stars.push(target);
+      } else if (ts.isNamedExports(st.exportClause)) {
+        for (const el of st.exportClause.elements) {
+          const from = (el.propertyName ?? el.name).text;
+          const via = st.moduleSpecifier ? (target ? [target, from] : null) : imported.get(from);
+          if (via) info.links.push([el.name.text, ...via]);
+          else if (!st.moduleSpecifier) info.own.set(el.name.text, { file: here, name: from });
+        }
+      }
+      continue;
+    }
+    const exported = ts.canHaveModifiers?.(st) && ts.getModifiers(st)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+    if (!exported) continue;
+    const decls = ts.isVariableStatement(st) ? st.declarationList.declarations : [st];
+    for (const d of decls) if (d.name && ts.isIdentifier(d.name)) info.own.set(d.name.text, { file: here, name: d.name.text });
+  }
+  return info;
+}
+
+// 진입들에서 닿는 파일을 모두 읽은 뒤 이름 표를 바뀌지 않을 때까지 되풀이해 채운다 — 순환 · 다이아몬드도 파일마다 한 번만 읽는다
+// 파일 → (내보내는 이름 → { file: 패키지 안 경로(확장자 없음), name: 원래 이름 })
+function exportTables(ts, pkgDir, entries, ctx) {
+  const queue = [...entries];
+  while (queue.length) {
+    const file = queue.pop();
+    if (!ctx.parsed.has(file)) queue.push(...readExports(ts, pkgDir, file, ctx).deps);
+  }
+  let tables = new Map([...ctx.parsed.keys()].map((f) => [f, new Map()]));
+  // 순환에서는 이름이 들어오는 순서가 매 회 달라지므로 순서 없이 견준다
+  const same = (a, b) => a.size === b.size && [...a].every(([k, v]) => b.get(k)?.file === v.file && b.get(k)?.name === v.name);
+  // 이름의 집합은 늘기만 하고 값은 대상의 값을 따라가므로 멈춘다 — 그래도 끝없이 돌지 않게 파일 수만큼으로 막는다
+  for (let round = 0; round <= ctx.parsed.size + 1; round++) {
+    let changed = false;
+    const next = new Map();
+    for (const [file, info] of ctx.parsed) {
+      const names = new Map(info.own);
+      for (const [as, target, from] of info.links) names.set(as, tables.get(target)?.get(from) ?? { file: bare(target), name: from });
+      // export * 는 이름 있는 내보내기를 덮지 않는다
+      for (const target of info.stars) for (const [k, v] of tables.get(target) ?? []) if (!names.has(k)) names.set(k, v);
+      if (!same(names, tables.get(file))) changed = true;
+      next.set(file, names);
+    }
+    tables = next;
+    if (!changed) break;
+  }
+  return tables;
+}
+
+// 패키지마다 진입 분석을 한 번만 짓는다 — package.json 이나 읽은 .d.ts 가 바뀌면(재설치 · link 한 패키지의 재빌드) 다시 짓는다
+const packageCache = new Map();
+const stampOf = (files) =>
+  [...files]
+    .map((f) => {
+      try {
+        return statSync(f).mtimeMs;
+      } catch {
+        return -1;
+      }
+    })
+    .join(",");
+function packageEntries(ts, pkgDir) {
+  const pkgJson = join(pkgDir, "package.json");
+  const hit = packageCache.get(pkgDir);
+  if (hit && hit.stamp === stampOf(hit.files)) return hit.value;
+  let pkg = {};
+  try {
+    pkg = JSON.parse(readFileSync(pkgJson, "utf8"));
+  } catch {}
+  const ctx = { parsed: new Map(), files: new Set([pkgJson]) };
+  const value = { pkg, routes: [], excluded: [] };
+  if (pkg.exports) {
+    const exp = pkg.exports;
+    const map = typeof exp === "object" && !Array.isArray(exp) && Object.keys(exp).some((k) => k.startsWith(".")) ? exp : { ".": exp };
+    // 조건이 겹친 대상(import.types 같은 것)과 배열까지 끝의 글자를 모두 모은다
+    const targets = (v) => (typeof v === "string" ? [v] : v && typeof v === "object" ? Object.values(v).flatMap(targets) : []);
+    for (const [sub, v] of Object.entries(map)) {
+      const subpath = sub.replace(/^\.\/?/, "");
+      if (v === null) {
+        value.excluded.push(subpath);
+        continue;
+      }
+      for (const target of targets(v)) {
+        if (target.includes("*")) value.routes.push({ subpath, star: bare(target).split("*") });
+        else if (DECL.test(target)) {
+          const file = posix(target).replace(/^\.\//, "");
+          value.routes.push({ subpath, file, entry: bare(file) });
+        }
+      }
+    }
+    const tables = exportTables(ts, pkgDir, value.routes.filter((r) => r.file).map((r) => r.file), ctx);
+    for (const r of value.routes) if (r.file) r.names = tables.get(r.file);
+  }
+  packageCache.set(pkgDir, { files: ctx.files, stamp: stampOf(ctx.files), value });
+  return value;
+}
+
+const starMatch = (pattern, s) => {
+  const [head, tail] = pattern.split("*");
+  if (tail === undefined) return pattern === s ? "" : null;
+  return s.startsWith(head) && s.endsWith(tail) && s.length >= head.length + tail.length ? s.slice(head.length, s.length - tail.length) : null;
+};
+
+// node_modules/<패키지>/… 에 선언된 이름을 그 이름을 내보내는 진입의 「지정자 + 이름」으로 바꾼다. 패키지 밖이면 null
+function packageImport(ts, config, spec, name) {
+  // 프로젝트 안 파일은 프로젝트가 어느 node_modules 아래 있어도 상대 경로로 둔다
+  const same = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+  const root = same(`${config.root}/`);
+  if (same(spec).startsWith(root) && !same(spec).startsWith(`${root}node_modules/`)) return null;
+  // 마지막 node_modules 가 패키지 자리다 — pnpm 의 .pnpm/<이름>@<판>/node_modules/<이름> 도 이것으로 풀린다
+  const m = /^(.*\/node_modules\/)((?:@[^/]+\/)?[^/]+)\/(.+)$/.exec(spec);
+  if (!m) return null;
+  const [, base, dir, rest] = m;
+  // @types/foo 는 foo, @types/scope__pkg 는 @scope/pkg 로 쓴다
+  const pkgName = dir.startsWith("@types/") ? dir.slice(7).replace(/^(.+)__/, "@$1/") : dir;
+  const file = bare(rest);
+  const { pkg, routes, excluded } = packageEntries(ts, `${base}${dir}`);
+  const at = (sub) => (sub ? `${pkgName}/${sub}` : pkgName);
+  if (!pkg.exports) {
+    // exports 가 없으면 깊은 경로가 그대로 풀린다 — 진입 파일이면 이름만 쓴다
+    const entry = bare(pkg.types ?? pkg.typings ?? pkg.main ?? "index");
+    return { spec: file === entry || file === "index" ? pkgName : `${pkgName}/${file}`, name };
+  }
+  const open = (sub) => !excluded.some((x) => starMatch(x, sub) !== null);
+  for (const r of routes) {
+    if (r.star) {
+      // 별 패턴은 파일 자체가 진입이다
+      const cut = starMatch(r.star.join("*"), file);
+      const sub = cut === null ? null : r.subpath.replace("*", cut);
+      if (sub !== null && open(sub)) return { spec: at(sub), name };
+      continue;
+    }
+    if (!open(r.subpath)) continue;
+    // 진입 파일 자신에 선언된 것(export = 의 네임스페이스 · default 포함)은 그 진입에서 그대로 닿는다
+    if (r.entry === file) return { spec: at(r.subpath), name };
+    if (!name) continue;
+    for (const [as, o] of r.names) if (o.file === file && o.name === name) return { spec: at(r.subpath), name: as };
+  }
+  return undefined;
+}
+
+function render(entries, config, ts) {
   const files = [...new Set(entries.map((e) => e.file))];
   const types = entries.map((e) => {
-    const text = e.text.replace(/import\("([^"]+)"\)/g, (whole, spec) =>
-      /^(?:[A-Za-z]:)?\//.test(spec) ? `import("${relativeFromOut(config, spec)}")` : whole,
-    );
+    const text = e.text.replace(/import\("([^"]+)"\)(\.([A-Za-z_$][\w$]*))?/g, (whole, spec, dot, name) => {
+      if (!/^(?:[A-Za-z]:)?\//.test(spec)) return whole;
+      const hit = packageImport((ts ??= requireTypeScript(config.root)), config, spec, name);
+      if (hit === null) return `import("${relativeFromOut(config, spec)}")${dot ?? ""}`;
+      if (hit === undefined) throw new Error(`${e.key}(${e.file}): ${name ?? "(이름 없음)"} 을 내보내는 패키지 진입이 없다 — ${spec}`);
+      return `import("${hit.spec}")${hit.name ? `.${hit.name}` : ""}`;
+    });
     return `    ${JSON.stringify(e.key)}: ${text};`;
   });
   return [
@@ -190,7 +376,7 @@ function generate(ts, config) {
   for (let round = 0; round < MAX_ROUNDS; round++) {
     program = ts.createProgram({ rootNames, options, host, oldProgram: program });
     const entries = collect(ts, program, config);
-    const next = render(entries, config);
+    const next = render(entries, config, ts);
     if (next === text) {
       const bad = entries.find((e) => e.any);
       // 고정점에도 any 가 남으면 그 key 의 타입 검사가 조용히 꺼진다 — 쓰지 않고 반환 타입을 적게 한다

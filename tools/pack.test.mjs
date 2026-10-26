@@ -54,6 +54,18 @@ test("묶음을 템플릿에 설치해 시작 절차 두 줄로 개발 서버와
       file("src/App.tsx"),
       `import { useStore } from "supa-store/react";\nexport default function App() {\n  const { n } = useStore("count", { pick: ["n"] });\n  return <p id="n">n={n}</p>;\n}\n`,
     );
+    // 자원과 사건 — 그 타입이 node_modules 의 supa-store 를 가리킨다
+    writeFileSync(
+      file("src/todo.state.ts"),
+      `import { createStore } from "supa-store";\nimport { createEvent, createResource } from "supa-store/query";\ncreateStore("api.todo", () => createResource(() => ({ query: async () => ({ title: "t" }) })));\ncreateStore("ui.saved", () => ({ saved: createEvent<number>() }));\n`,
+    );
+
+    // 설치본의 store-gen 이 돌고 생성 파일은 파일 경로가 아니라 패키지 이름으로 가리킨다
+    run("npx store-gen", app);
+    const gen = readFileSync(file("src/store.gen.ts"), "utf8");
+    assert.match(gen, /"api\.todo": import\("supa-store\/query"\)\.Resource</);
+    assert.match(gen, /saved: import\("supa-store\/query"\)\.Event<number>/);
+    assert.doesNotMatch(gen, /node_modules|\bany\b/);
 
     // 5. 개발 서버 — 생성 파일이 써지고 첫 화면이 상태를 그린다
     const { createServer } = await import(pathToFileURL(file("node_modules/vite/dist/node/index.js")).href);

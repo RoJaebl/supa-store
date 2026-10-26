@@ -45,7 +45,7 @@ module.exports = function init({ typescript: ts }) {
         if (!program) return false;
         let next;
         try {
-          next = render(collect(ts, program, config), config);
+          next = render(collect(ts, program, config), config, ts);
         } catch (error) {
           log(error.message);
           return false;
