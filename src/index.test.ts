@@ -18,6 +18,7 @@ declare module "./index.js" {
     listener: object;
     "dispose.a": { n: number };
     "dispose.plain": { n: number };
+    "dispose.reader": { read: () => number; n: number };
   }
 }
 
@@ -192,6 +193,13 @@ createStore("dispose.a", () => {
   return { n: 0, [DISPOSE]: fn };
 });
 createStore("dispose.plain", () => ({ n: 0 }));
+const readerDisposers: Array<ReturnType<typeof vi.fn>> = [];
+createStore("dispose.reader", (_set, _get, ctx) => {
+  const fn = vi.fn();
+  readerDisposers.push(fn);
+  const src = ctx("dispose.a");
+  return { n: 0, read: () => (src as { n: number }).n, [DISPOSE]: fn };
+});
 
 it("dispose: 다시 지을 때 앞 상태의 [DISPOSE] 를 한 번 부른다", () => {
   disposeStores();
@@ -227,12 +235,24 @@ it("dispose: [DISPOSE] 가 던져도 다시 짓기는 이어진다", () => {
   disposers[0]!.mockImplementation(() => {
     throw new Error("boom");
   });
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
   expect(() => resetStores()).not.toThrow();
+  expect(err).toHaveBeenCalledTimes(1);
+  err.mockRestore();
   expect(disposers).toHaveLength(2);
   expect(getStore("dispose.a").getState().n).toBe(0);
 });
 it("dispose: [DISPOSE] 가 없는 0.2 의 상태는 그대로다", () => {
-  getStore("dispose.plain").getState();
-  expect(() => (resetStores(), disposeStores())).not.toThrow();
+  getStore("dispose.plain").setState({ n: 5 });
+  resetStores();
   expect(getStore("dispose.plain").getState().n).toBe(0);
+  expect(() => disposeStores()).not.toThrow();
+});
+it("dispose: ctx 로 읽은 store 가 다시 지어지면 읽던 store 의 [DISPOSE] 도 부른다", () => {
+  disposeStores();
+  readerDisposers.length = 0;
+  getStore("dispose.reader").getState();
+  overrideStore("dispose.a", () => ({ n: 9 }));
+  expect(readerDisposers[0]).toHaveBeenCalledTimes(1);
+  expect(readerDisposers).toHaveLength(2);
 });
