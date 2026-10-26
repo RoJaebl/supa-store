@@ -263,6 +263,31 @@ it("조회: 다시 받는 중에 fetch 하면 앞 값이 아니라 새 값을 �
   expect(await during).toBe(2);
   expect(q.fn).toHaveBeenCalledTimes(2);
 });
+it("조회: 기다리던 요청을 다른 요청이 밀어내면 fetch 는 마지막 요청의 값을 준다", async () => {
+  const q = controlled<number>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() })));
+  const first = state(key).fetch();
+  q.calls[0]!.d.resolve(1);
+  await first;
+  void state(key).invalidate();
+  const during = state(key).fetch();
+  void state(key).invalidate();
+  q.calls[1]!.d.resolve(2);
+  await flush();
+  q.calls[2]!.d.resolve(3);
+  expect(await during).toBe(3);
+});
+it("조회: 받는 중에 setData(undefined) 로 비워도 fetch 는 받은 응답을 준다", async () => {
+  const q = controlled<number>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() }), { auto: false }));
+  void state(key).fetch();
+  // 진행 중인 요청을 기다리는 fetch
+  const pending = state(key).fetch();
+  state(key).setData(undefined);
+  q.calls[0]!.d.resolve(5);
+  expect(await pending).toBe(5);
+  expect(state(key).getData()).toBeUndefined();
+});
 it("조회: setData 앞에 떠난 조회 응답이 늦게 와도 setData 의 값을 덮지 않는다", async () => {
   const q = controlled<number[]>();
   const key = define(() => createResource(() => ({ query: () => q.fn() })));
@@ -283,8 +308,9 @@ it("조회: 받는 중에 setData 로 값을 비우면 칸이 idle 로 돌아가
     await pending;
   });
   expect(result.current).toMatchObject({ data: undefined, status: "idle", error: null });
-  void state(key).fetch().catch(() => {});
+  act(() => void state(key).fetch().catch(() => {}));
   expect(q.fn).toHaveBeenCalledTimes(2);
+  expect(result.current).toMatchObject({ status: "loading", isFetching: true });
 });
 it("조회: idle 칸에 setData 하면 ready 가 된다", () => {
   const key = define(() => createResource(() => ({ query: async () => 1 }), { auto: false }));

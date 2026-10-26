@@ -53,7 +53,7 @@ export interface Cache<A, D> {
   setData(updater: D | undefined | ((prev: D | undefined, args: A) => D | undefined), args?: A | readonly A[]): void;
   /** 다시 받는다 — args 를 주면 그 칸만(배열이면 그 칸들만, 빈 배열은 아무것도 안 함), 없으면 받아 둔 칸 모두. 실패는 칸의 error 에 둔다 */
   invalidate(args?: A | readonly A[]): Promise<void>;
-  /** 받아서 칸에 넣고 값을 돌려준다 — 이미 받은 칸이면 그 값을 바로 준다(체인에서 쓴다). 실패하면 던진다. 배열이면 하나라도 실패할 때 그 오류로 거절한다 */
+  /** 받아서 칸에 넣고 값을 돌려준다 — 받는 중이면 끝을 기다려 칸의 값을, 아니고 이미 받은 칸이면 그 값을 바로 준다(체인에서 쓴다). 실패하면 던진다. 배열이면 하나라도 실패할 때 그 오류로 거절한다 */
   fetch(args?: A): Promise<D>;
   fetch(args: readonly A[]): Promise<D[]>;
 }
@@ -251,8 +251,14 @@ export function createResource<A = void, D = never, R extends object = object, S
   const reload = (cell: Cell<A, D>) => (cell.view.status === "idle" ? undefined : load(cell.args, true).catch(noop));
   const fetchOne = (args: A | undefined) => {
     const cell = cellOf(args);
-    // 받는 중이면 끝을 기다려 칸의 값을 준다 — invalidate 뒤 체인이 앞 값을 받지 않게. 그사이 setData 한 값이면 그것이다
-    if (cell.inflight) return cell.inflight.then(() => cell.view.data as D);
+    // 받는 중이면 끝을 기다려 칸의 값을 준다 — invalidate 뒤 체인이 앞 값을 받지 않게. 그사이 setData 한 값이면 그것이다.
+    // 기다리던 요청을 다른 요청이 밀어냈으면 그것을 다시 기다리고, 그사이 칸을 비웠으면 받은 응답을 준다
+    const wait = (p: Promise<D>): Promise<D> =>
+      p.then(
+        (d) => (cell.inflight ? wait(cell.inflight) : cell.view.data === undefined ? d : (cell.view.data as D)),
+        (e) => (cell.inflight ? wait(cell.inflight) : Promise.reject(e)),
+      );
+    if (cell.inflight) return wait(cell.inflight);
     return cell.view.status === "ready" ? Promise.resolve(cell.view.data as D) : load(args);
   };
 
