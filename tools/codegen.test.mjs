@@ -401,3 +401,89 @@ createStore("ui.x", () => ({ root: null as Root | null, thing: null as Thing | n
   assert.doesNotMatch(out, NO_PATH);
   assert.deepEqual(genDiagnostics(), []);
 });
+
+// 공개 진입이 다른 파일에 선언된 타입을 다시 내보내는 경우 — 선언 파일이 아니라 그 이름을 내보내는 진입으로 찍는다
+const REEXPORT_DEFS = `import { createStore } from "supa-store";
+import type { RefetchInterval } from "supa-store/query";
+import type { ClientView, CommandError } from "supa-store/stream";
+createStore("p.cv", () => ({ view: null as ClientView<string> | null, err: null as CommandError | null, iv: 5 as RefetchInterval<number> }));
+`;
+const assertReexports = () => {
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /view: import\("supa-store\/stream"\)\.ClientView<string>/);
+  assert.match(out, /err: import\("supa-store\/stream"\)\.CommandError/);
+  assert.match(out, /iv: import\("supa-store\/query"\)\.RefetchInterval<number>/);
+  assert.doesNotMatch(out, NO_PATH);
+  assert.deepEqual(genDiagnostics(), []);
+};
+test("다시 내보낸 타입은 그 이름을 내보내는 진입으로 찍힌다", () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  write("src/a.state.ts", REEXPORT_DEFS);
+  assertReexports();
+});
+test("pnpm 자리에서도 다시 내보낸 타입을 그 진입으로 찍는다", () => {
+  nodeModulesProject();
+  const real = "node_modules/.pnpm/supa-store@0.3.0/node_modules/supa-store";
+  installed(real);
+  symlinkSync(join(root, real), join(root, "node_modules/supa-store"), "junction");
+  write("src/a.state.ts", REEXPORT_DEFS);
+  assertReexports();
+});
+
+// 가짜 패키지 — 진입 index 가 내부 파일의 이름을 다른 이름으로, 또는 별로 다시 내보낸다
+const fakePackage = (exportsMap) => {
+  write("node_modules/fake/package.json", JSON.stringify({ name: "fake", exports: exportsMap }));
+  write("node_modules/fake/index.d.ts", `export type { Inner as Outer } from "./lib/inner.js";\nexport * from "./lib/star.js";`);
+  write("node_modules/fake/lib/inner.d.ts", "export type Inner = { i: 1 };\nexport type Secret = { s: 1 };");
+  write("node_modules/fake/lib/star.d.ts", "export interface Starred { st: 1 }");
+};
+test("다른 이름으로 다시 내보낸 타입은 그 이름으로 찍고 export * 도 따라간다", () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  fakePackage({ ".": { types: "./index.d.ts" } });
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { Outer, Starred } from "fake";
+createStore("ui.f", () => ({ o: null as Outer | null, s: null as Starred | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /o: import\("fake"\)\.Outer \| null/);
+  assert.match(out, /s: import\("fake"\)\.Starred \| null/);
+  assert.doesNotMatch(out, /Inner/);
+  assert.deepEqual(genDiagnostics(), []);
+});
+test("어느 진입도 내보내지 않는 타입을 쓰면 key · 이름 · 파일을 담아 실패한다", () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  fakePackage({ ".": { types: "./index.d.ts" } });
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { Secret } from "fake/lib/inner";
+createStore("ui.f", () => ({ s: null as Secret | null }));`,
+  );
+  write("tsconfig.json", JSON.stringify({ compilerOptions: { ...COMPILER, paths: { "fake/lib/inner": ["./node_modules/fake/lib/inner.d.ts"] } }, include: ["src"] }));
+  assert.throws(
+    () => generate(ts, loadConfig(ts, root)),
+    (e) => /ui\.f/.test(e.message) && /Secret/.test(e.message) && /fake\/lib\/inner/.test(e.message),
+  );
+});
+test("exports 의 null 로 막은 경로는 고르지 않는다", () => {
+  nodeModulesProject();
+  installed("node_modules/supa-store");
+  fakePackage({ "./internal/inner": null, "./internal/*": "./lib/*.d.ts", "./x": { types: "./lib/inner.d.ts" } });
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { Inner } from "fake/x";
+createStore("ui.f", () => ({ i: null as Inner | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /i: import\("fake\/x"\)\.Inner \| null/);
+  assert.deepEqual(genDiagnostics(), []);
+});
