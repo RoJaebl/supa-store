@@ -251,6 +251,18 @@ it("조회: fetch(args) 는 이미 받은 칸이면 다시 받지 않고 값을 
   expect(query).toHaveBeenCalledTimes(1);
 });
 
+it("조회: 다시 받는 중에 fetch 하면 앞 값이 아니라 새 값을 기다려 준다", async () => {
+  const q = controlled<number>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() })));
+  const first = state(key).fetch();
+  q.calls[0]!.d.resolve(1);
+  expect(await first).toBe(1);
+  void state(key).invalidate();
+  const during = state(key).fetch();
+  q.calls[1]!.d.resolve(2);
+  expect(await during).toBe(2);
+  expect(q.fn).toHaveBeenCalledTimes(2);
+});
 it("조회: setData 앞에 떠난 조회 응답이 늦게 와도 setData 의 값을 덮지 않는다", async () => {
   const q = controlled<number[]>();
   const key = define(() => createResource(() => ({ query: () => q.fn() })));

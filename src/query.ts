@@ -251,6 +251,8 @@ export function createResource<A = void, D = never, R extends object = object, S
   const reload = (cell: Cell<A, D>) => (cell.view.status === "idle" ? undefined : load(cell.args, true).catch(noop));
   const fetchOne = (args: A | undefined) => {
     const cell = cellOf(args);
+    // 받는 중이면 끝을 기다려 칸의 값을 준다 — invalidate 뒤 체인이 앞 값을 받지 않게. 그사이 setData 한 값이면 그것이다
+    if (cell.inflight) return cell.inflight.then(() => cell.view.data as D);
     return cell.view.status === "ready" ? Promise.resolve(cell.view.data as D) : load(args);
   };
 
