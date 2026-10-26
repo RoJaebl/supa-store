@@ -107,6 +107,20 @@ describe("요청", () => {
     await expect(p).rejects.toMatchObject({ message: TEXT.timeout });
     expect(sent).toHaveLength(1);
   });
+
+  it("send 도중 이미 답이 온 요청에는 타이머를 걸지 않는다", async () => {
+    vi.useFakeTimers();
+    let message = (_: string) => {};
+    const t: Transport = {
+      send: (m) => message(JSON.stringify({ jsonrpc: "2.0", id: JSON.parse(m).id, result: "곧바로" })),
+      onMessage: (fn) => void (message = fn),
+      onClose: () => {},
+      close: () => {},
+    };
+    const s = openSession(t, { onNotification: () => {}, onClose: () => {} });
+    await expect(s.request("m", {}, 1_000)).resolves.toBe("곧바로");
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 describe("닫힘", () => {

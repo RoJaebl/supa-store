@@ -113,6 +113,7 @@ export function openSession(t: Transport, o: SessionOptions): Session {
           pending.delete(id); // params 가 글자로 바뀌지 않으면 남기지 않고 그 오류로 거절한다
           throw e;
         }
+        if (!pending.has(id)) return; // send 도중 답 · 닫힘으로 이미 끝났다
         // setTimeout 은 NaN · 2^31-1 넘는 값을 곧바로 터뜨린다
         if (Number.isFinite(timeout) && timeout <= 2_147_483_647)
           p.timer = setTimeout(() => {
