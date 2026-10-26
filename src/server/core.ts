@@ -73,6 +73,9 @@ type Posted = Extract<ClientMessage, { t: "command" | "ask" | "answer" }>;
 
 class Rejection extends Error {}
 
+/** 시험 전용 — 홉이 쥔 채널 이름을 꺼낸다. 하위 경로로 내보내지 않는다 */
+export const INSPECT = Symbol("supa-store.inspect");
+
 /** 답 기록 하나 — reply 가 없으면 아직 도는 중. 키는 신원과 요청 id 를 함께(keyOf) */
 interface Ran {
   /** 시작한 때, 끝나면 끝난 때 — 쥐는 기간은 답을 낸 때부터 센다 */
@@ -142,8 +145,20 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
 
   const chan = (name: string) => {
     let ch = channels.get(name);
-    if (!ch) channels.set(name, (ch = { name, version: 0, history: [], replies: new Map(), sessions: new Set() }));
+    if (ch) return ch;
+    // 새 채널을 지을 때마다 연결 없는 버전 0 채널을 훑는다 — 답 기록이 다 지나간 것은 지운다
+    // ponytail: 짓기마다 O(채널 수). 채널이 아주 많아지면 타이머로 한 번씩 훑는다
+    for (const c of channels.values())
+      if (c.version === 0 && c.sessions.size === 0) {
+        trim(c);
+        forget(c);
+      }
+    channels.set(name, (ch = { name, version: 0, history: [], replies: new Map(), sessions: new Set() }));
     return ch;
+  };
+  /** 클라이언트가 지은 이름의 빈 채널이 쌓이지 않게 — 버전이 오른 채널은 기록이 버전을 지키므로 남긴다 */
+  const forget = (ch: Channel) => {
+    if (ch.version === 0 && ch.sessions.size === 0 && ch.replies.size === 0) channels.delete(ch.name);
   };
 
   /** 기록 · 답 기록을 count 개 또는 ms 가운데 짧은 쪽까지 앞에서 자른다. 도는 중인 명령은 남긴다 */
@@ -166,8 +181,7 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
     const ch = s.live?.channel;
     if (ch) {
       ch.sessions.delete(s);
-      // 클라이언트가 지은 이름의 빈 채널이 쌓이지 않게 — 버전이 오른 채널은 기록이 버전을 지키므로 남긴다
-      if (ch.version === 0 && ch.sessions.size === 0 && ch.replies.size === 0) channels.delete(ch.name);
+      forget(ch);
     }
     for (const r of s.requests.values()) {
       clearTimeout(r.timer);
@@ -257,13 +271,14 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
     const key = keyOf(live.who, m.id);
     const had = ch.replies.get(key);
     if (had) return had.promise;
+    // 원형의 이름(toString 등)은 명령이 아니다. 없는 명령은 답 기록에 남기지 않는다 — 아무 이름으로 기록을 쌓지 못하게
+    if (!o.commands || !Object.hasOwn(o.commands, m.name))
+      return Promise.resolve({ t: "reply", id: m.id, ok: false, error: `알 수 없는 명령: ${m.name}`, version: ch.version });
     const ran = { at: Date.now() } as Ran;
     ran.promise = (async () => {
       let out: Outcome;
       try {
-        // 원형의 이름(toString 등)은 명령이 아니다
-        if (!o.commands || !Object.hasOwn(o.commands, m.name)) throw new Error(`알 수 없는 명령: ${m.name}`);
-        out = { ok: true, result: await o.commands[m.name]!(live.ctx, ...m.args) };
+        out = { ok: true, result: await o.commands![m.name]!(live.ctx, ...m.args) };
       } catch (e) {
         out = { ok: false, error: messageOf(e) };
       }
@@ -308,7 +323,7 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
     return null;
   };
 
-  return {
+  const hop: StreamServer<V, C, Id> = {
     publish(name, change) {
       if (down) return;
       const ch = chan(name);
@@ -381,4 +396,6 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
       channels.clear();
     },
   };
+  // 시험만 본다 — 지금 쥔 채널의 이름
+  return Object.assign(hop, { [INSPECT]: () => [...channels.keys()] });
 }

@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ClientMessage, ServerMessage } from "../stream/protocol.js";
-import { createStreamServer, type Conn, type StreamServer } from "./core.js";
+import { createStreamServer, INSPECT, type Conn, type StreamServer } from "./core.js";
 import { sseFrame } from "./sse.js";
 
 beforeEach(() => void vi.useFakeTimers({ now: 0 }));
@@ -429,27 +429,55 @@ it("홉: hello 의 칸이 틀린 꼴이면 받지 않는다", async () => {
 });
 
 it("홉: 버전이 0 이고 연결 · 답 기록이 없는 채널만 지운다 — 기록이 있는 채널은 남는다", async () => {
-  const del = vi.spyOn(Map.prototype, "delete");
-  const s = createStreamServer<number, string>({ snapshot: () => 0, commands: { hit: () => 1 } });
+  let calls = 0;
+  const s = createStreamServer<number, string>({ snapshot: () => 0, commands: { hit: () => ++calls } });
+  const held = () => (s as any)[INSPECT]() as string[];
   const { epoch } = welcomeOf(await join(s, { channel: "빈" }));
-  const deleted = () => del.mock.calls.map((a) => a[0]);
   // 빈 채널의 마지막 연결이 떠나면 채널을 지운다
   const empty = await join(s, { channel: "빈2" });
   empty.close(1000, "");
-  expect(deleted()).toContain("빈2");
+  expect(held()).not.toContain("빈2");
   // 버전이 오른 채널은 남아 따라잡기가 된다
   const pub = await join(s, { channel: "p" });
   s.publish("p", "x");
   pub.close(1000, "");
-  expect(deleted()).not.toContain("p");
+  expect(held()).toContain("p");
   expect((await join(s, { channel: "p", epoch, version: 0 })).of("change")).toHaveLength(1);
   // 답 기록이 있는 채널도 남아 같은 id 를 다시 돌리지 않는다
   const r = await join(s, { channel: "r" });
   r.emit({ t: "command", id: "q", name: "hit", args: [] });
   await flush();
   r.close(1000, "");
-  expect(deleted()).not.toContain("r");
-  del.mockRestore();
+  expect(held()).toContain("r");
+  const back = await join(s, { channel: "r" });
+  back.emit({ t: "command", id: "q", name: "hit", args: [] });
+  await flush();
+  expect(calls).toBe(1);
+  // 없는 명령은 답 기록에 남지 않는다 — 그 채널은 끊기면 곧 사라진다
+  const x = await join(s, { channel: "x" });
+  x.emit({ t: "command", id: "z", name: "없는 명령", args: [] });
+  await flush();
+  expect(x.of("reply")[0]).toMatchObject({ ok: false });
+  x.close(1000, "");
+  expect(held()).not.toContain("x");
+  s.close();
+});
+
+it("홉: command 하나 뒤 끊긴 채널은 5분 뒤 사라진다", async () => {
+  const s = createStreamServer({ snapshot: () => 0, commands: { hit: () => 1 } });
+  const held = () => (s as any)[INSPECT]() as string[];
+  const c = await join(s, { channel: "잠깐" });
+  c.emit({ t: "command", id: "q", name: "hit", args: [] });
+  await flush();
+  c.close(1000, "");
+  // 5분 안에는 답 기록을 지키려고 남는다
+  await vi.advanceTimersByTimeAsync(299_000);
+  await join(s, { channel: "다른1" });
+  expect(held()).toContain("잠깐");
+  // 답이 5분을 넘긴 뒤 새 채널이 지어지면 훑여 지워진다
+  await vi.advanceTimersByTimeAsync(1_001);
+  await join(s, { channel: "다른2" });
+  expect(held()).not.toContain("잠깐");
   s.close();
 });
 
