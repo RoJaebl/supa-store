@@ -64,25 +64,28 @@ export interface StdioChild {
 export function stdio(child: StdioChild, options: { framing: Framing; killAfter?: number }): Transport {
   const { framing, killAfter = 2_000 } = options;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  /** 프로세스가 끝났나 — 통로가 끝난 것(출력 end)과는 따로 든다. 출력만 닫고 사는 프로세스도 거둬야 한다 */
+  let exited = false;
   const b = base(
     (m) => void child.stdin.write(encode(framing, m)),
     () => {
       child.stdin.end();
-      if (!child.kill || b.ended()) return;
+      if (!child.kill || exited) return;
       timer = setTimeout(() => child.kill!(), killAfter);
       timer.unref?.();
     },
   );
-  const end = (e?: Error) => {
+  const exit = (e?: Error) => {
+    exited = true;
     clearTimeout(timer);
     b.end(e);
   };
   child.stdout.on("data", createReader(framing, b.message));
-  child.stdout.on("end", () => end());
-  child.stdout.on("error", end);
-  child.stdin.on("error", end); // 죽은 프로세스에 쓰면 EPIPE
-  child.on?.("close", () => end());
-  child.on?.("error", end); // 듣지 않으면 spawn 의 ENOENT 가 앱을 죽인다
+  child.stdout.on("end", () => b.end());
+  child.stdout.on("error", (e: Error) => b.end(e));
+  child.stdin.on("error", (e: Error) => b.end(e)); // 죽은 프로세스에 쓰면 EPIPE
+  child.on?.("close", () => exit());
+  child.on?.("error", exit); // 듣지 않으면 spawn 의 ENOENT 가 앱을 죽인다
   return b.transport;
 }
 

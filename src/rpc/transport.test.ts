@@ -81,6 +81,21 @@ describe("stdio", () => {
     expect(got).toEqual([]);
   });
 
+  it("exit 뒤에 온 메시지도 받고 onClose 는 close 에서 한 번 온다", async () => {
+    const child = fake();
+    const t = stdio(child, { framing: "ndjson" });
+    const got: string[] = [];
+    t.onMessage((m) => got.push(m));
+    const c = closes(t);
+    child.emit("exit");
+    child.stdout.write("1\n");
+    await tick();
+    expect(got).toEqual(["1"]);
+    expect(c).toEqual([]);
+    child.emit("close");
+    expect(c).toEqual([undefined]);
+  });
+
   it("없는 실행 파일을 넘기면 던지지 않고 ENOENT 로 한 번 닫힌다", async () => {
     const t = stdio(spawn("no-such-binary-supa-store"), { framing: "ndjson" });
     const got = closes(t);
@@ -104,7 +119,7 @@ describe("stdio", () => {
   describe("close", () => {
     afterEach(() => vi.useRealTimers());
 
-    it("표준 입력을 닫고 killAfter 안에 끝나지 않으면 없으면 kill 을 한 번 부른다", () => {
+    it("표준 입력을 닫고 killAfter 안에 끝나지 않으면 kill 을 한 번 부른다", () => {
       vi.useFakeTimers();
       const child = killable();
       const t = stdio(child, { framing: "ndjson", killAfter: 500 });
@@ -119,7 +134,7 @@ describe("stdio", () => {
       expect(got).toHaveLength(1);
     });
 
-    it("그 안에 끝나지 않으면 오면 kill 을 부르지 않는다", () => {
+    it("그 안에 끝나면 kill 을 부르지 않는다", () => {
       vi.useFakeTimers();
       const child = killable();
       const t = stdio(child, { framing: "ndjson" });
@@ -128,6 +143,31 @@ describe("stdio", () => {
       child.emit("close");
       vi.advanceTimersByTime(10_000);
       expect(child.kill).not.toHaveBeenCalled();
+    });
+
+    it("close() 뒤 출력만 닫히고 프로세스가 살아 있으면 kill 을 한 번 부른다", async () => {
+      vi.useFakeTimers();
+      const child = killable();
+      const t = stdio(child, { framing: "ndjson", killAfter: 500 });
+      t.close();
+      child.stdout.end();
+      child.stdout.resume();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(child.kill).toHaveBeenCalledTimes(1);
+    });
+
+    it("출력 end 로 onClose 가 먼저 와도 close() 하면 kill 을 한 번 부른다", async () => {
+      vi.useFakeTimers();
+      const child = killable();
+      const t = stdio(child, { framing: "ndjson", killAfter: 500 });
+      const got = closes(t);
+      child.stdout.end();
+      child.stdout.resume();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(got).toHaveLength(1);
+      t.close();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(child.kill).toHaveBeenCalledTimes(1);
     });
 
     it("이미 끝났으면 kill 을 걸지 않는다", () => {
