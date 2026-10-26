@@ -44,7 +44,43 @@ describe("content-length", () => {
   });
 });
 
+describe("content-length 깨진 머리와 큰 메시지", () => {
+  const ok = encode("content-length", "{}");
+  const BAD = ["Content-Length: -5", "Content-Length: abc", "Content-Length: 99999999999999999999"];
+  it.each(BAD)("깨진 머리 %s 뒤의 정상 메시지를 읽는다", (bad) => {
+    const { out, feed } = collect("content-length");
+    feed(Buffer.from(`${bad}\r\n\r\n`));
+    feed(ok);
+    expect(out).toEqual(["{}"]);
+  });
+  it("8 KiB 넘는 쓰레기 뒤의 정상 메시지를 읽는다", () => {
+    const { out, feed } = collect("content-length");
+    feed(Buffer.alloc(9000, "x"));
+    feed(ok);
+    expect(out).toEqual(["{}"]);
+  });
+  it("길이 0 은 알리지 않는다", () => {
+    const { out, feed } = collect("content-length");
+    feed(Buffer.concat([Buffer.from("Content-Length: 0\r\n\r\n"), ok]));
+    expect(out).toEqual(["{}"]);
+  });
+  it("1 MiB 메시지를 1 KiB 조각으로 넣어도 하나 알린다", () => {
+    const text = JSON.stringify({ a: "가".repeat(350_000) });
+    const buf = encode("content-length", text);
+    const { out, feed } = collect("content-length");
+    for (let i = 0; i < buf.length; i += 1024) feed(buf.subarray(i, i + 1024));
+    expect(out).toEqual([text]);
+  });
+});
+
 describe("ndjson", () => {
+  it("1 MiB 한 줄을 1 KiB 조각으로 넣어도 하나 알린다", () => {
+    const text = JSON.stringify({ a: "가".repeat(350_000) });
+    const buf = encode("ndjson", text);
+    const { out, feed } = collect("ndjson");
+    for (let i = 0; i < buf.length; i += 1024) feed(buf.subarray(i, i + 1024));
+    expect(out).toEqual([text]);
+  });
   it("줄마다 알린다", () => {
     const { out, feed } = collect("ndjson");
     feed(Buffer.from("{}\n{}\n"));
