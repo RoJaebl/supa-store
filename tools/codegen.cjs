@@ -328,7 +328,7 @@ function render(entries, config, ts) {
       if (!/^(?:[A-Za-z]:)?\//.test(spec)) return whole;
       const hit = packageImport((ts ??= requireTypeScript(config.root)), config, spec, name);
       if (hit === null) return `import("${relativeFromOut(config, spec)}")${dot ?? ""}`;
-      if (hit === undefined) throw new Error(`${e.key}(${e.file}): ${name ?? "(이름 없음)"} 을 내보내는 패키지 진입이 없다 — ${spec}`);
+      if (hit === undefined) throw new Error(`${e.key}(${e.file}): ${name ?? "(이름 없음)"} 을 내보내는 패키지 진입이 없다(export * as 사슬은 3단까지 따라간다) — ${spec}`);
       return `import("${hit.spec}")${hit.name ? `.${hit.name}` : ""}`;
     });
     return `    ${JSON.stringify(e.key)}: ${text};`;
