@@ -34,7 +34,7 @@ beforeEach(() => {
         moduleResolution: "Bundler",
         target: "ES2022",
         skipLibCheck: true,
-        paths: { "supa-store": [storeIndex] },
+        paths: { "supa-store": [storeIndex], "supa-store/query": [posix(resolve(here, "../src/query.ts"))] },
       },
       include: ["src"],
     }),
@@ -133,6 +133,50 @@ test("템플릿 리터럴 key 도 실패한다", () => {
   write("src/a.state.ts", `import { createStore } from "supa-store";
 createStore(\`a\`, () => ({}));`);
   assert.throws(() => generate(ts, loadConfig(ts, root)), /src\/a\.state\.ts: createStore 의 key 는 문자열 그대로 쓴다/);
+});
+
+const RES = `import { createStore } from "supa-store";
+import { createResource } from "supa-store/query";
+`;
+const ARRAY_ARGS = /src\/a\.state\.ts: 자원의 args 는 배열로 짓지 않는다 — 여러 값은 객체로 묶는다/;
+test("배열 args 를 가진 자원은 실패한다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => createResource(() => ({ query: async ([from, to]: [number, number]) => from + to })));`);
+  assert.throws(() => generate(ts, loadConfig(ts, root)), ARRAY_ARGS);
+});
+test("배열을 낀 유니온 args 도 실패한다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => createResource(() => ({ query: async (ids: string[] | undefined) => ids })));`);
+  assert.throws(() => generate(ts, loadConfig(ts, root)), ARRAY_ARGS);
+});
+test("감싼 createResource 도 본다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => { const r = createResource(() => ({ query: async (ids: string[]) => ids })); return { r }; });`);
+  assert.throws(() => generate(ts, loadConfig(ts, root)), ARRAY_ARGS);
+});
+test("TypeScript 가 isArrayType · isTupleType 을 내주지 않으면 배열 검사를 건너뛴다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => createResource(() => ({ query: async (ids: string[]) => ids })));`);
+  // 옛 TypeScript 를 흉내 낸다 — 검사기에서 두 함수를 뺀다
+  const old = {
+    ...ts,
+    createProgram: (...a) => {
+      const program = ts.createProgram(...a);
+      const checker = program.getTypeChecker();
+      const bare = new Proxy(checker, { get: (t, k) => (k === "isArrayType" || k === "isTupleType" ? undefined : t[k]) });
+      return new Proxy(program, { get: (t, k) => (k === "getTypeChecker" ? () => bare : t[k]) });
+    },
+  };
+  assert.doesNotThrow(() => generate(old, loadConfig(ts, root)));
+});
+test("객체 args 와 인자 없는 query 는 통과한다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => ({
+  r: createResource(() => ({ query: async ({ from, to }: { from: number; to: number }) => from + to })),
+  s: createResource(() => ({ query: async () => 1 })),
+}));`);
+  assert.doesNotThrow(() => generate(ts, loadConfig(ts, root)));
+});
+
+test("자원의 select 결과 타입이 생성 파일의 상태 타입에 실린다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => createResource(() => ({ query: async () => ({ title: "t" }) }), { select: (d) => d.title.length }));`);
+  generate(ts, loadConfig(ts, root));
+  assert.match(read("src/store.gen.ts"), /Resource<void, \{ title: string; \}, \{ query: \(\) => Promise<\{ title: string; \}>; \}, number>/);
 });
 
 const COMPILER = { strict: true, module: "ESNext", moduleResolution: "Bundler", target: "ES2022", skipLibCheck: true, paths: { "supa-store": [storeIndex] } };
