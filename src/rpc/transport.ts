@@ -13,20 +13,27 @@ export interface Transport {
   close(): void;
 }
 
-/** 듣는 이를 모아 알린다 — 쓰는 쪽이 던져도 읽기를 끊지 않는다 */
+/** 듣는 이를 모아 알린다 — 쓰는 쪽이 던져도 읽기를 끊지 않는다
+ *  close() 뒤의 send 는 버리고, 우리가 닫았으면 reason 을 비운다. onClose 뒤에는 메시지를 알리지 않는다 */
 function base(send: (m: string) => void, close: () => void) {
   const onMessage = new Set<(m: string) => void>();
   const onClose = new Set<(r?: Error) => void>();
   let ended = false;
+  let closing = false;
   const transport: Transport = {
     send: (m) => {
-      if (!ended) send(m);
+      if (!ended && !closing) send(m);
     },
     onMessage: (fn) => void onMessage.add(fn),
     onClose: (fn) => void onClose.add(fn),
-    close,
+    close: () => {
+      if (closing) return;
+      closing = true;
+      close();
+    },
   };
   const message = (m: string) => {
+    if (ended) return;
     for (const fn of onMessage) {
       try {
         fn(m);
@@ -38,21 +45,22 @@ function base(send: (m: string) => void, close: () => void) {
     ended = true;
     for (const fn of onClose) {
       try {
-        fn(reason);
+        fn(closing ? undefined : reason);
       } catch {}
     }
   };
-  return { transport, message, end };
+  return { transport, message, end, ended: () => ended };
 }
 
 export interface StdioChild {
   stdin: Writable;
   stdout: Readable;
   kill?(): unknown;
-  on?(event: "exit", fn: () => void): unknown;
+  /** ChildProcess 면 'close'(표준 입출력이 다 닫힌 뒤)를 끝남으로, 'error'(실행 파일이 없다 따위)를 그 까닭으로 본다 */
+  on?(event: "close" | "error", fn: (e?: Error) => void): unknown;
 }
 
-/** close() 는 표준 입력을 닫고, kill 이 있으면 killAfter 안에 exit 이 없을 때 kill 한다 */
+/** close() 는 표준 입력을 닫고, kill 이 있으면 killAfter 안에 끝나지 않을 때 kill 한다 */
 export function stdio(child: StdioChild, options: { framing: Framing; killAfter?: number }): Transport {
   const { framing, killAfter = 2_000 } = options;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -60,60 +68,64 @@ export function stdio(child: StdioChild, options: { framing: Framing; killAfter?
     (m) => void child.stdin.write(encode(framing, m)),
     () => {
       child.stdin.end();
-      if (child.kill && !timer) timer = setTimeout(() => child.kill!(), killAfter);
+      if (!child.kill || b.ended()) return;
+      timer = setTimeout(() => child.kill!(), killAfter);
+      timer.unref?.();
     },
   );
-  child.stdout.on("data", createReader(framing, b.message));
-  child.stdout.on("end", () => b.end());
-  child.stdout.on("error", (e: Error) => b.end(e));
-  child.stdin.on("error", (e: Error) => b.end(e)); // 죽은 프로세스에 쓰면 EPIPE
-  child.on?.("exit", () => {
+  const end = (e?: Error) => {
     clearTimeout(timer);
-    b.end();
-  });
+    b.end(e);
+  };
+  child.stdout.on("data", createReader(framing, b.message));
+  child.stdout.on("end", () => end());
+  child.stdout.on("error", end);
+  child.stdin.on("error", end); // 죽은 프로세스에 쓰면 EPIPE
+  child.on?.("close", () => end());
+  child.on?.("error", end); // 듣지 않으면 spawn 의 ENOENT 가 앱을 죽인다
   return b.transport;
 }
 
 type Timing = { pingMs: number; idleMs: number };
 
-/** 프레임 하나가 메시지 하나. 열리기 전에 보낸 것은 열린 뒤 보낸다 */
+/** 프레임 하나가 메시지 하나. 열리기 전에 보낸 것은 열린 뒤 보낸다. url 이 틀리면 동기로 던진다(ws 의 생성자) */
 export function websocket(url: string, options: { headers?: Record<string, string>; maxPayload?: number } = {}): Transport {
   const { pingMs, idleMs } = (options as { [TIMING]?: Timing })[TIMING] ?? DEFAULTS;
   const ws = new WebSocket(url, { headers: options.headers, maxPayload: options.maxPayload ?? 1024 * 1024 });
   const queue: string[] = [];
-  let last = 0;
-  let timer: ReturnType<typeof setInterval> | undefined;
+  let ping: ReturnType<typeof setInterval> | undefined;
+  let idle: ReturnType<typeof setTimeout> | undefined;
   let error: Error | undefined;
-  let closing = false;
   const b = base(
     (m) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(m);
       else if (ws.readyState === WebSocket.CONNECTING) queue.push(m);
     },
-    () => {
-      closing = true;
-      ws.close();
-    },
+    () => ws.close(),
   );
-  ws.on("open", () => {
-    for (const m of queue.splice(0)) ws.send(m);
-    last = Date.now();
-    // 표준 ping 프레임 — 마지막 pong · 메시지에서 idleMs 가 지나면 끊는다
-    timer = setInterval(() => {
-      if (Date.now() - last < idleMs) return ws.ping();
+  /** 살아 있음을 볼 때마다 다시 센다 — 마지막으로 본 뒤 idleMs 면 끊는다(0.3 client 의 watch 와 같은 꼴) */
+  const watch = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => {
       error = new Error(`${idleMs}ms 동안 pong 이 없다`);
       ws.terminate();
-    }, pingMs);
+    }, idleMs);
+  };
+  ws.on("open", () => {
+    for (const m of queue.splice(0)) ws.send(m);
+    watch();
+    ping = setInterval(() => ws.ping(), pingMs); // 표준 ping 프레임
   });
-  ws.on("pong", () => (last = Date.now()));
+  ws.on("pong", watch);
   ws.on("message", (data) => {
-    last = Date.now();
+    watch();
     b.message(data.toString());
   });
   ws.on("error", (e) => (error ??= e)); // 늘 close 가 뒤따른다
   ws.on("close", () => {
-    clearInterval(timer);
-    b.end(closing ? undefined : error);
+    clearInterval(ping);
+    clearTimeout(idle);
+    b.end(error);
   });
   return b.transport;
 }
