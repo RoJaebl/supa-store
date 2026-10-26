@@ -194,7 +194,8 @@ function exportTables(ts, pkgDir, entries, ctx) {
     if (!ctx.parsed.has(file)) queue.push(...readExports(ts, pkgDir, file, ctx).deps);
   }
   let tables = new Map([...ctx.parsed.keys()].map((f) => [f, new Map()]));
-  const key = (t) => [...t].map(([k, v]) => `${k}=${v.file}#${v.name}`).join("|");
+  // 순환에서는 이름이 들어오는 순서가 매 회 달라지므로 순서 없이 견준다
+  const same = (a, b) => a.size === b.size && [...a].every(([k, v]) => b.get(k)?.file === v.file && b.get(k)?.name === v.name);
   // 이름의 집합은 늘기만 하고 값은 대상의 값을 따라가므로 멈춘다 — 그래도 끝없이 돌지 않게 파일 수만큼으로 막는다
   for (let round = 0; round <= ctx.parsed.size + 1; round++) {
     let changed = false;
@@ -204,7 +205,7 @@ function exportTables(ts, pkgDir, entries, ctx) {
       for (const [as, target, from] of info.links) names.set(as, tables.get(target)?.get(from) ?? { file: bare(target), name: from });
       // export * 는 이름 있는 내보내기를 덮지 않는다
       for (const target of info.stars) for (const [k, v] of tables.get(target) ?? []) if (!names.has(k)) names.set(k, v);
-      if (key(names) !== key(tables.get(file))) changed = true;
+      if (!same(names, tables.get(file))) changed = true;
       next.set(file, names);
     }
     tables = next;
