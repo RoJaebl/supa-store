@@ -130,60 +130,49 @@ function relativeFromOut(config, file) {
 const bare = (p) => posix(p).replace(/^\.\//, "").replace(/(?:\.d)?\.[cm]?[jt]sx?$/, "");
 const DECL = /\.d\.[cm]?ts$/;
 
-// 패키지 안 .d.ts 가 내보내는 이름 → { file: 패키지 안 경로(확장자 없음), name: 원래 이름 }
-// ctx 는 한 패키지 분석 동안 공유한다 — memo 가 없으면 여러 파일이 같은 파일을 export * 하는 구조에서 지수로 다시 읽는다
-function exportedNames(ts, pkgDir, file, ctx) {
-  if (ctx.memo.has(file)) return ctx.memo.get(file);
-  const names = new Map();
-  const onStack = ctx.stack.indexOf(file);
-  if (onStack >= 0) {
-    // 순환 — 이 자리 위의 결과는 아직 덜 찼으므로 그 위까지는 memo 에 넣지 않는다
-    ctx.low = Math.min(ctx.low, onStack);
-    return names;
-  }
+// 패키지 안 .d.ts 하나를 한 번만 읽어 자기 선언 · 이름 있는 재내보내기 · export * 대상을 따로 둔다
+// links 는 [내보내는 이름, 대상 파일, 대상에서의 이름]
+function readExports(ts, pkgDir, file, ctx) {
+  const info = { own: new Map(), links: [], stars: [], deps: [] };
+  ctx.parsed.set(file, info);
   let source;
   try {
     const path = join(pkgDir, file);
     source = ts.createSourceFile(file, readFileSync(path, "utf8"), ts.ScriptTarget.Latest);
     ctx.files.add(path);
   } catch {
-    ctx.memo.set(file, names);
-    return names;
+    return info;
   }
-  const depth = ctx.stack.push(file) - 1;
-  const outerLow = ctx.low;
-  ctx.low = Infinity;
-  // 상대 지정자만 따라간다 — ./x.js 는 ./x.d.ts, ./x 는 ./x.d.ts · ./x/index.d.ts 로 푼다
+  // 상대 지정자만 따라간다 — ./x.js 는 ./x.d.ts, ./x 는 ./x.d.ts · ./x/index.d.ts 로 푼다. .cjs · .d.cts 계열은 .d.cts 를, .mjs · .d.mts 계열은 .d.mts 를 먼저 본다
   const resolveRel = (spec) => {
     if (!spec.startsWith(".")) return null;
     const base = posix(join(dirname(file), spec)).replace(/\.[cm]?js$/, "");
-    const tries = [".d.ts", ".d.mts", ".d.cts", ".ts", "/index.d.ts"].map((ext) => base + ext);
-    return tries.find((t) => existsSync(join(pkgDir, t))) ?? null;
+    const family = /\.cjs$/.test(spec) || (!/\.m?js$/.test(spec) && /\.d\.cts$/.test(file)) ? ".d.cts" : /\.mjs$/.test(spec) || (!/\.c?js$/.test(spec) && /\.d\.mts$/.test(file)) ? ".d.mts" : ".d.ts";
+    const tries = [family, ".d.ts", ".d.mts", ".d.cts", ".ts", "/index.d.ts"].map((ext) => base + ext);
+    const hit = tries.find((t) => existsSync(join(pkgDir, t))) ?? null;
+    if (hit) info.deps.push(hit);
+    return hit;
   };
-  const origin = (target, name) => (target ? exportedNames(ts, pkgDir, target, ctx).get(name) ?? { file: bare(target), name } : null);
   const here = bare(file);
-  const imported = new Map(); // 지역 이름 → 원래 선언
+  const imported = new Map(); // 지역 이름 → [대상 파일, 대상에서의 이름]
   for (const st of source.statements) {
     if (!ts.isImportDeclaration(st) || !ts.isStringLiteral(st.moduleSpecifier)) continue;
     const named = st.importClause?.namedBindings;
     if (!named || !ts.isNamedImports(named)) continue;
     const target = resolveRel(st.moduleSpecifier.text);
-    for (const el of named.elements) {
-      const o = origin(target, (el.propertyName ?? el.name).text);
-      if (o) imported.set(el.name.text, o);
-    }
+    if (target) for (const el of named.elements) imported.set(el.name.text, [target, (el.propertyName ?? el.name).text]);
   }
-  const stars = [];
   for (const st of source.statements) {
     if (ts.isExportDeclaration(st)) {
       const target = st.moduleSpecifier && ts.isStringLiteral(st.moduleSpecifier) ? resolveRel(st.moduleSpecifier.text) : undefined;
       if (!st.exportClause) {
-        if (target) stars.push(target);
+        if (target) info.stars.push(target);
       } else if (ts.isNamedExports(st.exportClause)) {
         for (const el of st.exportClause.elements) {
           const from = (el.propertyName ?? el.name).text;
-          const o = st.moduleSpecifier ? origin(target, from) : imported.get(from) ?? { file: here, name: from };
-          if (o) names.set(el.name.text, o);
+          const via = st.moduleSpecifier ? (target ? [target, from] : null) : imported.get(from);
+          if (via) info.links.push([el.name.text, ...via]);
+          else if (!st.moduleSpecifier) info.own.set(el.name.text, { file: here, name: from });
         }
       }
       continue;
@@ -191,14 +180,37 @@ function exportedNames(ts, pkgDir, file, ctx) {
     const exported = ts.canHaveModifiers?.(st) && ts.getModifiers(st)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
     if (!exported) continue;
     const decls = ts.isVariableStatement(st) ? st.declarationList.declarations : [st];
-    for (const d of decls) if (d.name && ts.isIdentifier(d.name)) names.set(d.name.text, { file: here, name: d.name.text });
+    for (const d of decls) if (d.name && ts.isIdentifier(d.name)) info.own.set(d.name.text, { file: here, name: d.name.text });
   }
-  // export * 는 이름 있는 내보내기를 덮지 않는다
-  for (const target of stars) for (const [k, v] of exportedNames(ts, pkgDir, target, ctx)) if (!names.has(k)) names.set(k, v);
-  ctx.stack.pop();
-  if (ctx.low >= depth) ctx.memo.set(file, names);
-  ctx.low = Math.min(outerLow, ctx.low);
-  return names;
+  return info;
+}
+
+// 진입들에서 닿는 파일을 모두 읽은 뒤 이름 표를 바뀌지 않을 때까지 되풀이해 채운다 — 순환 · 다이아몬드도 파일마다 한 번만 읽는다
+// 파일 → (내보내는 이름 → { file: 패키지 안 경로(확장자 없음), name: 원래 이름 })
+function exportTables(ts, pkgDir, entries, ctx) {
+  const queue = [...entries];
+  while (queue.length) {
+    const file = queue.pop();
+    if (!ctx.parsed.has(file)) queue.push(...readExports(ts, pkgDir, file, ctx).deps);
+  }
+  let tables = new Map([...ctx.parsed.keys()].map((f) => [f, new Map()]));
+  const key = (t) => [...t].map(([k, v]) => `${k}=${v.file}#${v.name}`).join("|");
+  // 이름의 집합은 늘기만 하고 값은 대상의 값을 따라가므로 멈춘다 — 그래도 끝없이 돌지 않게 파일 수만큼으로 막는다
+  for (let round = 0; round <= ctx.parsed.size + 1; round++) {
+    let changed = false;
+    const next = new Map();
+    for (const [file, info] of ctx.parsed) {
+      const names = new Map(info.own);
+      for (const [as, target, from] of info.links) names.set(as, tables.get(target)?.get(from) ?? { file: bare(target), name: from });
+      // export * 는 이름 있는 내보내기를 덮지 않는다
+      for (const target of info.stars) for (const [k, v] of tables.get(target) ?? []) if (!names.has(k)) names.set(k, v);
+      if (key(names) !== key(tables.get(file))) changed = true;
+      next.set(file, names);
+    }
+    tables = next;
+    if (!changed) break;
+  }
+  return tables;
 }
 
 // 패키지마다 진입 분석을 한 번만 짓는다 — package.json 이나 읽은 .d.ts 가 바뀌면(재설치 · link 한 패키지의 재빌드) 다시 짓는다
@@ -221,7 +233,7 @@ function packageEntries(ts, pkgDir) {
   try {
     pkg = JSON.parse(readFileSync(pkgJson, "utf8"));
   } catch {}
-  const ctx = { memo: new Map(), stack: [], low: Infinity, files: new Set([pkgJson]) };
+  const ctx = { parsed: new Map(), files: new Set([pkgJson]) };
   const value = { pkg, routes: [], excluded: [] };
   if (pkg.exports) {
     const exp = pkg.exports;
@@ -238,10 +250,12 @@ function packageEntries(ts, pkgDir) {
         if (target.includes("*")) value.routes.push({ subpath, star: bare(target).split("*") });
         else if (DECL.test(target)) {
           const file = posix(target).replace(/^\.\//, "");
-          value.routes.push({ subpath, entry: bare(file), names: exportedNames(ts, pkgDir, file, ctx) });
+          value.routes.push({ subpath, file, entry: bare(file) });
         }
       }
     }
+    const tables = exportTables(ts, pkgDir, value.routes.filter((r) => r.file).map((r) => r.file), ctx);
+    for (const r of value.routes) if (r.file) r.names = tables.get(r.file);
   }
   packageCache.set(pkgDir, { files: ctx.files, stamp: stampOf(ctx.files), value });
   return value;

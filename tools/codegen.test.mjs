@@ -487,29 +487,73 @@ createStore("ui.f", () => ({ i: null as Inner | null }));`,
   assert.match(out, /i: import\("fake\/x"\)\.Inner \| null/);
   assert.deepEqual(genDiagnostics(), []);
 });
-test("여러 파일이 같은 파일을 export * 하는 다이아몬드 구조도 파일마다 한 번만 읽는다", () => {
+// 다이아몬드 — 층마다 두 파일이 다음 층 둘을 export * 한다. back 은 층 파일마다 꼭대기로 되돌아가는 간선(순환)
+for (const [label, back] of [
+  ["순환 없는", ""],
+  ["꼭대기로 export * 하는", `export * from "./index.js";
+`],
+  ["꼭대기에서 import type 하는", `import type { Top } from "./index.js";
+export type TopAlias = Top;
+`],
+]) {
+  test(`${label} 다이아몬드 구조도 파일마다 한 번만 읽고 이름을 빠뜨리지 않는다`, () => {
+    nodeModulesProject();
+    installed("node_modules/supa-store");
+    const DEPTH = 10;
+    write("node_modules/dia/package.json", JSON.stringify({ name: "dia", exports: { ".": { types: "./index.d.ts" } } }));
+    write("node_modules/dia/index.d.ts", `export * from "./l0a.js";
+export * from "./l0b.js";
+export interface Top { t: 1 }`);
+    for (let i = 0; i < DEPTH; i++)
+      for (const side of ["a", "b"])
+        write(
+          `node_modules/dia/l${i}${side}.d.ts`,
+          back + (i + 1 < DEPTH ? `export * from "./l${i + 1}a.js";
+export * from "./l${i + 1}b.js";
+` : "export interface Bottom { b: 1 }\n") + `export interface N${i}${side} { n: 1 }
+`,
+        );
+    write(
+      "src/a.state.ts",
+      `import { createStore } from "supa-store";
+import type { Bottom, N3b } from "dia";
+createStore("ui.d", () => ({ b: null as Bottom | null, n: null as N3b | null }));`,
+    );
+    // 이 패키지의 파일을 몇 번 읽는지 센다 — 컴파일러가 따로 읽는 것은 세지 않는다
+    let parses = 0;
+    const counted = Object.create(ts, {
+      createSourceFile: { value: (name, ...rest) => (/^(?:l\d+[ab]|index)\.d\.ts$/.test(name) && parses++, ts.createSourceFile(name, ...rest)) },
+    });
+    generate(counted, loadConfig(ts, root));
+    const out = read("src/store.gen.ts");
+    assert.match(out, /b: import\("dia"\)\.Bottom \| null/);
+    assert.match(out, /n: import\("dia"\)\.N3b \| null/);
+    assert.equal(parses, 1 + 2 * DEPTH);
+    assert.deepEqual(genDiagnostics(), []);
+  });
+}
+test("서로 export * 하는 순환에서도 이름을 빠뜨리지 않는다", () => {
   nodeModulesProject();
   installed("node_modules/supa-store");
-  const DEPTH = 10;
-  write("node_modules/dia/package.json", JSON.stringify({ name: "dia", exports: { ".": { types: "./index.d.ts" } } }));
-  write("node_modules/dia/index.d.ts", `export * from "./l0a.js";\nexport * from "./l0b.js";`);
-  for (let i = 0; i < DEPTH; i++)
-    for (const side of ["a", "b"])
-      write(`node_modules/dia/l${i}${side}.d.ts`, i + 1 < DEPTH ? `export * from "./l${i + 1}a.js";\nexport * from "./l${i + 1}b.js";` : "export interface Bottom { b: 1 }");
+  write("node_modules/cy2/package.json", JSON.stringify({ name: "cy2", exports: { ".": { types: "./index.d.ts" } } }));
+  write("node_modules/cy2/index.d.ts", `export * from "./a.js";`);
+  write("node_modules/cy2/a.d.ts", `export * from "./b.js";
+export interface IA { a: 1 }`);
+  write("node_modules/cy2/b.d.ts", `export * from "./a.js";
+export * from "./c.js";
+export interface IB { b: 1 }`);
+  write("node_modules/cy2/c.d.ts", `export * from "./a.js";
+export interface IC { c: 1 }`);
   write(
     "src/a.state.ts",
     `import { createStore } from "supa-store";
-import type { Bottom } from "dia";
-createStore("ui.d", () => ({ b: null as Bottom | null }));`,
+import type { IA, IB, IC } from "cy2";
+createStore("ui.c", () => ({ a: null as IA | null, b: null as IB | null, c: null as IC | null }));`,
   );
-  // 이 패키지의 파일을 몇 번 읽는지 센다 — 컴파일러가 따로 읽는 것은 세지 않는다
-  let parses = 0;
-  const counted = Object.create(ts, {
-    createSourceFile: { value: (name, ...rest) => (/l\d+[ab]|index/.test(name) && !/supa-store|src\//.test(name) && parses++, ts.createSourceFile(name, ...rest)) },
-  });
-  generate(counted, loadConfig(ts, root));
-  assert.match(read("src/store.gen.ts"), /b: import\("dia"\)\.Bottom \| null/);
-  assert.ok(parses <= 1 + 2 * DEPTH, `${parses} 번 읽었다`);
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  for (const n of ["IA", "IB", "IC"]) assert.match(out, new RegExp(`import\\("cy2"\\)\\.${n} \\| null`));
+  assert.deepEqual(genDiagnostics(), []);
 });
 test("진입 파일 자신에 선언된 export = 의 네임스페이스 · export default 도 그 진입으로 찍는다", () => {
   nodeModulesProject();
