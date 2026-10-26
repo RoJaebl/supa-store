@@ -68,7 +68,9 @@ function loadConfig(ts, fromDir) {
 function collect(ts, program, config) {
   const checker = program.getTypeChecker();
   const printer = ts.createPrinter({ removeComments: true });
-  const flags = ts.NodeBuilderFlags.NoTruncation | ts.NodeBuilderFlags.UseFullyQualifiedType;
+  // node_modules 안의 타입(supa-store 자신의 Resource 포함)은 이 깃발 없이는 글자로 옮기지 못하고 undefined 가 된다
+  const flags =
+    ts.NodeBuilderFlags.NoTruncation | ts.NodeBuilderFlags.UseFullyQualifiedType | ts.NodeBuilderFlags.AllowNodeModulesRelativePaths;
   const entries = [];
   const broken = [];
   const loose = [];
@@ -104,6 +106,7 @@ function collect(ts, program, config) {
         else if (key && fn && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) {
           const type = checker.getReturnTypeOfSignature(checker.getSignatureFromDeclaration(fn));
           const typeNode = checker.typeToTypeNode(type, undefined, flags);
+          if (!typeNode) throw new Error(`${key.text}(${posix(source.fileName)}) 의 타입을 글자로 옮기지 못한다 — 반환 타입을 적는다`);
           const text = printer.printNode(ts.EmitHint.Unspecified, typeNode, source).replace(/\r?\n\s*/g, " ");
           const hasAny = (n) => n.kind === ts.SyntaxKind.AnyKeyword || !!ts.forEachChild(n, hasAny);
           entries.push({ file: posix(source.fileName), key: key.text, text, any: hasAny(typeNode) });
@@ -124,11 +127,46 @@ function relativeFromOut(config, file) {
   return rel.startsWith(".") ? rel : `./${rel}`;
 }
 
+// node_modules/<패키지>/… 의 파일 경로를 패키지 이름 + exports 하위 경로로 바꾼다. 패키지 밖이면 null
+function packageSpecifier(spec) {
+  // 마지막 node_modules 가 패키지 자리다 — pnpm 의 .pnpm/<이름>@<판>/node_modules/<이름> 도 이것으로 풀린다
+  const m = /^(.*\/node_modules\/)((?:@[^/]+\/)?[^/]+)\/(.+)$/.exec(spec);
+  if (!m) return null;
+  const [, base, dir, rest] = m;
+  // @types/foo 는 foo, @types/scope__pkg 는 @scope/pkg 로 쓴다
+  const name = dir.startsWith("@types/") ? dir.slice(7).replace(/^(.+)__/, "@$1/") : dir;
+  let pkg = {};
+  try {
+    pkg = JSON.parse(readFileSync(`${base}${dir}/package.json`, "utf8"));
+  } catch {}
+  const bare = (p) => posix(p).replace(/^\.\//, "").replace(/(?:\.d)?\.[cm]?[jt]sx?$/, "");
+  const file = bare(rest);
+  if (!pkg.exports) {
+    // exports 가 없으면 깊은 경로가 그대로 풀린다 — 진입 파일이면 이름만 쓴다
+    const entry = bare(pkg.types ?? pkg.typings ?? pkg.main ?? "index");
+    return file === entry || file === "index" ? name : `${name}/${file}`;
+  }
+  const exp = pkg.exports;
+  const map = typeof exp === "object" && !Array.isArray(exp) && Object.keys(exp).some((k) => k.startsWith(".")) ? exp : { ".": exp };
+  // 조건이 겹친 대상(import.types 같은 것)과 배열까지 끝의 글자를 모두 모은다
+  const targets = (v) => (typeof v === "string" ? [v] : v && typeof v === "object" ? Object.values(v).flatMap(targets) : []);
+  for (const [sub, value] of Object.entries(map)) {
+    const subpath = sub.replace(/^\.\/?/, "");
+    for (const target of targets(value).map(bare)) {
+      const [head, tail] = target.split("*");
+      if (tail === undefined ? target !== file : !(file.startsWith(head) && file.endsWith(tail) && file.length >= head.length + tail.length)) continue;
+      const hit = tail === undefined ? subpath : subpath.replace("*", file.slice(head.length, file.length - tail.length));
+      return hit ? `${name}/${hit}` : name;
+    }
+  }
+  return name;
+}
+
 function render(entries, config) {
   const files = [...new Set(entries.map((e) => e.file))];
   const types = entries.map((e) => {
     const text = e.text.replace(/import\("([^"]+)"\)/g, (whole, spec) =>
-      /^(?:[A-Za-z]:)?\//.test(spec) ? `import("${relativeFromOut(config, spec)}")` : whole,
+      /^(?:[A-Za-z]:)?\//.test(spec) ? `import("${packageSpecifier(spec) ?? relativeFromOut(config, spec)}")` : whole,
     );
     return `    ${JSON.stringify(e.key)}: ${text};`;
   });
