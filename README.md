@@ -210,26 +210,134 @@ createStore("api.graph", (set, get, ctx) => {
 
 ## 서버와 이어진 연결(createStream)
 
+웹소켓이나 SSE 로 서버와 이어진 값을 store 상태로 꺼낸다. 서버가 처음에 `snapshot` 을 주고 이후 `change` 를 보내면 `reduce` 로 값에 얹는다.
+끊기면 다시 잇고, 빠진 바뀜은 서버의 짧은 기록에서 따라잡는다. 하위 경로 넷: `supa-store/stream`(화면) · `supa-store/server`(정의) ·
+`supa-store/server/node` · `supa-store/server/web`(진입점). 화면 쪽은 런타임 의존이 없다.
+
+### 클라이언트 정의
+
 명령의 이름과 인자 · 결과 타입은 셋째 타입 인자로 적고, 명령마다 `commands` 에 한 칸(제한 시간, 없으면 `{}`)을 둔다.
 타입은 런타임에 남지 않으므로 이름은 `commands` 가 들고, 빠진 명령은 타입 오류다.
 
 ```ts
+import { createStore } from "supa-store";
+import { createStream } from "supa-store/stream";
+
 type Change = { op: "append"; chunk: string };
 type Commands = { open(cwd: string): string; kill(id: string): void };
 
 createStore("infra.terminal", () =>
   createStream<string, Change, Commands>({
     url: "/ws/terminal", // 상대 주소는 location 으로 푼다(웹소켓이면 http → ws)
-    reduce: (out, c) => out + c.chunk,
+    transport: "ws", // 또는 "sse"
+    channel: "default", // 생략하면 "default"
+    auth: () => getToken(), // 생략하면 쿠키만
+    reduce: (out, c) => out + c.chunk, // 생략하면 change 를 새 값 전체로 본다
     commands: { open: {}, kill: { timeout: 5_000 } },
+    handlers: { confirm: async (message: string) => window.confirm(message) }, // 서버가 묻는 요청에 답한다
+    timeout: 30_000, // 명령의 기본 제한 시간
   }),
 );
-
-const { data, status, open } = useStore("infra.terminal", { pick: ["data", "status", "open"] });
-await open.mutateAsync("/repo"); // 실패하면 open.retry() 가 같은 요청 id 로 다시 보낸다
 ```
 
-`window` 가 없으면(서버에서 그릴 때) 열지 않고 `loading` 그대로다. Node 에서 열려면 `open: "always"`.
+`window` 가 없으면(서버에서 그릴 때) 열지 않고 `loading` 그대로다. Node 에서 열려면 `open: "always"` 이고, 이때 웹소켓은 전역
+`WebSocket`(Node 22 이상)이나 `ws` 패키지가 있어야 한다.
+
+### 화면이 꺼내는 칸
+
+```tsx
+const { data, status, isFetching, error, open } = useStore("infra.terminal", { pick: ["data", "status", "isFetching", "error", "open"] });
+await open.mutateAsync("/repo"); // 실패하면 던진다
+```
+
+연결의 칸(`data` · `status` · `isFetching` · `error`)과 명령마다의 칸(`mutate` · `mutateAsync` · `status` · `error` · `retry` …)이 있다.
+다른 store 에서는 `getStore("infra.terminal").getState().open("/repo")` 처럼 명령 함수로 부르고, 실패하면 던진다.
+
+### 연결 상태
+
+| 때 | `data` | `status` | `isFetching` | `error` |
+|---|---|---|---|---|
+| 처음 연결 중 | `undefined` | `loading` | `true` | `null` |
+| 이어져 값을 받는 중 | 지금 값 | `ready` | `false` | `null` |
+| 끊겨 다시 잇는 중 | 마지막 값 그대로 | `ready` | `true` | 연결 끊김. 재시도 중.. |
+| 다시 이어져 빠진 바뀜을 받았다 | 따라잡은 값 | `ready` | `false` | `null` |
+| 서버가 「다시 오지 마라」로 닫았다 | 마지막 값 그대로 | `error` | `false` | 닫은 까닭 |
+| 처음 연결이 「다시 오지 마라」로 거절됐다 | `undefined` | `error` | `false` | 닫은 까닭 |
+
+마지막 값은 비우지 않는다. 연결 상태를 따로 담는 칸은 없다. 다시 잇기는 1초부터 두 배씩 30초까지 늘며(±20% 흔든다), 창이 가려져도 잇는다.
+
+### 문구
+
+| 자리 | 언제 보이나 | 문구 |
+|---|---|---|
+| 연결의 `error` | 연결이 끊겨 다시 잇는 동안 | 연결 끊김. 재시도 중.. |
+| 명령의 `error` · `mutateAsync` 의 거절 | 끊긴 동안 부른 명령, 다시 이은 뒤 서버가 받은 적 없다고 답한 명령 | 연결 끊김. 명령 실패 |
+| 같은 자리 | 보낸 뒤 끊겼고 다시 이은 뒤에도 결과를 확인하지 못한 명령 | 연결 끊김. 알 수 없음 |
+| 같은 자리 | 제한 시간 안에 답이 오지 않은 명령 | 응답 지연 |
+
+「재시도 중」은 연결에만 쓴다. 명령은 저절로 다시 보내지 않는다. 서버 앱이 `ok: false` 로 답한 실패는 앱이 보낸 문구를 그대로 쓴다.
+
+### retry()
+
+명령의 칸에 있는 `retry()` 는 마지막으로 실패한 명령을 같은 요청 id · 인자로 다시 보낸다. 서버는 같은 id 를 다시 돌리지 않고 쥔 답을
+주므로, 이미 돌았던 명령이 두 번 돌지 않는다. 앱이 `ok: false` 로 답했던 명령에 `retry()` 하면 같은 실패가 돌아온다 — 새로 부르려면
+`mutate` 를 쓴다. 쥐고 있는 실패는 `reset()` 이 지우고, 뒤이은 성공도 지운다. 실패한 명령이 없으면 `retry()` 는 거절한다.
+
+### 서버 정의
+
+```ts
+import { createStreamServer } from "supa-store/server";
+
+export const terminal = createStreamServer<string, Change>({
+  authorize: async (ctx) => (await verify(ctx.token)) ?? ctx.reject("인증 실패"), // 신원을 돌려주거나 거절한다
+  channel: (ctx) => ctx.channel ?? "default", // 기본은 클라이언트가 청한 채널, 없으면 "default"
+  snapshot: (ctx) => outputOf(ctx.channel), // 동기 — 부르는 순간의 채널 버전이 그 값의 버전이다
+  commands: {
+    open: async (ctx, cwd: string) => {
+      const id = spawnPty(cwd, (chunk) => terminal.publish(ctx.channel, { op: "append", chunk }));
+      return id;
+    },
+    kill: (ctx, id: string) => killPty(id),
+  },
+  history: { count: 1000, ms: 5 * 60_000 }, // 기본: 최근 1000 개 또는 5분 가운데 짧은 쪽
+});
+```
+
+`snapshot` 은 동기 함수다(`async` 로 적지 않는다). 비동기로 읽어야 하는 값은 미리 쥐어 두고 `snapshot` 이 그것을 돌려준다.
+`publish(channel, change)` 는 그 채널에 붙은 모두에게 보낸다. 채널마다 버전 · 기록 · 답 기록을 따로 쥐므로 사람마다 다른 값은 채널에 신원을 넣어 나눈다.
+명령 안의 `ctx.request(method, params)` 는 클라이언트의 `handlers` 에 묻는다.
+
+### 두 진입점
+
+```ts
+// Node http 서버 — 웹소켓과 SSE 를 같은 주소에서 받는다
+import { attachStream } from "supa-store/server/node";
+const detach = attachStream(httpServer, { path: "/ws/terminal", stream: terminal });
+```
+
+```ts
+// Web 표준 — (req: Request) => Promise<Response>. Hono · Next 라우트 · Bun · Deno
+import { streamHandler } from "supa-store/server/web";
+export const GET = streamHandler(terminal); // SSE
+export const POST = streamHandler(terminal); // 명령 · ask · answer
+```
+
+- `attachStream` 의 웹소켓은 선택 peer `ws`(`>=8`)로 받는다. 설치하지 않았으면 SSE 만 받는다. **http 서버 하나에 `attachStream` 은 한 번만** 건다.
+- **Web 표준 진입점은 SSE 만 받는다.** 웹소켓으로 갈아타는 길은 런타임마다 달라 두지 않았다. 이런 틀의 앱은 클라이언트를 `transport: "sse"` 로 적는다.
+- 서버 쪽은 Node 20 이상(전역 `crypto` · `fetch`)이 필요하다.
+
+### 인증
+
+`auth()` 의 값은 웹소켓이면 `hello.auth` 로, SSE 와 명령의 `POST` 면 `Authorization` 헤더로 싣고, 다시 이을 때마다 `auth()` 를 다시 부른다.
+**토큰을 주소의 쿼리에 싣지 않는다.** `auth` 가 없으면 쿠키만 쓴다. 서버의 `authorize` 가 거절하면 「다시 오지 마라」로 닫혀 다시 잇지 않는다.
+웹소켓은 10초 안에 `hello` 가 오지 않아도 서버가 닫는다.
+
+### 시험에서
+
+```ts
+import { disposeStores } from "supa-store";
+afterEach(() => disposeStores()); // 열린 연결을 닫는다(store 는 다음에 꺼낼 때 다시 짓는다)
+```
 
 ## 생성 파일
 
