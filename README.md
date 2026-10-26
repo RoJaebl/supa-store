@@ -208,6 +208,29 @@ createStore("api.graph", (set, get, ctx) => {
 - `QueryView` 에 `isPlaceholderData` · `isFetching` 칸이 늘었다. 정의 파일은 고치지 않아도 된다.
 - 값이 있는 `args` 를 다시 받는 동안 `status` 가 `"loading"` 으로 바뀌지 않는다. `refetch` · `invalidate` 뒤에 `status === "loading"` 을 기다리던 코드는 `isFetching` 을 본다.
 
+## 서버와 이어진 연결(createStream)
+
+명령의 이름과 인자 · 결과 타입은 셋째 타입 인자로 적고, 명령마다 `commands` 에 한 칸(제한 시간, 없으면 `{}`)을 둔다.
+타입은 런타임에 남지 않으므로 이름은 `commands` 가 들고, 빠진 명령은 타입 오류다.
+
+```ts
+type Change = { op: "append"; chunk: string };
+type Commands = { open(cwd: string): string; kill(id: string): void };
+
+createStore("infra.terminal", () =>
+  createStream<string, Change, Commands>({
+    url: "/ws/terminal", // 상대 주소는 location 으로 푼다(웹소켓이면 http → ws)
+    reduce: (out, c) => out + c.chunk,
+    commands: { open: {}, kill: { timeout: 5_000 } },
+  }),
+);
+
+const { data, status, open } = useStore("infra.terminal", { pick: ["data", "status", "open"] });
+await open.mutateAsync("/repo"); // 실패하면 open.retry() 가 같은 요청 id 로 다시 보낸다
+```
+
+`window` 가 없으면(서버에서 그릴 때) 열지 않고 `loading` 그대로다. Node 에서 열려면 `open: "always"`.
+
 ## 생성 파일
 
 - 생성 파일은 TypeScript 타입이라 `tsc` 가 읽는다. 템플릿의 `build` 는 `tsc -b && vite build` 로 `tsc` 가 Vite 보다 먼저 돌므로, `tsc` 가 돌 때 생성 파일이 디스크에 있어야 한다. Tailwind 처럼 Vite 안에서만 짓는 꼴로는 안 되는 까닭이 이것이다(Tailwind 의 결과는 CSS 라 `tsc` 가 보지 않는다).

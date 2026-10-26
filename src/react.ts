@@ -1,6 +1,7 @@
 "use client";
 import { useRef, useSyncExternalStore } from "react";
 import {
+  DISPOSE,
   getStore,
   pickFrom,
   USE,
@@ -11,6 +12,7 @@ import {
   type StateOf,
 } from "./index.js";
 import type { ResourceUse, ResourceUseOptions, ResourceUseResult } from "./query.js";
+import type { StreamUse, StreamUseOptions, StreamUseResult } from "./stream/index.js";
 
 type UseKeys = { [K in StateKey]: StateOf<K> extends { [USE]: (...a: any[]) => any } ? K : never }[StateKey];
 type UseFn<K> = Extract<StateOf<K>[typeof USE & keyof StateOf<K>], (...a: any[]) => any>;
@@ -19,6 +21,11 @@ type UseOf<K> = StateOf<K>[typeof USE & keyof StateOf<K>];
 type ResourceKeys = { [K in StateKey]: StateOf<K> extends { [USE]: ResourceUse<any, any, any, any> } ? K : never }[StateKey];
 // 둘째 자리는 화면이 받는 data — 자원 select 를 거친 S 다. 넷째는 select 전 D
 type ResourceTypes<K> = UseOf<K> extends ResourceUse<infer A, infer S, infer R, infer D> ? [A, S, R, D] : never;
+// 연결은 [DISPOSE] 로 자원과 가른다 — [USE] 만 보면 연결도 자원 서명에 맞는다
+type StreamKeys = {
+  [K in StateKey]: StateOf<K> extends { [USE]: StreamUse<any, any>; [DISPOSE](): void } ? K : never;
+}[StateKey];
+type StreamTypes<K> = UseOf<K> extends StreamUse<infer V, infer Cmd> ? [V, Cmd] : never;
 type Opts = { pick?: readonly string[]; omit?: readonly string[] };
 
 /**
@@ -26,6 +33,10 @@ type Opts = { pick?: readonly string[]; omit?: readonly string[] };
  * - 상태에 [USE] 가 있으면 꺼내기를 그 함수에 맡긴다: useStore(key, ...args) = state[USE](...args)
  * - 없으면 전부, 또는 { pick } / { omit } 으로 고른 칸만. 고른 칸이 (묶기 전 값으로) 그대로면 같은 객체를 돌려준다
  */
+export function useStore<K extends StreamKeys, O extends StreamUseOptions<StreamTypes<K>[0], StreamTypes<K>[1]>>(
+  key: K,
+  options?: O,
+): StreamUseResult<StreamTypes<K>[0], StreamTypes<K>[1], O>;
 export function useStore<
   K extends ResourceKeys,
   O extends ResourceUseOptions<ResourceTypes<K>[0], ResourceTypes<K>[1], ResourceTypes<K>[2], ResourceTypes<K>[3]>,
