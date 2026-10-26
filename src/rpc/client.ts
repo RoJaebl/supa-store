@@ -17,15 +17,14 @@ export interface ConnectRpc {
   notify(method: string, params?: unknown): void;
 }
 
-/** 요청의 타입은 셋째 타입 인자로, method 와 제한 시간은 requests 에 — 이름마다 한 칸이 있어야 한다(없으면 타입 오류) */
-export type JsonRpcOptions<V, N, Cmd, Names extends string> = {
+/** 요청의 타입은 셋째 타입 인자로, method 와 제한 시간은 requests 에 — 이름마다 한 칸이 있어야 한다(없으면 타입 오류)
+ *  보낼 알림의 params 타입은 넷째 타입 인자로, method 는 notifications 에 — 같은 규칙이다 */
+export type JsonRpcOptions<V, N, Cmd, Out> = {
   /** 처음 열 때와 다시 이을 때마다 부른다. 던지거나 거절하면 그 문구를 error 에 싣고 다시 부른다 */
   connect: () => Transport | Promise<Transport>;
   /** 열린 뒤 상대와 맞추고 이어 갈 값을 돌려준다. 생략하면 곧바로 준비되고 값은 마지막 값 그대로 */
   onConnect?: (last: V | undefined, rpc: ConnectRpc) => V | Promise<V>;
   reduce?: (value: V, note: N) => V;
-  /** 이름마다 method — 정해진 이름(Reserved)은 쓰지 못한다 */
-  notifications?: { [K in Names]: K extends Reserved ? never : string };
   /** 상대가 묻는 요청 — params 를 펼치지 않고 하나로 받는다 */
   handlers?: Record<string, (params: any) => unknown>;
   /** 「응답 지연」으로 끝낸 요청을 상대에게 알리는 알림 */
@@ -33,10 +32,11 @@ export type JsonRpcOptions<V, N, Cmd, Names extends string> = {
   /** 기본 30초 */
   timeout?: number;
 } & (keyof Cmd extends never
-  ? { requests?: {} }
-  : { requests: { [K in keyof Cmd]: K extends Reserved ? never : { method: string; timeout?: number } } });
+  ? { requests?: Record<string, never> }
+  : { requests: { [K in keyof Cmd]: K extends Reserved ? never : { method: string; timeout?: number } } }) &
+  (keyof Out extends never ? { notifications?: Record<string, never> } : { notifications: { [K in keyof Out]: K extends Reserved ? never : string } });
 
-export type JsonRpc<V, Cmd, Names extends string> = {
+export type JsonRpc<V, Cmd, Out> = {
   /** 이름 붙지 않은 요청 — 준비 전이면 준비를 기다린다 */
   request(method: string, params?: unknown): Promise<unknown>;
   /** 준비 전이면 버리고 false */
@@ -48,7 +48,7 @@ export type JsonRpc<V, Cmd, Names extends string> = {
   close(): void;
   [DISPOSE](): void;
 } & { [K in keyof Cmd]: (...params: Parameters<Extract<Cmd[K], Fn>>) => Promise<Awaited<ReturnType<Extract<Cmd[K], Fn>>>> } & {
-  [K in Names]: (params?: unknown) => boolean;
+  [K in keyof Out]: (params: Out[K]) => boolean;
 };
 
 /** 준비를 기다리는 요청 — 타이머는 부른 때부터 센다 */
@@ -65,13 +65,12 @@ type Waiting = {
 /** setTimeout 은 NaN · 2^31-1 넘는 값을 곧바로 터뜨린다 */
 const timeable = (ms: number) => Number.isFinite(ms) && ms <= 2_147_483_647;
 
-/** Names 는 notifications 의 이름들로 추론한다. 타입 인자를 적어 추론이 서지 않으면 string 이다 */
 export function createJsonRpc<
   V,
   N extends { method: string; params?: unknown } = never,
   Cmd extends Record<keyof Cmd, Fn> = {},
-  Names extends string = string,
->(o: JsonRpcOptions<V, N, Cmd, Names>): JsonRpc<V, Cmd, Names> {
+  Out extends Record<keyof Out, unknown> = {},
+>(o: JsonRpcOptions<V, N, Cmd, Out>): JsonRpc<V, Cmd, Out> {
   const firstGap = (o as { [TIMING]?: number })[TIMING] ?? DEFAULTS.backoffStartMs;
   const timeoutOf = (ms?: number) => ms ?? o.timeout ?? DEFAULTS.timeoutMs;
   const listeners = new Set<() => void>();
@@ -111,7 +110,11 @@ export function createJsonRpc<
     )
       return;
     shown = next;
-    for (const fn of [...listeners]) fn();
+    // 구독자가 던져도 나머지를 부른다
+    for (const fn of [...listeners])
+      try {
+        fn();
+      } catch {}
   };
 
   /** 1초부터 두 배, 30초에서 멈추고 ±20% 를 흔든다(0.3 client 의 backoff 와 같다) */
@@ -136,13 +139,20 @@ export function createJsonRpc<
   const send = (w: Waiting, s: Session) => {
     waiting.delete(w);
     clearTimeout(w.timer);
-    s.request(w.method, w.params, Math.max(0, w.timeout - (Date.now() - w.at)), o.cancel).then(w.resolve, w.reject);
+    const left = w.timeout - (Date.now() - w.at);
+    if (left <= 0) return w.reject(new RpcError(TEXT.timeout, 0)); // 준비를 기다리다 시간이 다 갔다
+    s.request(w.method, w.params, left, o.cancel).then(w.resolve, w.reject);
   };
 
   const becomeReady = (my: number, s: Session, value: V | undefined, notes: N[]) => {
     if (my !== gen || closed) return;
     data = value;
-    if (o.reduce) for (const n of notes) data = o.reduce(data as V, n);
+    // 던지는 알림 하나는 건너뛴다 — 준비 뒤 길(세션이 삼킨다)과 같게
+    if (o.reduce)
+      for (const n of notes)
+        try {
+          data = o.reduce(data as V, n);
+        } catch {}
     notes.length = 0;
     ready = wasReady = true;
     broken = false;
@@ -167,6 +177,7 @@ export function createJsonRpc<
       },
       onClose: () => lost(my, undefined, t),
     });
+    if (my !== gen) return; // 통로가 onClose 를 동기로 불렀다
     session = s;
     if (!o.onConnect) return becomeReady(my, s, data, notes);
     const rpc: ConnectRpc = {
@@ -252,5 +263,5 @@ export function createJsonRpc<
   });
 
   open();
-  return out as JsonRpc<V, Cmd, Names>;
+  return out as JsonRpc<V, Cmd, Out>;
 }

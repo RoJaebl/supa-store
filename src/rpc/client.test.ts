@@ -64,8 +64,9 @@ const deferred = <T>() => {
 type V = { n: number[] };
 type Note = { method: "add"; params: number };
 type Cmd = { echo: (p: string) => string; slow: (p: number) => number };
-const base = (o: Partial<JsonRpcOptions<V, Note, Cmd, "ping">> = {}) =>
-  createJsonRpc<V, Note, Cmd, "ping">({
+type Out = { ping: number };
+const base = (o: Partial<JsonRpcOptions<V, Note, Cmd, Out>> = {}) =>
+  createJsonRpc<V, Note, Cmd, Out>({
     connect,
     reduce: (v, n) => ({ n: [...v.n, n.params] }),
     requests: { echo: { method: "echo" }, slow: { method: "slow", timeout: 100 } },
@@ -297,6 +298,89 @@ describe("다시 잇기", () => {
   });
 });
 
+describe("고침 1", () => {
+  it("쌓인 알림의 reduce 가 던지면 그 하나만 건너뛰고 준비된다", async () => {
+    const d = deferred<V>();
+    const rpc = keep(
+      base({
+        onConnect: () => d.promise,
+        reduce: (v, n) => {
+          if (n.params === 2) throw new Error("못 합친다");
+          return { n: [...v.n, n.params] };
+        },
+      }),
+    );
+    for (const p of [1, 2, 3]) last().receive({ method: "add", params: p });
+    d.resolve({ n: [] });
+    await flush();
+    expect(rpc.view()).toEqual({ data: { n: [1, 3] }, status: "ready", isFetching: false, error: null });
+  });
+
+  it("구독자가 던져도 나머지 구독자를 부른다", async () => {
+    const d = deferred<V>();
+    const rpc = keep(base({ onConnect: () => d.promise }));
+    const after = vi.fn();
+    rpc.subscribe(() => {
+      throw new Error("구독자");
+    });
+    rpc.subscribe(after);
+    d.resolve({ n: [] });
+    await flush();
+    expect(after).toHaveBeenCalledTimes(1);
+    expect(rpc.view().status).toBe("ready");
+  });
+
+  it("준비 때 남은 시간이 0 이하인 요청은 보내지 않고 응답 지연이다", async () => {
+    // onConnect 의 타이머를 먼저 걸어, 같은 때 요청의 타이머보다 먼저 준비된다
+    const rpc = keep(base({ onConnect: () => new Promise<V>((r) => setTimeout(() => r({ n: [] }), 100)) }));
+    const slow = rpc.slow(1).catch((e) => e);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(rpc.view().status).toBe("ready");
+    expect(await slow).toMatchObject({ message: TEXT.timeout });
+    expect(methods()).toEqual([]);
+  });
+
+  it("통로가 onClose 를 동기로 부르면 onConnect 를 돌리지 않고 다시 잇는다", async () => {
+    const onConnect = vi.fn(() => ({ n: [] }));
+    let n = 0;
+    const rpc = keep(
+      base({
+        onConnect,
+        connect: () => {
+          if (++n > 1) return fake().t;
+          const t: Transport = { send() {}, onMessage() {}, onClose: (fn) => fn(), close: vi.fn() };
+          return t;
+        },
+      }),
+    );
+    expect(onConnect).not.toHaveBeenCalled();
+    expect(rpc.view()).toMatchObject({ status: "loading", error: TEXT.reconnecting });
+    await vi.advanceTimersByTimeAsync(GAP);
+    expect(onConnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("한 번도 준비되지 않았으면 connect 실패 뒤 다음 onConnect 동안 loading · 재시도 중이다", async () => {
+    let n = 0;
+    const d = deferred<V>();
+    const rpc = keep(
+      base({
+        onConnect: () => d.promise,
+        connect: () => {
+          if (++n === 1) throw new Error("없다");
+          return fake().t;
+        },
+      }),
+    );
+    expect(rpc.view().error).toBe("없다");
+    await vi.advanceTimersByTimeAsync(GAP);
+    expect(n).toBe(2);
+    expect(rpc.view()).toEqual({ data: undefined, status: "loading", isFetching: true, error: TEXT.reconnecting });
+    d.resolve({ n: [] });
+    await flush();
+    expect(rpc.view()).toEqual({ data: { n: [] }, status: "ready", isFetching: false, error: null });
+  });
+});
+
 describe("close", () => {
   it("다시 잇기를 기다리는 중이면 connect 를 다시 부르지 않는다", async () => {
     const rpc = base({ onConnect: () => ({ n: [5] }) });
@@ -363,21 +447,29 @@ describe("store 로 꺼낸다", () => {
 });
 
 it("타입: 요청 · 알림 함수, 정해진 이름, params 하나", () => {
-  const rpc = () => base();
-  type R = ReturnType<typeof rpc>;
-  expectTypeOf<R["echo"]>().toEqualTypeOf<(p: string) => Promise<string>>();
-  expectTypeOf<R["ping"]>().toEqualTypeOf<(params?: unknown) => boolean>();
-  expectTypeOf<ReturnType<R["view"]>["data"]>().toEqualTypeOf<V | undefined>();
-  // 셋째 인자 없이 쓰면 알림 이름은 notifications 에서 온다
-  const inferred = () => createJsonRpc({ connect, notifications: { didChange: "textDocument/didChange" } });
-  expectTypeOf<ReturnType<typeof inferred>["didChange"]>().toEqualTypeOf<(params?: unknown) => boolean>();
-
-  // 스펙 §6 처럼 타입 인자를 셋 적으면 Names 는 추론되지 않고 string 이다 — 알림 이름은 느슨하고 요청은 그대로다
-  const three = () =>
-    createJsonRpc<V, Note, Cmd>({ connect, requests: { echo: { method: "e" }, slow: { method: "s" } }, notifications: { didChange: "d" } });
-  expectTypeOf<ReturnType<typeof three>["didChange"]>().toEqualTypeOf<(params?: unknown) => boolean>();
-  expectTypeOf<ReturnType<typeof three>["echo"]>().toEqualTypeOf<(p: string) => Promise<string>>();
-  expectTypeOf<ReturnType<typeof three>["view"]>().toEqualTypeOf<() => ClientView<V>>();
+  type DidChange = { uri: string; version: number };
+  // 스펙 §6 정의의 꼴 — 타입 인자 넷. 부르지 않는다(타입만 본다)
+  const lsp = () =>
+    createJsonRpc<V, Note, Cmd, { didChange: DidChange }>({
+      connect,
+      requests: { echo: { method: "e" }, slow: { method: "s" } },
+      notifications: { didChange: "textDocument/didChange" },
+    });
+  () => {
+    const r = lsp();
+    expectTypeOf(r.didChange({ uri: "a", version: 1 })).toEqualTypeOf<boolean>();
+    expectTypeOf(r.echo("x")).toEqualTypeOf<Promise<string>>();
+    expectTypeOf(r.notify("raw")).toEqualTypeOf<boolean>();
+    expectTypeOf(r.view()).toEqualTypeOf<ClientView<V>>();
+    // @ts-expect-error 알림의 params 타입이 맞아야 한다
+    r.didChange({ uri: 1 });
+    // @ts-expect-error 넷째 타입 인자에 없는 이름은 부를 수 없다
+    r.didClose({});
+    // @ts-expect-error 셋째 타입 인자에 없는 이름은 부를 수 없다
+    r.hover("x");
+    // @ts-expect-error 요청의 params 타입이 맞아야 한다
+    r.echo(1);
+  };
 
   // @ts-expect-error 셋째 타입 인자의 이름마다 requests 칸이 있어야 한다
   () => createJsonRpc<V, never, Cmd>({ connect, requests: { echo: { method: "echo" } } });
@@ -385,8 +477,16 @@ it("타입: 요청 · 알림 함수, 정해진 이름, params 하나", () => {
   () => createJsonRpc<V, never, Cmd>({ connect });
   // @ts-expect-error 정해진 이름은 요청 이름으로 쓸 수 없다
   () => createJsonRpc<V, never, { close: (p: number) => void }>({ connect, requests: { close: { method: "x" } } });
-  // @ts-expect-error 정해진 이름은 알림 이름으로 쓸 수 없다
-  () => createJsonRpc({ connect, notifications: { subscribe: "x" } });
   // @ts-expect-error 요청 함수는 인자를 하나만 받는다
   () => createJsonRpc<V, never, { two: (a: number, b: number) => void }>({ connect, requests: { two: { method: "two" } } });
+  // @ts-expect-error 넷째 타입 인자의 이름마다 notifications 칸이 있어야 한다
+  () => createJsonRpc<V, never, {}, { a: number; b: number }>({ connect, notifications: { a: "a" } });
+  // @ts-expect-error notifications 를 아예 빼도 오류
+  () => createJsonRpc<V, never, {}, { a: number }>({ connect });
+  // @ts-expect-error 정해진 이름은 알림 이름으로 쓸 수 없다
+  () => createJsonRpc<V, never, {}, { close: number }>({ connect, notifications: { close: "x" } });
+  // @ts-expect-error 넷째 타입 인자가 없으면 notifications 에 이름을 적을 수 없다
+  () => createJsonRpc<V, never, {}>({ connect, notifications: { didChange: "x" } });
+  // @ts-expect-error 셋째 타입 인자가 없으면 requests 에 이름을 적을 수 없다
+  () => createJsonRpc<V>({ connect, requests: { echo: { method: "e" } } });
 });
