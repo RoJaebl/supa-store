@@ -65,6 +65,7 @@ export function streamHandler(
       const body = new ReadableStream<Uint8Array>({ start: (c) => void (ctl = c), cancel: gone });
       const conn: Conn = {
         kind: "sse",
+        buffered: () => 0,
         headers: headersOf(req),
         send(m: ServerMessage) {
           if (ended) return;

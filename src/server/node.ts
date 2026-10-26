@@ -80,6 +80,7 @@ export function attachStream(
     };
     const conn: Conn = {
       kind: "sse",
+      buffered: () => 0,
       headers: headersOf(req),
       send(m: ServerMessage) {
         if (res.writableEnded) return;
@@ -161,6 +162,7 @@ export function attachStream(
     ws.on("error", () => {});
     const conn: Conn = {
       kind: "ws",
+      buffered: () => 0,
       headers: headersOf(req),
       send(m) {
         if (ws.readyState !== ws.OPEN) return;

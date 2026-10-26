@@ -18,6 +18,9 @@ function fakeConn(kind: "ws" | "sse" = "ws", headers: Record<string, string | un
     headers,
     sent: [] as ServerMessage[],
     closed: undefined as { code: number; reason: string } | undefined,
+    /** 아직 나가지 못한 바이트 — 시험이 바꾼다 */
+    buf: 0,
+    buffered: () => c.buf,
     send: (m: ServerMessage) => void c.sent.push(m),
     close(code: number, reason: string) {
       c.closed = { code, reason };
@@ -397,6 +400,12 @@ it("홉: 답 기록은 답을 낸 때부터 5분을 쥔다 — 그 안에는 같
     commands: { long: () => (calls++, new Promise((r) => setTimeout(() => r("끝"), 290_000))) },
   });
   const c = await join(s);
+  // 살아 있는 클라이언트처럼 ping 에 pong 으로 답한다 — 응답 없음으로 닫히지 않게
+  const sendRaw = c.send;
+  c.send = (m) => {
+    sendRaw(m);
+    if (m.t === "ping") c.emit({ t: "pong" });
+  };
   const fates = async () => {
     c.emit({ t: "ask", ids: ["r"] });
     await flush();
@@ -583,5 +592,98 @@ it("홉: JSON 으로 쓸 수 없는 publish 는 부른 쪽에 던지고 버전 �
   // 따라잡기에도 남지 않는다
   const again = await join(s, { epoch, version: 0 });
   expect(again.of("change")).toEqual([{ t: "change", version: 1, change: 2 }]);
+  s.close();
+});
+
+it("홉: 이미 쌓인 양이 maxBuffered 를 넘은 연결에는 보내지 않고 4000 · 버퍼가 넘쳤다 로 닫는다 — 다른 연결은 받는다", async () => {
+  const s = createStreamServer<number, number>({ snapshot: () => 0, maxBuffered: 100 });
+  const a = await join(s);
+  const b = await join(s);
+  a.buf = 101;
+  s.publish("default", 1);
+  expect(a.of("change")).toHaveLength(0);
+  expect(a.closed).toEqual({ code: 4000, reason: "버퍼가 넘쳤다" });
+  expect(b.of("change")).toEqual([{ t: "change", version: 1, change: 1 }]);
+  // 닫힌 연결은 그 뒤 publish 를 받지 않는다
+  a.buf = 0;
+  s.publish("default", 2);
+  expect(a.of("change")).toHaveLength(0);
+  expect(b.of("change")).toHaveLength(2);
+  s.close();
+});
+
+it("홉: 보내기 전에 잰다 — 쌓인 것이 없으면 한도보다 큰 snapshot 도 나간다", async () => {
+  const s = createStreamServer({ snapshot: () => "x".repeat(1000), maxBuffered: 100 });
+  const c = await join(s);
+  expect(c.of("snapshot")).toHaveLength(1);
+  expect(c.closed).toBeUndefined();
+  s.close();
+});
+
+it("홉: maxBuffered 를 주지 않으면 4 MiB, Infinity 면 재지 않는다", async () => {
+  const s = createStreamServer<number, number>({ snapshot: () => 0 });
+  const a = await join(s);
+  a.buf = 4 * 1024 * 1024;
+  s.publish("default", 1);
+  expect(a.of("change")).toHaveLength(1);
+  a.buf++;
+  s.publish("default", 2);
+  expect(a.of("change")).toHaveLength(1);
+  expect(a.closed?.reason).toBe("버퍼가 넘쳤다");
+  s.close();
+
+  const t = createStreamServer<number, number>({ snapshot: () => 0, maxBuffered: Infinity });
+  const b = await join(t);
+  b.buf = Number.MAX_SAFE_INTEGER;
+  t.publish("default", 1);
+  expect(b.of("change")).toHaveLength(1);
+  expect(b.closed).toBeUndefined();
+  t.close();
+});
+
+it("홉: 웹소켓이 60초 동안 아무것도 보내지 않으면 다음 ping 자리에서 4000 · 응답이 없다 로 닫는다", async () => {
+  const s = createStreamServer({ snapshot: () => 0, commands: { noop: () => 1 } });
+  const quiet = await join(s);
+  const pong = await join(s);
+  const cmd = await join(s);
+  const hear = async (to: number) => {
+    await vi.advanceTimersByTimeAsync(to - Date.now());
+    pong.emit({ t: "pong" });
+    cmd.emit({ t: "command", id: String(to), name: "noop", args: [] });
+  };
+  await hear(20_000);
+  await hear(45_000);
+  await vi.advanceTimersByTimeAsync(50_000 - Date.now()); // 두 번째 ping — 받은 지 50초
+  expect(quiet.closed).toBeUndefined();
+  await hear(70_000);
+  await vi.advanceTimersByTimeAsync(75_000 - Date.now()); // 세 번째 ping — 받은 지 75초
+  expect(quiet.closed).toEqual({ code: 4000, reason: "응답이 없다" });
+  expect(quiet.of("ping")).toHaveLength(2);
+  expect(pong.closed).toBeUndefined();
+  expect(cmd.closed).toBeUndefined();
+  s.close();
+});
+
+it("홉: SSE 는 아무것도 받지 않아도 응답 없음으로 닫지 않는다", async () => {
+  const s = createStreamServer({ snapshot: () => 0 });
+  const c = fakeConn("sse");
+  s.attach(c);
+  await vi.advanceTimersByTimeAsync(200_000);
+  expect(c.closed).toBeUndefined();
+  expect(c.of("ping").length).toBeGreaterThan(5);
+  s.close();
+});
+
+it("홉: 다시 attach 한 연결은 마지막 받은 때를 새로 센다", async () => {
+  const s = createStreamServer({ snapshot: () => 0 });
+  const first = await join(s);
+  await vi.advanceTimersByTimeAsync(75_000);
+  expect(first.closed?.reason).toBe("응답이 없다");
+  // 같은 겉으로 다시 붙는다 — 새 세션
+  first.closed = undefined;
+  s.attach(first);
+  first.emit({ t: "hello" });
+  await vi.advanceTimersByTimeAsync(50_000);
+  expect(first.closed).toBeUndefined();
   s.close();
 });

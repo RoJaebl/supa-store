@@ -9,12 +9,14 @@ import { helloFromHeaders, tokenOf } from "./sse.js";
  *  - close: 웹소켓은 닫기 코드로, SSE 는 close 메시지를 쓰고 응답을 끝낸다. SSE 에서 첫 send 전에 close 가 오면
  *    아직 응답 머리를 쓰지 않았으므로 HTTP 상태로 답한다 — 4001 → 401, 그 밖의 코드 → 503. 홉은 무엇을 보냈는지 모르므로
  *    이 판정은 전송의 겉(node · web)이 한다
- *  - onClose: 상대가 끊었을 때, 그리고 close 를 부른 뒤에 — 여러 번 불려도 된다 */
+ *  - onClose: 상대가 끊었을 때, 그리고 close 를 부른 뒤에 — 여러 번 불려도 된다
+ *  - buffered: 아직 나가지 못한 바이트 수 — 홉이 보내기 직전에 maxBuffered 와 견준다 */
 export interface Conn {
   send(m: ServerMessage): void;
   close(code: number, reason: string): void;
   onMessage(fn: (m: ClientMessage) => void): void;
   onClose(fn: () => void): void;
+  buffered(): number;
   kind: "ws" | "sse";
   headers: Record<string, string | undefined>;
 }
@@ -47,6 +49,8 @@ export interface StreamServerOptions<V, C, Id> {
   snapshot: (ctx: ConnCtx<Id>) => V;
   commands?: Record<string, (ctx: ConnCtx<Id>, ...args: any[]) => unknown>;
   history?: { count?: number; ms?: number };
+  /** 연결 하나에 쌓인 바이트가 이것을 넘으면 다음 보낼 때 4000 으로 닫는다. 기본 4 MiB, Infinity 면 재지 않는다 */
+  maxBuffered?: number;
 }
 
 /** SSE 의 POST — body 는 받은 글자 그대로(JSON 읽기도 홉이 한다) */
@@ -96,6 +100,8 @@ interface Session<Id> {
   closed: boolean;
   helloTimer?: ReturnType<typeof setTimeout>;
   ping?: ReturnType<typeof setInterval>;
+  /** 마지막으로 무엇이든 받은 때 — 웹소켓의 응답 없음 판정 */
+  heard: number;
   requests: Map<string, { resolve(v: unknown): void; reject(e: Error): void; timer: ReturnType<typeof setTimeout> }>;
   /** welcome 을 보낸 뒤에 선다 */
   live?: { channel: Channel; who: string; ctx: ConnCtx<Id> };
@@ -147,6 +153,7 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
   const epoch = crypto.randomUUID();
   const count = o.history?.count ?? DEFAULTS.historyCount;
   const ms = o.history?.ms ?? DEFAULTS.historyMs;
+  const maxBuffered = o.maxBuffered ?? 4 * 1024 * 1024;
   const channels = new Map<string, Channel>();
   /** connection id → 붙은 연결(hello 전 것까지) */
   const sessions = new Map<string, Session<Id>>();
@@ -205,6 +212,17 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
     drop(s);
   };
 
+  /** 연결에 보내는 자리는 여기 하나 — 이미 쌓인 양이 한도를 넘었으면 보내지 않고 닫는다. 보냈으면 true */
+  const send = (s: Session<Id>, m: ServerMessage) => {
+    if (s.closed) return false;
+    if (s.conn.buffered() > maxBuffered) {
+      shut(s, CLOSE.COME_BACK, "버퍼가 넘쳤다");
+      return false;
+    }
+    s.conn.send(m);
+    return true;
+  };
+
   const authCtx = (token: string | undefined, channel: string | undefined, headers: AuthCtx["headers"]): AuthCtx => ({
     token,
     channel,
@@ -229,7 +247,7 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
         reject(new Error(TEXT.timeout));
       }, DEFAULTS.timeoutMs);
       s.requests.set(id, { resolve, reject, timer });
-      s.conn.send({ t: "request", id, method, params });
+      send(s, { t: "request", id, method, params });
     });
   };
 
@@ -253,12 +271,13 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
     s.live = { channel: ch, who: who.key, ctx };
     ch.sessions.add(s);
     trim(ch);
-    s.conn.send({ t: "welcome", epoch, version: ch.version, connection: s.id });
+    if (!send(s, { t: "welcome", epoch, version: ch.version, connection: s.id })) return;
     // 같은 epoch 이고 그 뒤 첫 바뀜이 기록에 남아 있으면 빠진 것만
     const from = hello.epoch === epoch ? hello.version : undefined;
     const first = ch.history[0]?.version ?? ch.version + 1;
     if (from !== undefined && from <= ch.version && from + 1 >= first) {
-      for (const h of ch.history) if (h.version > from) s.conn.send({ t: "change", version: h.version, change: h.change });
+      for (const h of ch.history)
+        if (h.version > from && !send(s, { t: "change", version: h.version, change: h.change })) return;
     } else {
       let value: V;
       try {
@@ -269,9 +288,13 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
         // 그 연결만 닫는다 — 홉과 다른 연결은 산다
         return shut(s, CLOSE.COME_BACK, `snapshot 실패: ${messageOf(e)}`);
       }
-      s.conn.send({ t: "snapshot", version: ch.version, value });
+      if (!send(s, { t: "snapshot", version: ch.version, value })) return;
     }
-    s.ping = setInterval(() => s.conn.send({ t: "ping" }), DEFAULTS.pingMs);
+    s.ping = setInterval(() => {
+      // 웹소켓만 — SSE 는 받는 줄이 없어 pong 이 없다
+      if (s.conn.kind === "ws" && Date.now() - s.heard > DEFAULTS.idleMs) return shut(s, CLOSE.COME_BACK, "응답이 없다");
+      send(s, { t: "ping" });
+    }, DEFAULTS.pingMs);
   };
 
   /** 명령을 돌린다 — 같은 id 가 답 기록에 있으면 돌리지 않고 그 답(또는 도는 중인 그 약속)을 준다 */
@@ -347,12 +370,12 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
       const version = ++ch.version;
       ch.history.push({ version, change, at: Date.now() });
       trim(ch);
-      for (const s of ch.sessions) s.conn.send({ t: "change", version, change });
+      for (const s of ch.sessions) send(s, { t: "change", version, change });
     },
 
     attach(conn) {
       if (down) return conn.close(CLOSE.COME_BACK, "서버가 내려갔다");
-      const s: Session<Id> = { id: crypto.randomUUID(), conn, closed: false, requests: new Map() };
+      const s: Session<Id> = { id: crypto.randomUUID(), conn, closed: false, heard: Date.now(), requests: new Map() };
       sessions.set(s.id, s);
       conn.onClose(() => drop(s));
       // SSE 는 GET 요청이 곧 hello 다
@@ -360,6 +383,7 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
       s.helloTimer = setTimeout(() => shut(s, CLOSE.COME_BACK, "hello 가 오지 않았다"), DEFAULTS.helloMs);
       let greeted = false;
       conn.onMessage((m) => {
+        s.heard = Date.now();
         if (s.closed || !valid(m)) return;
         if (!greeted && m.t === "hello") {
           greeted = true;
@@ -371,12 +395,12 @@ export function createStreamServer<V, C = V, Id = unknown>(o: StreamServerOption
         if (!s.live) {
           if (m.t === "answer") return;
           for (const id of m.t === "command" ? [m.id] : m.ids)
-            s.conn.send({ t: "reply", id, ok: false, error: TEXT.commandFailed, version: 0 });
+            send(s, { t: "reply", id, ok: false, error: TEXT.commandFailed, version: 0 });
           return;
         }
         void dispatch(s, m).then((out) => {
           if (s.closed || !out) return;
-          for (const x of Array.isArray(out) ? out : [out]) s.conn.send(x);
+          for (const x of Array.isArray(out) ? out : [out]) if (!send(s, x)) return;
         });
       });
     },
