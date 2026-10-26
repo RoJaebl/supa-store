@@ -258,6 +258,27 @@ describe("다시 잇기", () => {
     expect(rpc.view()).toEqual({ data: undefined, status: "ready", isFetching: false, error: null });
   });
 
+  it("통로의 onMessage 등록이 던져도 처리되지 않은 거절 없이 그 문구가 error 에 실리고 다시 시도한다", async () => {
+    let n = 0;
+    const rpc = keep(
+      base({
+        connect: () => {
+          if (n++) return fake().t;
+          const t = fake().t;
+          t.onMessage = () => {
+            throw new Error("등록 실패");
+          };
+          return Promise.resolve(t);
+        },
+      }),
+    );
+    await flush();
+    expect(rpc.view().error).toBe("등록 실패");
+    await vi.advanceTimersByTimeAsync(GAP);
+    expect(n).toBe(2);
+    expect(rpc.view().status).toBe("ready");
+  });
+
   it("onConnect 안의 요청 뒤 통로가 닫히면 알 수 없음으로 끝나고 다시 잇는다", async () => {
     let caught: unknown;
     const rpc = keep(

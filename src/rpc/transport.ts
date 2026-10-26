@@ -95,7 +95,12 @@ type Timing = { pingMs: number; idleMs: number };
 /** 프레임 하나가 메시지 하나. 열리기 전에 보낸 것은 열린 뒤 보낸다. url 이 틀리면 동기로 던진다(ws 의 생성자) */
 export function websocket(url: string, options: { headers?: Record<string, string>; maxPayload?: number } = {}): Transport {
   const { pingMs, idleMs } = (options as { [TIMING]?: Timing })[TIMING] ?? DEFAULTS;
-  const { WebSocket } = createRequire(import.meta.url)("ws") as { WebSocket: typeof WS };
+  let WebSocket: typeof WS;
+  try {
+    ({ WebSocket } = createRequire(import.meta.url)("ws") as { WebSocket: typeof WS });
+  } catch (cause) {
+    throw new Error("supa-store/rpc 의 websocket() 은 ws 가 필요하다 — pnpm add ws", { cause });
+  }
   const ws = new WebSocket(url, { headers: options.headers, maxPayload: options.maxPayload ?? 1024 * 1024 });
   const queue: string[] = [];
   let ping: ReturnType<typeof setInterval> | undefined;

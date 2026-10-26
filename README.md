@@ -406,7 +406,7 @@ createStore("infra.lsp", (set, get, ctx) =>
 ```
 
 `framing` 은 메시지를 자르는 법이다. `"content-length"` 는 LSP 의 길이 머리, `"ndjson"` 은 한 줄에 메시지 하나(MCP)다.
-`websocket(url, { headers?, maxPayload? })` 는 JSON-RPC 를 말하는 웹소켓 서버에 붙는다. 다른 통로는 `Transport` 꼴로 직접 지어 `connect` 가 돌려주면 된다.
+`websocket(url, { headers?, maxPayload? })` 는 JSON-RPC 를 말하는 웹소켓 서버에 붙는다. `ws` 가 없으면 그 문구가 `error` 에 실리고 다시 시도한다. 다른 통로는 `Transport` 꼴로 직접 지어 `connect` 가 돌려주면 된다.
 
 store 로 꺼낸 것은 다른 store 가 `ctx` 로 부른다. 화면에서는 쓰지 않는다.
 
@@ -419,7 +419,8 @@ createStore("editor.complete", (set, get, ctx) => ({
 ### store 없이 바로 쓰기
 
 ```ts
-const lsp = createJsonRpc<Value, Note, Cmd>({ /* 위와 같다 */ });
+// Out 은 위 정의의 알림 보내기 꼴(여기서는 { didChange: DidChangeTextDocumentParams })
+const lsp = createJsonRpc<Value, Note, Cmd, Out>({ /* 위와 같다 */ });
 
 app.post("/complete", async (req, res) => res.json(await lsp.complete(req.body)));
 lsp.subscribe(() => hop.publish("lsp", lsp.view().data)); // 0.3 의 홉으로 브라우저에 보낸다
@@ -430,6 +431,7 @@ process.on("SIGTERM", () => lsp.close());
 - 준비 전에 부른 요청은 제한 시간 안에서 기다렸다가 부른 순서대로 나간다. 준비 전에 부른 알림은 버리고 `false` 를 돌려준다
   (처음 열 때도 다시 이을 때도 같다). 상태를 맞추는 일은 `onConnect` 한 곳이 한다.
 - `stdio` 는 닫을 때(`close()`) 표준 입력을 닫고, `killAfter`(기본 2초) 안에 끝나지 않으면 프로세스를 끝낸다.
+  Windows 에서 `shell: true` 로 띄운 래퍼(예: npx.cmd)는 `kill()` 이 래퍼만 끝내 손자 프로세스가 남을 수 있으니 실행 파일을 직접 띄운다.
 - `request` · `notify` · `view` · `subscribe` · `close` 는 이름이 정해져 있어 요청 · 알림 이름으로 쓸 수 없다.
 
 ### 전제

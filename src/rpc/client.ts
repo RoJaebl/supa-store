@@ -130,8 +130,12 @@ export function createJsonRpc<
     session = undefined;
     ready = false;
     broken = true;
-    s?.close();
-    t?.close();
+    try {
+      s?.close();
+    } catch {}
+    try {
+      t?.close();
+    } catch {}
     retry = setTimeout(open, backoff());
     emit();
   };
@@ -199,6 +203,17 @@ export function createJsonRpc<
       failure = e instanceof Error ? e.message : String(e);
       lost(my);
     };
+    /** 앱이 지은 통로의 등록이 던져도 uncaught 가 되지 않게 — 통로를 닫고 실패로 보낸다 */
+    const go = (t: Transport) => {
+      try {
+        attach(my, t);
+      } catch (e) {
+        try {
+          t.close();
+        } catch {}
+        failed(e);
+      }
+    };
     let r: Transport | Promise<Transport>;
     try {
       r = o.connect();
@@ -206,8 +221,8 @@ export function createJsonRpc<
       return failed(e);
     }
     if (typeof (r as { then?: unknown }).then === "function")
-      (r as Promise<Transport>).then((t) => attach(my, t), failed);
-    else attach(my, r as Transport);
+      (r as Promise<Transport>).then(go, failed);
+    else go(r as Transport);
   };
 
   const request = (method: string, params: unknown, timeout: number): Promise<unknown> => {
