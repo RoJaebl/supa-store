@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { createStore, getStore, overrideStore, pickFrom, registeredKeys, resetStores } from "./index.js";
+import { createStore, DISPOSE, disposeStores, getStore, overrideStore, pickFrom, registeredKeys, resetStores } from "./index.js";
 
 declare module "./index.js" {
   interface StateTypes {
@@ -16,6 +16,8 @@ declare module "./index.js" {
     "infra.reader": { read: () => string };
     ev: { on: (f: () => void) => void; emit: () => void };
     listener: object;
+    "dispose.a": { n: number };
+    "dispose.plain": { n: number };
   }
 }
 
@@ -180,4 +182,57 @@ it("resetStores 는 전부 무른 뒤 다시 짓는다", () => {
   reaction.mockClear();
   getStore("ev").getState().emit();
   expect(reaction).toHaveBeenCalledTimes(1);
+});
+
+// [DISPOSE] — 상태에 달린 정리 함수
+const disposers: Array<ReturnType<typeof vi.fn>> = [];
+createStore("dispose.a", () => {
+  const fn = vi.fn();
+  disposers.push(fn);
+  return { n: 0, [DISPOSE]: fn };
+});
+createStore("dispose.plain", () => ({ n: 0 }));
+
+it("dispose: 다시 지을 때 앞 상태의 [DISPOSE] 를 한 번 부른다", () => {
+  disposeStores();
+  disposers.length = 0;
+  getStore("dispose.a").getState();
+  overrideStore("dispose.a", () => ({ n: 1 }));
+  expect(disposers).toHaveLength(1);
+  expect(disposers[0]).toHaveBeenCalledTimes(1);
+});
+it("dispose: resetStores 도 앞 [DISPOSE] 를 부르고 곧바로 다시 짓는다", () => {
+  disposeStores();
+  disposers.length = 0;
+  getStore("dispose.a").getState();
+  resetStores();
+  expect(disposers[0]).toHaveBeenCalledTimes(1);
+  expect(disposers).toHaveLength(2);
+});
+it("dispose: disposeStores 는 [DISPOSE] 를 부르고 다시 짓지 않는다 — 다음 getState 때 새로 짓는다", () => {
+  disposeStores();
+  disposers.length = 0;
+  getStore("dispose.a").getState();
+  disposeStores();
+  expect(disposers[0]).toHaveBeenCalledTimes(1);
+  expect(disposers).toHaveLength(1);
+  getStore("dispose.a").getState();
+  expect(disposers).toHaveLength(2);
+  expect(disposers[0]).toHaveBeenCalledTimes(1);
+});
+it("dispose: [DISPOSE] 가 던져도 다시 짓기는 이어진다", () => {
+  disposeStores();
+  disposers.length = 0;
+  getStore("dispose.a").getState();
+  disposers[0]!.mockImplementation(() => {
+    throw new Error("boom");
+  });
+  expect(() => resetStores()).not.toThrow();
+  expect(disposers).toHaveLength(2);
+  expect(getStore("dispose.a").getState().n).toBe(0);
+});
+it("dispose: [DISPOSE] 가 없는 0.2 의 상태는 그대로다", () => {
+  getStore("dispose.plain").getState();
+  expect(() => (resetStores(), disposeStores())).not.toThrow();
+  expect(getStore("dispose.plain").getState().n).toBe(0);
 });
