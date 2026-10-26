@@ -44,6 +44,8 @@ interface Link {
   send(m: ClientMessage): void;
   stop(): void;
   welcomed: boolean;
+  /** welcome.version 까지 따라잡았다 — 그 뒤의 4000 · 건너뛰기만 곧바로 다시 잇는다 */
+  caught?: boolean;
   /** welcome.connection — SSE 의 POST 가 싣는다 */
   connection?: string;
   idle?: ReturnType<typeof setTimeout>;
@@ -66,8 +68,44 @@ interface Pending {
 
 const failure = (message: string, requestId: string): CommandError => Object.assign(new Error(message), { requestId });
 
+/** 요청 id — randomUUID 는 보안 문맥(https · localhost)에만 있으므로 http://LAN-IP 에서는 getRandomValues 로 */
+const newId = () =>
+  typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+
+/** 시험 전용 — 다시 잇기의 첫 간격(ms)을 줄인다. 하위 경로로 내보내지 않는다 */
+export const TIMING = Symbol("supa-store.timing");
+
+/** SSE 본문 읽기 — 조각을 받아 이벤트마다 data 줄을 \n 으로 이어 넘긴다
+ *  줄 끝은 \r\n · \r · \n 모두, : 로 시작하는 줄은 주석, data 밖의 칸(id · event · retry)은 버린다 */
+export function sseParser(onData: (data: string) => void): (chunk: string) => void {
+  let buf = "";
+  let data: string[] = [];
+  return (chunk) => {
+    buf += chunk;
+    for (;;) {
+      const at = buf.search(/[\r\n]/);
+      if (at < 0) return;
+      // 끝의 \r 은 다음 조각의 \n 과 한 줄 끝일 수 있으므로 기다린다
+      if (buf[at] === "\r" && at === buf.length - 1) return;
+      const line = buf.slice(0, at);
+      buf = buf.slice(at + (buf[at] === "\r" && buf[at + 1] === "\n" ? 2 : 1));
+      if (line === "") {
+        if (data.length) onData(data.join("\n"));
+        data = [];
+      } else if (!line.startsWith(":")) {
+        const colon = line.indexOf(":");
+        const field = colon < 0 ? line : line.slice(0, colon);
+        if (field === "data") data.push(colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, ""));
+      }
+    }
+  };
+}
+
 export function connect<V, C>(o: ClientOptions<V, C>): StreamClient<V> {
   const channel = o.channel ?? "default";
+  const firstGap = (o as { [TIMING]?: number })[TIMING] ?? DEFAULTS.backoffStartMs;
   const listeners = new Set<() => void>();
   const pending = new Map<string, Pending>();
 
@@ -91,7 +129,12 @@ export function connect<V, C>(o: ClientOptions<V, C>): StreamClient<V> {
 
   const emit = () => {
     const caught = !!cur?.welcomed && version >= target;
-    if (caught) broken = false;
+    if (caught) {
+      // 따라잡아야 이어진 것으로 친다 — 그때 간격을 1초로 되돌린다
+      broken = false;
+      cur!.caught = true;
+      attempt = 0;
+    }
     const next: ClientView<V> =
       dead !== undefined
         ? { data, status: "error", isFetching: false, error: dead }
@@ -159,13 +202,14 @@ export function connect<V, C>(o: ClientOptions<V, C>): StreamClient<V> {
   // ── 연결 ──
   /** 아무것도 받지 못한 채 60초면 끊긴 것 */
   const watch = (link: Link) => {
+    if (cur !== link) return;
     clearTimeout(link.idle);
     link.idle = setTimeout(() => lost(link), DEFAULTS.idleMs);
   };
 
   /** 1초부터 두 배, 30초에서 멈추고 ±20% 를 흔든다 */
   const backoff = () => {
-    const ms = Math.min(DEFAULTS.backoffStartMs * 2 ** attempt++, DEFAULTS.backoffMaxMs);
+    const ms = Math.min(firstGap * 2 ** attempt++, DEFAULTS.backoffMaxMs);
     return Math.round(ms * (1 + DEFAULTS.jitter * (2 * Math.random() - 1)));
   };
 
@@ -181,21 +225,20 @@ export function connect<V, C>(o: ClientOptions<V, C>): StreamClient<V> {
       return emit();
     }
     broken = true;
-    // 「곧 다시 와라」 · 건너뛰기는 곧바로 — 이어진 적 없는 연결이면 내려간 서버에 몰리지 않게 늦춘다
-    retry = setTimeout(open, code === CLOSE.COME_BACK && link.welcomed ? 0 : backoff());
+    // 「곧 다시 와라」 · 건너뛰기는 곧바로 — 따라잡은 적 없는 연결이면(welcome 뒤 snapshot 이 실패한 4000 등) 늦춘다.
+    // welcome 만 보고 곧바로 다시 이으면 늘 실패하는 홉에 쉼 없이 몰린다
+    retry = setTimeout(open, code === CLOSE.COME_BACK && link.caught ? 0 : backoff());
     emit();
   };
 
   const receive = (link: Link, m: ServerMessage) => {
     if (cur !== link) return; // 앞 연결의 늦은 메시지
-    watch(link);
     switch (m.t) {
       case "welcome": {
         // 서버가 다시 떴다 — 버전이 0 부터 다시 세므로 가진 버전을 버리고 snapshot 을 기다린다
         const fresh = epoch !== undefined && m.epoch !== epoch;
         epoch = m.epoch;
         target = m.version;
-        attempt = 0;
         link.welcomed = true;
         link.connection = m.connection;
         if (fresh) version = -1;
@@ -263,6 +306,7 @@ export function connect<V, C>(o: ClientOptions<V, C>): StreamClient<V> {
     sock.onopen = () =>
       sock.send(JSON.stringify({ t: "hello", channel, auth: token, ...(version >= 0 ? { version, epoch } : {}) }));
     sock.onmessage = (e) => {
+      watch(link);
       let m: ServerMessage;
       try {
         m = JSON.parse(String(e.data));
@@ -299,23 +343,22 @@ export function connect<V, C>(o: ClientOptions<V, C>): StreamClient<V> {
       if (res.status === 401 || res.status === 403) return lost(link, CLOSE.GO_AWAY, await res.text());
       if (!res.ok || !res.body) return lost(link);
       const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
-      // ponytail: 서버가 쓰는 \n 만 가른다. \r\n 을 쓰는 서버를 받게 되면 그때 줄 끝을 고르게 한다
-      let buf = "";
+      // 망가진 프레임은 버린다 — 웹소켓과 같게 연결은 살린다
+      const feed = sseParser((data) => {
+        let m: ServerMessage;
+        try {
+          m = JSON.parse(data);
+        } catch {
+          return;
+        }
+        receive(link, m);
+      });
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
-        buf += value;
-        let at: number;
-        while ((at = buf.indexOf("\n\n")) >= 0) {
-          const data = buf
-            .slice(0, at)
-            .split("\n")
-            .filter((l) => l.startsWith("data:"))
-            .map((l) => l.slice(5).replace(/^ /, ""))
-            .join("\n");
-          buf = buf.slice(at + 2);
-          if (data) receive(link, JSON.parse(data));
-        }
+        // 스트림에서 받은 것만 idle 을 다시 센다 — POST 의 응답은 GET 이 살아 있다는 뜻이 아니다
+        watch(link);
+        feed(value);
       }
       lost(link);
     })().catch(() => lost(link));
@@ -347,6 +390,12 @@ export function connect<V, C>(o: ClientOptions<V, C>): StreamClient<V> {
     } else if (m.t === "command")
       // 400 · 401 · 403 · 404 · 500 — 홉이 명령을 돌리기 전에 막았다
       receive(link, { t: "reply", id: m.id, ok: false, error: TEXT.commandFailed, version: 0 });
+    else if (m.t === "ask" && cur === link)
+      // 물을 길이 막혔다 — 제한 시간까지 「응답 지연」으로 기다리게 두지 않는다
+      for (const id of m.ids) {
+        const p = pending.get(id);
+        if (p && !p.wait) fail(p, TEXT.unknown);
+      }
   };
 
   void open();
@@ -357,7 +406,7 @@ export function connect<V, C>(o: ClientOptions<V, C>): StreamClient<V> {
       listeners.add(fn);
       return () => void listeners.delete(fn);
     },
-    command(name, args, id = crypto.randomUUID()) {
+    command(name, args, id = newId()) {
       const had = pending.get(id);
       if (had) return had.promise;
       const link = cur;

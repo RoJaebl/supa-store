@@ -5,7 +5,7 @@ import type { AddressInfo, Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createStreamServer, type StreamServer } from "../server/core.js";
 import { attachStream } from "../server/node.js";
-import { connect, type ClientOptions, type ClientView, type StreamClient } from "./client.js";
+import { connect, sseParser, TIMING, type ClientOptions, type ClientView, type StreamClient } from "./client.js";
 import { TEXT, type ClientMessage, type ServerMessage } from "./protocol.js";
 
 const PATH = "/s";
@@ -51,8 +51,12 @@ async function serve(first: StreamServer<any, any, any>) {
   };
 }
 
-function open<V, C = V>(o: ClientOptions<V, C>) {
-  const c = connect(o);
+/** 실제 서버 시험의 다시 잇기 첫 간격 — 1초를 기다리지 않게 줄인다(가짜 시계 시험은 기본 값) */
+const GAP = 20;
+type Opts<V, C> = ClientOptions<V, C> & { [TIMING]?: number };
+
+function open<V, C = V>(o: Opts<V, C>) {
+  const c = connect({ [TIMING]: GAP, ...o } as ClientOptions<V, C>);
   cleanup.push(() => c.close());
   return c;
 }
@@ -138,7 +142,7 @@ describe.each(both)("%s", (transport) => {
       isFetching: false,
       error: "인증 실패",
     });
-    await sleep(1300); // 다시 잇는다면 1초 ±20% 안에 다시 온다
+    await sleep(GAP * 10); // 다시 잇는다면 첫 간격 ±20% 안에 다시 온다
     expect(authorize).toHaveBeenCalledTimes(1);
     await expect(failure(c.command("x", []))).resolves.toMatchObject({ message: TEXT.commandFailed });
   });
@@ -287,7 +291,7 @@ describe.each(both)("%s", (transport) => {
     let attaches = 0;
     const stream = createStreamServer({ authorize: () => void attaches++, snapshot: () => 0 });
     const s = await serve(stream);
-    const c = connect({ url: s.url(transport), transport });
+    const c = connect({ url: s.url(transport), transport, [TIMING]: GAP } as ClientOptions<number, number>);
     await settled(c);
     const seen = vi.fn();
     c.subscribe(seen);
@@ -295,7 +299,7 @@ describe.each(both)("%s", (transport) => {
     await until(c, (v) => v.isFetching);
     c.close(); // 다시 잇기를 기다리는 중에 닫는다
     seen.mockClear();
-    await sleep(1300);
+    await sleep(GAP * 10);
     expect(attaches).toBe(1);
     expect(seen).not.toHaveBeenCalled();
   });
@@ -324,6 +328,36 @@ it("client: SSE 는 fetch 스트림으로 받고 Authorization · Last-Event-ID 
   expect(again!["x-supa-epoch"]).toEqual(expect.any(String));
   // POST 는 스트림의 채널과 연결을 다시 밝힌다
   expect(posted).toMatchObject({ authorization: "Bearer tok", "x-supa-channel": "room", "x-supa-connection": expect.any(String) });
+});
+
+it("client: SSE 의 망가진 프레임은 버리고 연결을 살리며, CRLF 로 쓰는 서버도 읽는다", async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const w = (m: unknown) => `data: ${JSON.stringify(m)}\r\n\r\n`;
+    res.write(w({ t: "welcome", epoch: "e", version: 0, connection: "k" }));
+    res.write("data: {망가짐\r\n\r\n");
+    res.write(`id: 0\r\n${w({ t: "snapshot", version: 0, value: "ok" })}`);
+  });
+  server.listen(0);
+  await once(server, "listening");
+  cleanup.push(() => (server.closeAllConnections(), new Promise((r) => server.close(r))));
+  const c = open<string>({ url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/`, transport: "sse" });
+  expect(await settled(c)).toEqual({ data: "ok", status: "ready", isFetching: false, error: null });
+});
+
+it("client: SSE 에서 ask 의 POST 가 막히면 그 명령은 연결 끊김. 알 수 없음", async () => {
+  let block = false;
+  let s!: Awaited<ReturnType<typeof serve>>;
+  const stream = createStreamServer({
+    // 다시 이은 뒤의 POST(연결이 있는 요청)만 거절한다 — GET 은 통과
+    authorize: (ctx) => (block && ctx.headers["x-supa-connection"] ? ctx.reject("막힘") : "me"),
+    snapshot: () => 0,
+    commands: { cut: () => ((block = true), s.kill(), 1) },
+  });
+  s = await serve(stream);
+  const c = open({ url: s.url("sse"), transport: "sse" });
+  await settled(c);
+  await expect(failure(c.command("cut", []))).resolves.toMatchObject({ message: TEXT.unknown });
 });
 
 // ── 시계가 걸린 것 — 가짜 웹소켓과 가짜 타이머로 본다 ──
@@ -362,11 +396,11 @@ class FakeWS {
 }
 
 /** 가짜 시계 · 가짜 웹소켓으로 연결 하나를 연다 — welcome 까지 받으면 live 가 그 소켓 */
-async function fake<V = unknown, C = V>(o: Partial<ClientOptions<V, C>> = {}) {
+async function fake<V = unknown, C = V>(o: Partial<Opts<V, C>> = {}) {
   if (!vi.isFakeTimers()) vi.useFakeTimers();
   FakeWS.all = [];
   vi.stubGlobal("WebSocket", FakeWS);
-  const c = open<V, C>({ url: "ws://x/s", ...o });
+  const c = open<V, C>({ url: "ws://x/s", [TIMING]: undefined, ...o });
   const tick = (ms = 0) => vi.advanceTimersByTimeAsync(ms);
   const last = () => FakeWS.all[FakeWS.all.length - 1]!;
   /** 새 소켓을 열고 welcome 을 준다 */
@@ -430,14 +464,63 @@ it("client: 60초 동안 아무것도 받지 못하면 끊긴 것으로 보고 �
   expect(FakeWS.all.length).toBe(2);
 });
 
-it("client: 4000 이면 곧바로 다시 잇는다", async () => {
-  const { tick, live } = await fake();
+it("client: 4000 이면 곧바로 다시 잇는다 — 따라잡은 연결일 때만, 아니면 간격을 둔다", async () => {
+  vi.spyOn(Math, "random").mockReturnValue(0.5);
+  const { tick, live, last } = await fake();
+  // welcome 전의 4000 — 내려간 홉이 곧바로 닫는 꼴
+  await tick();
+  last().drop(4000);
+  await tick(0);
+  expect(FakeWS.all.length).toBe(1);
+  await tick(1000);
+  expect(FakeWS.all.length).toBe(2);
+  // welcome 뒤 snapshot 전의 4000 — snapshot 이 늘 실패하는 홉. 간격도 1초로 되돌리지 않는다
+  last().open();
+  last().recv({ t: "welcome", epoch: "e1", version: 0, connection: "k" });
+  last().drop(4000, "snapshot 실패: x");
+  await tick(1999);
+  expect(FakeWS.all.length).toBe(2);
+  await tick(1);
+  expect(FakeWS.all.length).toBe(3);
+  // 따라잡은 연결의 4000 은 곧바로
   const ws = await live();
   ws.recv({ t: "snapshot", version: 0, value: 1 });
   ws.drop(4000, "서버가 내려간다");
   await tick(0);
-  expect(FakeWS.all.length).toBe(2);
+  expect(FakeWS.all.length).toBe(4);
 });
+
+it("client: 보안 문맥이 아니어 randomUUID 가 없어도 명령에 id 를 붙인다", async () => {
+  const { c, live } = await fake();
+  const ws = await live();
+  ws.recv({ t: "snapshot", version: 0, value: 0 });
+  const real = globalThis.crypto;
+  vi.stubGlobal("crypto", { getRandomValues: (a: Uint8Array) => real.getRandomValues(a) });
+  void c.command("x", []).catch(() => {});
+  vi.unstubAllGlobals();
+  vi.stubGlobal("WebSocket", FakeWS);
+  expect((ws.sent.at(-1) as { id: string }).id).toMatch(/^[0-9a-f]{32}$/);
+});
+
+it("client: SSE 읽기 — 조각으로 갈린 줄, 여러 줄 data, : 주석, CRLF · CR 줄 끝", () => {
+  const got: string[] = [];
+  const feed = sseParser((d) => got.push(d));
+  // 조각 사이에서 갈린 줄과 빈 줄
+  feed("id: 1\nda");
+  feed("ta: {\"a\":1}\n");
+  feed("\n");
+  // 여러 줄 data 는 \n 으로 잇고, : 주석 · event 칸은 버린다
+  feed(": keep-alive\nevent: x\ndata: one\ndata:two\ndata\n\n");
+  // CRLF — \r 과 \n 이 다른 조각으로 와도 한 줄 끝이다
+  feed("data: crlf\r");
+  feed("\n\r\n");
+  // CR 만
+  feed("data: cr\r\rdata: next\n\n");
+  // data 없는 이벤트는 넘기지 않는다
+  feed("id: 9\n\n");
+  expect(got).toEqual(['{"a":1}', "one\ntwo\n", "crlf", "cr", "next"]);
+});
+
 
 it("client: 가진 버전보다 작거나 같은 change 는 버리고, 하나 넘게 건너뛰면 다시 이어 따라잡는다", async () => {
   const { c, tick, live } = await fake<number[], number>({ reduce: (v, x) => [...v, x] });
