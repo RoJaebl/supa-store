@@ -451,6 +451,7 @@ store 꼴은 서버 전용 설정 · 등록부에서만 쓴다. `store-gen` 의 
 - 생성 파일은 TypeScript 타입이라 `tsc` 가 읽는다. 템플릿의 `build` 는 `tsc -b && vite build` 로 `tsc` 가 Vite 보다 먼저 돌므로, `tsc` 가 돌 때 생성 파일이 디스크에 있어야 한다. Tailwind 처럼 Vite 안에서만 짓는 꼴로는 안 되는 까닭이 이것이다(Tailwind 의 결과는 CSS 라 `tsc` 가 보지 않는다).
 - **생성 파일은 커밋한다.** 편집기 플러그인(tsserver)과 Vite 개발 서버가 정의를 고칠 때마다 다시 쓰므로 저장소의 파일은 거의 늘 최신이다. TanStack Router 의 `routeTree.gen.ts` 와 같은 꼴이다.
 - 커밋된 파일이 낡는 경우는 하나다 — 편집기 플러그인 없이 정의를 쓰고 개발 서버도 띄우지 않은 채 곧바로 빌드할 때. 그런 흐름과, 생성 파일을 커밋하지 않는 프로젝트는 `"build": "store-gen && tsc -b && vite build"` 처럼 빌드 앞에 `store-gen` 을 둔다.
+- 생성 타입에 `any` 가 남으면 생성이 멈춘다. 다만 `createStore("x", (set, get, ctx): Shape => …)` 처럼 반환 타입을 적은 정의는 이 검사를 건너뛴다 — `React.ReactElement` 처럼 라이브러리 기본 타입 인자의 `any` 를 쓸 때 반환 타입을 적는다. 반환 타입을 적으면 표기 안의 `any` 와 풀리지 않은 타입(import 오타, 타입 인자 오류 등)도 막지 않으므로, 정의 파일의 `tsc` 오류를 먼저 고친다.
 
 ## 편집기에서 타입 따라오게 하기
 
