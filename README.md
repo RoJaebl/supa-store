@@ -18,10 +18,12 @@ npm 판 대신 GitHub 의 커밋을 바로 쓸 수도 있다. 설치할 때 `pre
 ```
 
 ```yaml
-# pnpm-workspace.yaml
+# pnpm-workspace.yaml — pnpm 11 은 git 의존의 빌드를 받아 온 주소째로 허락받는다(이름만으로는 막는다)
 allowBuilds:
-  supa-store: true
+  "supa-store@https://codeload.github.com/RoJaebl/supa-store/tar.gz/<커밋>": true
 ```
+
+커밋을 바꿀 때는 두 자리의 `<커밋>` 을 함께 바꾼다. npm 판이 나오면 `"supa-store": "^0.3.0"` 으로 바꾸고 `allowBuilds` 줄은 지운다.
 
 ## 시작 절차
 
