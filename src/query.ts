@@ -49,10 +49,14 @@ export interface Cache<A, D> {
   /** args 하나면 값 하나, 배열이면 같은 순서의 값 배열 */
   getData(args?: A): D | undefined;
   getData(args: readonly A[]): (D | undefined)[];
-  /** 응답이 실어 온 값으로 바로 고친다 — 다시 받지 않는다. 배열이면 args 마다 updater 를 부른다. undefined 면 그 칸을 비워 idle 로 */
+  /** 응답이 실어 온 값으로 바로 고친다 — 다시 받지 않는다. 배열이면 args 마다 updater 를 부른다. undefined 면 그 칸을 비워 idle 로. 낡음은 끄지 않는다 */
   setData(updater: D | undefined | ((prev: D | undefined, args: A) => D | undefined), args?: A | readonly A[]): void;
-  /** 다시 받는다 — args 를 주면 그 칸만(배열이면 그 칸들만, 빈 배열은 아무것도 안 함), 없으면 받아 둔 칸 모두. 실패는 칸의 error 에 둔다 */
-  invalidate(args?: A | readonly A[]): Promise<void>;
+  /**
+   * 무효화한다 — args 를 주면 그 칸만(배열이면 그 칸들만, 빈 배열은 아무것도 안 함), 함수면 참인 칸, 없으면 받아 둔 칸 모두.
+   * 화면이 보는 칸은 곧바로 다시 받고(이것만 기다린다), 보지 않는 칸은 값을 두고 낡음만 표시해 다시 볼 때 · fetch 할 때 받는다.
+   * 실패는 칸의 error 에 둔다
+   */
+  invalidate(args?: A | readonly A[] | ((args: A) => boolean)): Promise<void>;
   /** 받아서 칸에 넣고 값을 돌려준다 — 받는 중이면 끝을 기다려 칸의 값을, 아니고 이미 받은 칸이면 그 값을 바로 준다(체인에서 쓴다). 실패하면 던진다. 배열이면 하나라도 실패할 때 그 오류로 거절한다 */
   fetch(args?: A): Promise<D>;
   fetch(args: readonly A[]): Promise<D[]>;
@@ -156,6 +160,8 @@ interface Cell<A, D> {
   /** 요청 차례 — 이 차례가 아닌 응답은 버린다 */
   seq: number;
   inflight?: Promise<D>;
+  /** 보지 않는 동안 무효화됐다 — 다시 볼 때 · fetch 할 때 받는다 */
+  stale?: boolean;
 }
 
 /**
@@ -180,17 +186,55 @@ export function createResource<A = void, D = never, R extends object = object, S
     select?: (data: D, args: A) => S;
     placeholderData?: PlaceholderData<A, D>;
     refetchInterval?: RefetchInterval<A>;
+    /** 그 args 를 보던 마지막 화면이 빠지고(화면 없이 받았으면 받기가 끝나고) 이만큼(ms) 지나면 칸을 놓는다. 생략 · false 면 쥔다 */
+    release?: number | false;
   } = {},
 ): Resource<A, D, R, S> {
   const auto = options.auto ?? true;
   const cells = new Map<string, Cell<A, D>>();
   const listeners = new Set<() => void>();
   const idOf = (args: A | undefined) => JSON.stringify(args ?? null);
+  const { release } = options;
+  // 놓기 타이머는 이 자원의 cells 만 본다 — 다시 지은 자원의 칸을 건드리지 않는다
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const letGo = (id: string) => {
+    if (typeof release !== "number") return;
+    clearTimeout(timers.get(id));
+    const timer = setTimeout(() => {
+      timers.delete(id);
+      const cell = cells.get(id);
+      if (!cell || refetcher.watching(cell.args as A)) return;
+      cells.delete(id);
+      // 진행 중 응답은 떨어진 칸에 닿으므로 버려진다 — 주기에도 알리지 않는다. 다시 보면 처음 간격부터
+      cell.seq += 1;
+      cell.inflight = undefined;
+      refetcher.forget(cell.args as A);
+    }, release);
+    // 서버에서 fetch 로 받은 칸의 타이머가 프로세스를 붙잡지 않게
+    (timer as { unref?: () => void }).unref?.();
+    timers.set(id, timer);
+  };
+  /** 화면도 타이머도 없는 살아 있는 칸이면 지금부터 센다 — 받기가 끝났을 때 · setData 했을 때 */
+  const countIfLoose = (cell: Cell<A, D>) => {
+    const id = idOf(cell.args);
+    if (cells.get(id) === cell && !timers.has(id) && !refetcher.watching(cell.args as A)) letGo(id);
+  };
   const refetcher = createRefetcher<A>({
     resource: options.refetchInterval,
     load: (args) => load(args),
     idOf,
     inflight: (args) => cells.get(idOf(args))?.inflight,
+    // 낡은 칸을 다시 보면 받는다 — 그사이 fetch 가 받는 중이면 그것을 나눠 쓴다
+    onWatch(args) {
+      const id = idOf(args);
+      clearTimeout(timers.get(id));
+      timers.delete(id);
+      const cell = cells.get(id);
+      if (!cell?.stale) return;
+      cell.stale = false;
+      if (cell.view.status !== "idle") load(args).catch(noop);
+    },
+    onUnwatch: (args) => letGo(idOf(args)),
   });
   const cellOf = (args: A | undefined): Cell<A, D> => {
     const id = idOf(args);
@@ -212,6 +256,7 @@ export function createResource<A = void, D = never, R extends object = object, S
     const cell = cellOf(args);
     if (cell.inflight && !force) return cell.inflight;
     const seq = ++cell.seq;
+    cell.stale = false;
     // 받은 값이 있으면 status · error 는 그대로 두고 isFetching 만 켠다
     write(cell, cell.view.data === undefined ? { status: "loading", error: null, isFetching: true } : { isFetching: true });
     // 실행자는 곧바로 돈다 — query 가 동기로 던져도 거절로 바뀐다
@@ -222,6 +267,8 @@ export function createResource<A = void, D = never, R extends object = object, S
       const next = { ...(cell.seq === seq ? view : {}), ...(last ? { isFetching: false } : {}) };
       if (Object.keys(next).length) write(cell, next);
       if (last) refetcher.settled(args as A, ok);
+      // 화면 없이 받은 칸은 받기가 끝난 때부터 센다 — 이미 세는 중이면 그대로
+      if (last) countIfLoose(cell);
     };
     const request: Promise<D> = new Promise<D>((resolve) => resolve(query!.call(defined, args as A))).then(
       (data) => {
@@ -247,19 +294,28 @@ export function createResource<A = void, D = never, R extends object = object, S
     cell.seq += 1;
     // 값을 비우면(받은 적 없는 목록으로 되돌리기) 처음으로 돌린다 — 버린 응답 탓에 loading 에 갇히지 않고 다음에 다시 받는다
     write(cell, { data, status: data === undefined ? "idle" : "ready", error: null });
+    // setData 로만 만든 칸도 놓인다
+    countIfLoose(cell);
   };
-  const reload = (cell: Cell<A, D>) => (cell.view.status === "idle" ? undefined : load(cell.args, true).catch(noop));
+  // 보는 칸만 곧바로 다시 받고, 보지 않는 칸은 낡음만 표시한다. 받는 중인 칸은 보지 않아도 다시 받는다 —
+  // 무효화 앞에 떠난 응답을 뒤 fetch · 다시 보는 화면이 받지 않게. 그래서 낡은 칸에는 앞서 떠난 요청이 없다
+  const reload = (cell: Cell<A, D>) => {
+    if (cell.view.status === "idle") return;
+    if (cell.inflight || refetcher.watching(cell.args as A)) return load(cell.args, true).catch(noop);
+    cell.stale = true;
+  };
   const fetchOne = (args: A | undefined) => {
     const cell = cellOf(args);
     // 받는 중이면 끝을 기다려 칸의 값을 준다 — invalidate 뒤 체인이 앞 값을 받지 않게. 그사이 setData 한 값이면 그것이다.
-    // 기다리던 요청을 다른 요청이 밀어냈으면 그것을 다시 기다리고, 그사이 칸을 비웠으면 받은 응답을 준다
+    // 기다리던 요청을 다른 요청이 밀어냈으면 그것을 다시 기다리고, 그사이 칸을 비웠거나 놓았으면 받은 응답을 준다
+    const gone = () => cells.get(idOf(args)) !== cell;
     const wait = (p: Promise<D>): Promise<D> =>
       p.then(
-        (d) => (cell.inflight ? wait(cell.inflight) : cell.view.data === undefined ? d : (cell.view.data as D)),
-        (e) => (cell.inflight ? wait(cell.inflight) : Promise.reject(e)),
+        (d) => (gone() ? d : cell.inflight ? wait(cell.inflight) : cell.view.data === undefined ? d : (cell.view.data as D)),
+        (e) => (!gone() && cell.inflight ? wait(cell.inflight) : Promise.reject(e)),
       );
     if (cell.inflight) return wait(cell.inflight);
-    return cell.view.status === "ready" ? Promise.resolve(cell.view.data as D) : load(args);
+    return cell.view.status === "ready" && !cell.stale ? Promise.resolve(cell.view.data as D) : wait(load(args));
   };
 
   const cache = {
@@ -268,8 +324,15 @@ export function createResource<A = void, D = never, R extends object = object, S
       if (Array.isArray(args)) args.forEach((a) => setOne(updater, a));
       else setOne(updater, args as A | undefined);
     },
-    async invalidate(args?: A | readonly A[]) {
-      const targets = args === undefined ? [...cells.values()] : (Array.isArray(args) ? args : [args]).map((a) => cellOf(a));
+    async invalidate(args?: A | readonly A[] | ((args: A) => boolean)) {
+      // 함수 args 는 생성기가 막으므로 함수면 조건이다. idle 칸은 reload 가 건너뛰므로 조건도 부르지 않는다
+      const targets =
+        args === undefined
+          ? [...cells.values()]
+          : typeof args === "function"
+            ? [...cells.values()].filter((c) => c.view.status !== "idle" && (args as (a: A) => boolean)(c.args as A))
+            : // 받은 적 없는 args 의 칸은 만들지 않는다
+              (Array.isArray(args) ? args : [args]).flatMap((a) => cells.get(idOf(a)) ?? []);
       await Promise.all(targets.map(reload));
     },
     fetch: (args?: A | readonly A[]) => (Array.isArray(args) ? Promise.all(args.map(fetchOne)) : fetchOne(args as A | undefined)),

@@ -8,7 +8,8 @@ type CellView<D> = { data: D | undefined; status: Status; error: string | null; 
 
 /** createResource 가 훅에 넘기는 안쪽 */
 export interface ResourceCore<A, D> {
-  cellOf(args: A | undefined): { view: CellView<D>; inflight?: Promise<D> };
+  /** stale 은 보지 않는 동안 무효화된 칸 — 화면이 보기 시작하면 곧바로 다시 받는다 */
+  cellOf(args: A | undefined): { view: CellView<D>; inflight?: Promise<D>; stale?: boolean };
   load(args: A | undefined, force?: boolean): Promise<D>;
   subscribe(listener: () => void): () => void;
   idOf(args: A | undefined): string;
@@ -111,7 +112,10 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         const on = active[i]!;
         const kept = byId.get(id);
         if (kept) return kept.out;
-        const { data: got, status, error, isFetching } = on ? cellOf(a).view : IDLE;
+        const cell = on ? cellOf(a) : undefined;
+        const { data: got, status, error } = cell?.view ?? IDLE;
+        // 낡은 칸은 이 화면이 보기 시작하면(watch 효과) 다시 받는다 — 첫 판부터 받는 중으로 보인다. 칸의 값은 건드리지 않는다
+        const isFetching = cell ? cell.view.isFetching || (cell.stale === true && status !== "idle") : false;
         const before = prev?.byId.get(id);
         const screen = options?.select;
         // 받는 항목이 받은 값이 없으면(받는 중 · 실패) 자리를 채운다. 앞에도 채웠고 화면 placeholderData 가 그대로면 그 값을 쓴다 —

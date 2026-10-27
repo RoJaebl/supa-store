@@ -32,6 +32,10 @@ export function createRefetcher<A>(core: {
   load(args: A): Promise<unknown>;
   idOf(args: A): string;
   inflight(args: A): Promise<unknown> | undefined;
+  /** 그 args 를 보는 첫 화면이 들어왔다 */
+  onWatch?(args: A): void;
+  /** 그 args 를 보던 마지막 화면이 빠졌다 */
+  onUnwatch?(args: A): void;
 }) {
   const watched = new Map<string, Watched<A>>();
   /** 늘린 정도 — args 마다, 보는 화면이 없어도 쥔다. 0 이면 지운다 */
@@ -78,6 +82,7 @@ export function createRefetcher<A>(core: {
     watch(args: A, screen: RefetchInterval<A> | undefined): () => void {
       const id = core.idOf(args);
       let w = watched.get(id);
+      const first = !w;
       if (!w) {
         if (watched.size === 0 && typeof document !== "undefined") document.addEventListener("visibilitychange", onVisible);
         watched.set(id, (w = { args, screens: [], from: Date.now(), due: false }));
@@ -86,6 +91,7 @@ export function createRefetcher<A>(core: {
       // 같은 값이 둘이면 풀 때 어느 것을 지워도 같다
       entry.screens.push(screen);
       arm(id, entry);
+      if (first) core.onWatch?.(args);
       let done = false;
       return () => {
         if (done) return;
@@ -95,8 +101,13 @@ export function createRefetcher<A>(core: {
         clearTimeout(entry.timer);
         watched.delete(id);
         if (watched.size === 0 && typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible);
+        core.onUnwatch?.(entry.args);
       };
     },
+    /** 칸을 놓았다 — 늘린 정도를 지워 다시 보면 처음 간격부터 */
+    forget: (args: A): void => void levels.delete(core.idOf(args)),
+    /** 그 args 를 보는 화면이 있는가 */
+    watching: (args: A): boolean => watched.has(core.idOf(args)),
     /** 화면 간격이 바뀌었다 — 세던 때(from)는 그대로 두고 지금 값으로 다시 건다. 없으면 타이머만 걷힌다 */
     rearm(args: A): void {
       const id = core.idOf(args);

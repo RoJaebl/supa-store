@@ -165,6 +165,15 @@ test("TypeScript 가 isArrayType · isTupleType 을 내주지 않으면 배열 �
   };
   assert.doesNotThrow(() => generate(old, loadConfig(ts, root)));
 });
+const FN_ARGS = /src\/a\.state\.ts: 자원의 args 는 함수로 짓지 않는다 — 조건 무효화와 헷갈린다/;
+test("함수 args 를 가진 자원은 실패한다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => createResource(() => ({ query: async (pick: (n: number) => boolean) => pick(1) })));`);
+  assert.throws(() => generate(ts, loadConfig(ts, root)), FN_ARGS);
+});
+test("함수를 낀 유니온 args 도 실패한다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => createResource(() => ({ query: async (id: string | (() => string)) => id })));`);
+  assert.throws(() => generate(ts, loadConfig(ts, root)), FN_ARGS);
+});
 test("객체 args 와 인자 없는 query 는 통과한다", () => {
   write("src/a.state.ts", `${RES}createStore("a", () => ({
   r: createResource(() => ({ query: async ({ from, to }: { from: number; to: number }) => from + to })),
@@ -704,5 +713,201 @@ createStore("ui.c", () => ({ i: null as I7 | null, d: null as inner.Deep | null 
   const out = read("src/store.gen.ts");
   assert.match(out, /i: import\("cyc"\)\.I7 \| null/);
   assert.match(out, /d: import\("cyc"\)\.inner\.Deep \| null/);
+  assert.deepEqual(genDiagnostics(), []);
+});
+
+const notExported = (names, file = "src/a.state.ts") => (e) => {
+  const list = names.map((n) => `${n}(${file})`).join(", ");
+  assert.equal(e.message, `ui.a(src/a.state.ts): 상태 필드의 타입 ${list} 이 export 되지 않아 생성 파일에서 쓸 수 없다 — ${file} 에서 ${names.join(", ")} 을 export 한다`);
+  return true;
+};
+test("다른 모듈의 export 하지 않은 타입이 전역 이름(Response)과 같아도 그 파일을 담아 실패한다", () => {
+  write("src/t.ts", "type Response = { i: 1 };\nexport const make = (): Response => ({ i: 1 });");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import { make } from "./t";
+createStore("ui.a", () => ({ w: make() }));`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notExported(["Response"], "src/t.ts"));
+});
+test("다른 모듈 최상위의 export 하지 않은 타입은 「최상위 아님」이 아니라 그 파일에서 export 하라고 안내한다", () => {
+  write("src/t.ts", "interface Inner { i: 1 }\nexport const make = (): Inner => ({ i: 1 });");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import { make } from "./t";
+createStore("ui.a", () => ({ w: make() }));`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notExported(["Inner"], "src/t.ts"));
+});
+test("시그니처가 스스로 묶은 타입 매개변수는 묻지 않는다", () => {
+  write(
+    "src/t.ts",
+    `export function pick<T>(x: T): T { return x; }
+export function makeApi() { return { get<K extends string>(k: K) { return { k }; } }; }`,
+  );
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import { pick, makeApi } from "./t";
+createStore("ui.a", () => ({ pick, api: makeApi(), keys: null as { [P in "a" | "b"]: P } | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /pick: <T>\(x: T\) => T;/);
+  assert.match(out, /get<K extends string>\(k: K\)/);
+  assert.deepEqual(genDiagnostics(), []);
+});
+test("lib 의 제네릭 함수(Array.from · structuredClone)를 담으면 타입 매개변수가 아니라 any 로 멈춘다", () => {
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+createStore("ui.a", () => ({ from: Array.from, clone: structuredClone }));`,
+  );
+  assert.throws(
+    () => generate(ts, loadConfig(ts, root)),
+    (e) => /ui\.a\(src\/a\.state\.ts\) 의 타입에 any 가 남는다/.test(e.message) && !/최상위/.test(e.message),
+  );
+});
+test("export 하지 않은 namespace 안의 타입은 그 namespace 하나로 알린다", () => {
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+namespace N { export type X = { x: 1 }; }
+createStore("ui.a", () => ({ x: null as N.X | null }));`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notExported(["N"]));
+});
+test("export 한 타입의 속에 숨은 타입은 묻지 않고, 순환 타입도 멈춘다", () => {
+  write("src/t.ts", "type Priv = { p: 1 };\nexport interface Shared { p: Priv; self: Shared }\nexport type Tree = { kids: Tree[] };");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { Shared, Tree } from "./t";
+createStore("ui.a", () => ({ s: null as Shared | null, t: null as Tree | null, loop: { n: 1 } as { n: 1; me?: unknown } }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  assert.deepEqual(genDiagnostics(), []);
+});
+test("export 하지 않은 지역 타입을 쓰면 key · 파일 · 이름을 담아 실패하고 생성 파일을 쓰지 않는다", () => {
+  write("src/store.gen.ts", "// 앞선 생성본");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+type Local = { n: number };
+createStore("ui.a", () => ({ l: null as Local | null }));`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notExported(["Local"]));
+  assert.equal(read("src/store.gen.ts"), "// 앞선 생성본");
+});
+test("export 하지 않은 이름이 둘이면 둘 다 적고, 반환 타입을 적은 정의도 막는다", () => {
+  write("src/store.gen.ts", "// 앞선 생성본");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+type Local = { n: number };
+interface Other { o: string }
+createStore("ui.a", (): { l: Local | null; o: Other | null } => ({ l: null, o: null }));`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notExported(["Local", "Other"]));
+  assert.equal(read("src/store.gen.ts"), "// 앞선 생성본");
+});
+test("지역 타입을 export 하면 통과하고 생성 파일의 진단이 없다", () => {
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+export type Local = { n: number };
+createStore("ui.a", () => ({ l: null as Local | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  assert.match(read("src/store.gen.ts"), /l: import\("\.\/a\.state"\)\.Local \| null/);
+  assert.deepEqual(genDiagnostics(), []);
+});
+test("export 하지 않은 지역 타입이 전역 이름(Response)과 같아도 조용히 넘기지 않는다", () => {
+  write("src/store.gen.ts", "// 앞선 생성본");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+type Response = { mine: 1 };
+createStore("ui.a", () => ({ r: null as Response | null }));`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notExported(["Response"]));
+  assert.equal(read("src/store.gen.ts"), "// 앞선 생성본");
+});
+const notTopLevel = (names) => (e) => {
+  assert.equal(
+    e.message,
+    `ui.a(src/a.state.ts): 상태 필드의 타입 ${names.join(", ")} 은 최상위에서 export 할 수 있는 타입이 아니다 — 반환 타입을 적거나 최상위 타입으로 옮긴다`,
+  );
+  return true;
+};
+test("함수 안의 지역 타입은 export 로 풀 수 없다는 문구로 실패한다", () => {
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+function make() {
+  type Inner = { i: 1 };
+  createStore("ui.a", () => ({ v: null as Inner | null }));
+}
+make();`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notTopLevel(["Inner"]));
+});
+test("타입 매개변수도 export 로 풀 수 없다는 문구로 실패하고, 상태 타입 안에서 묶인 매개변수는 넘긴다", () => {
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+export function make<T>() {
+  createStore("ui.a", () => ({ v: null as T | null, pick: <U>(u: U) => u }));
+}`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notTopLevel(["T"]));
+});
+const nodeNextEsm = () => {
+  write("package.json", JSON.stringify({ type: "module" }));
+  write("tsconfig.json", JSON.stringify({ compilerOptions: { ...COMPILER, module: "NodeNext", moduleResolution: "NodeNext", paths: undefined }, include: ["src"] }));
+  installed("node_modules/supa-store");
+};
+test("NodeNext ESM 에서 .cts · 이름이 js 로 끝나는 파일의 타입도 확장자를 붙이고 머리 import 에도 .js 가 붙는다", () => {
+  nodeNextEsm();
+  write("src/c.cts", "export type C = { c: 1 };");
+  write("src/fromjs.ts", "export type F = { f: 1 };");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { C } from "./c.cjs";
+import type { F } from "./fromjs.js";
+createStore("ui.a", () => ({ c: null as C | null, f: null as F | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /^import "\.\/a\.state\.js";$/m);
+  assert.match(out, /c: import\("\.\/c\.cjs"(?:, \{[^()]*\})?\)\.C \| null/);
+  assert.match(out, /f: import\("\.\/fromjs\.js"(?:, \{[^()]*\})?\)\.F \| null/);
+  assert.doesNotMatch(out, NO_PATH);
+  assert.deepEqual(genDiagnostics(), []);
+});
+test("NodeNext + type: module 에서 resolution-mode 가 붙은 지역 · 패키지 타입도 상대 경로 · 지정자로 찍힌다", () => {
+  nodeNextEsm();
+  write("node_modules/@fake/lib/package.json", JSON.stringify({ name: "@fake/lib", exports: { ".": { types: "./index.d.ts" } } }));
+  write("node_modules/@fake/lib/index.d.ts", `export type Root = { r: 1 };\nexport type { Hidden } from "./lib/hidden.js";`);
+  write("node_modules/@fake/lib/lib/hidden.d.ts", "export type Hidden = { h: 1 };");
+  write("src/types.ts", "export type Shared = { id: string };");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { Shared } from "./types.js";
+import type { Root, Hidden } from "@fake/lib";
+export type Local = { n: number };
+createStore("ui.a", () => ({ s: null as Shared | null, l: null as Local | null, r: null as Root | null, h: null as Hidden | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /s: import\("\.\/types\.js", \{ with: \{ "resolution-mode": "import" \} \}\)\.Shared \| null/);
+  assert.match(out, /l: import\("\.\/a\.state\.js", \{ with: \{ "resolution-mode": "import" \} \}\)\.Local \| null/);
+  assert.match(out, /r: import\("@fake\/lib"(?:, \{[^()]*\})?\)\.Root \| null/);
+  assert.match(out, /h: import\("@fake\/lib"(?:, \{[^()]*\})?\)\.Hidden \| null/);
+  assert.doesNotMatch(out, NO_PATH);
   assert.deepEqual(genDiagnostics(), []);
 });

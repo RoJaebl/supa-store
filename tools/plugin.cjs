@@ -1,7 +1,7 @@
 // tsserver 플러그인 — 편집 중에 생성 파일의 내용을 지어 언어 서비스에 대 주고, 바뀌면 디스크에도 쓴다
 const { existsSync, mkdirSync, readFileSync, writeFileSync } = require("node:fs");
 const { dirname } = require("node:path");
-const { loadConfig, collect, render, writeIfChanged } = require("./codegen.cjs");
+const { loadConfig, collect, render, writeIfChanged, esmOut, unexported } = require("./codegen.cjs");
 
 const same = (p) => p.replace(/\\/g, "/").toLowerCase();
 
@@ -45,7 +45,11 @@ module.exports = function init({ typescript: ts }) {
         if (!program) return false;
         let next;
         try {
-          next = render(collect(ts, program, config), config, ts);
+          const entries = collect(ts, program, config);
+          next = render(entries, config, ts, esmOut(ts, program, config));
+          // 쓸 수 없는 이름은 알리기만 한다 — 편집 중에는 생성 파일을 지금처럼 쓴다
+          const hidden = unexported(ts, program, config, entries);
+          if (hidden) log(hidden);
         } catch (error) {
           log(error.message);
           return false;

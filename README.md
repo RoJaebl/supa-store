@@ -98,8 +98,14 @@ const many = useStore("api.file.dirLevel", { args: dirs.map((dir) => ({ repo, di
 // many: { data, status }[] — 목록의 pick · omit 은 조회 칸(data · status · error · isPlaceholderData · isFetching · refetch)만 고른다
 ```
 
-`Cache`(`getData` · `invalidate` · `fetch` · `setData`)도 배열을 받는다. `invalidate([])` 는 아무것도 하지 않고, `invalidate()` 는 받아 둔 것 모두를 다시 받는다.
-`fetch` 목록은 하나라도 실패하면 그 오류로 거절한다.
+`Cache`(`getData` · `invalidate` · `fetch` · `setData`)도 배열을 받는다. `fetch` 목록은 하나라도 실패하면 그 오류로 거절한다.
+
+**무효화 범위.** `invalidate([])` 는 아무것도 하지 않고, `invalidate()` 는 받아 둔 것 모두를 고른다. 고른 칸 가운데 화면이 보는 칸과 받는 중인 칸만 곧바로 다시 받고(`await` 는 이것만 기다린다), 나머지는 값을 두고 낡음만 표시한다 — 화면이 다시 보거나 `fetch` 하면 그때 받고, `getData` 는 쥔 값을 준다.
+앞 판에서 옮길 때: 화면 없이 새 값이 필요하면 `invalidate` 뒤 `getData` 가 아니라 `fetch` 를 쓴다 — 보지 않는 칸은 무효화가 곧바로 다시 받지 않는다.
+
+**조건 무효화.** `invalidate((a) => a.repo === "A")` 는 받아 둔 칸마다 조건을 불러 참인 칸을 고른다. 범위 규칙은 위와 같다. 그래서 query 의 args 는 함수로 짓지 않는다(생성기가 막는다).
+
+**놓기(`release`).** `createResource(define, { release: 0 })` 은 그 args 를 보던 마지막 화면이 빠지면 칸을 놓고, `release: 5 * 60_000` 은 5분 뒤 놓는다. 그사이 화면이 다시 보면 놓지 않는다. 놓을 때 진행 중인 요청의 응답은 버리고, 놓은 뒤 다시 보면 `loading` 부터 받는다. 화면이 아닌 읽기(`getData` · `fetch`)는 보는 것으로 세지 않는다 — 화면 없이 `fetch` 로 받은 칸은 받기가 끝난 때부터 센다. 생략하거나 `false` 면 놓지 않는다. `release: 0` 은 같은 차례가 아니라 다음 차례에 놓는다 — 같은 args 를 곧바로 다시 거는 렌더(StrictMode 의 두 번 돌기 같은 것)에서 놓았다가 처음부터 다시 받지 않게. `setData` 로만 채운 칸도 보는 화면이 없으면 그때부터 센다.
 
 **자원의 `args` 는 배열이나 튜플 타입으로 짓지 않는다** — 생성기가 실패시킨다. 맨 배열을 목록으로 읽기 때문이다. 여러 값은 객체로 묶는다.
 
@@ -451,6 +457,7 @@ store 꼴은 서버 전용 설정 · 등록부에서만 쓴다. `store-gen` 의 
 - 생성 파일은 TypeScript 타입이라 `tsc` 가 읽는다. 템플릿의 `build` 는 `tsc -b && vite build` 로 `tsc` 가 Vite 보다 먼저 돌므로, `tsc` 가 돌 때 생성 파일이 디스크에 있어야 한다. Tailwind 처럼 Vite 안에서만 짓는 꼴로는 안 되는 까닭이 이것이다(Tailwind 의 결과는 CSS 라 `tsc` 가 보지 않는다).
 - **생성 파일은 커밋한다.** 편집기 플러그인(tsserver)과 Vite 개발 서버가 정의를 고칠 때마다 다시 쓰므로 저장소의 파일은 거의 늘 최신이다. TanStack Router 의 `routeTree.gen.ts` 와 같은 꼴이다.
 - 커밋된 파일이 낡는 경우는 하나다 — 편집기 플러그인 없이 정의를 쓰고 개발 서버도 띄우지 않은 채 곧바로 빌드할 때. 그런 흐름과, 생성 파일을 커밋하지 않는 프로젝트는 `"build": "store-gen && tsc -b && vite build"` 처럼 빌드 앞에 `store-gen` 을 둔다.
+- 상태 필드에 쓰는 정의 파일의 타입은 `export` 한다. 생성 파일이 그 타입을 import 로 가리키므로, `export` 하지 않은 지역 타입을 쓰면 생성이 멈춘다.
 - 생성 타입에 `any` 가 남으면 생성이 멈춘다. 다만 `createStore("x", (set, get, ctx): Shape => …)` 처럼 반환 타입을 적은 정의는 이 검사를 건너뛴다 — `React.ReactElement` 처럼 라이브러리 기본 타입 인자의 `any` 를 쓸 때 반환 타입을 적는다. 반환 타입을 적으면 표기 안의 `any` 와 풀리지 않은 타입(import 오타, 타입 인자 오류 등)도 막지 않으므로, 정의 파일의 `tsc` 오류를 먼저 고친다.
 
 ## 편집기에서 타입 따라오게 하기
