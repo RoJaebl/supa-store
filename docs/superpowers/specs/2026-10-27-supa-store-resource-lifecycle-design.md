@@ -1,7 +1,7 @@
 # supa-store — 자원이 보지 않는 값을 다루는 법 (짧은 설계)
 
 - 날짜: 2026-10-27
-- 상태: **초안 — 사람의 승인 전**
+- 상태: **승인됨(2026-10-27, 사람이 editor 이관 세션에서 「좋아. 설계를 승인할께」)**
 - 계기: editor 의 React Query 이관에서 찾은 `createResource` 의 빈자리 셋. 근거와 editor 의 실제 자리는 공유 노트
   `supa-store-resource-gaps.md`(editor 이관 세션이 썼다).
 
