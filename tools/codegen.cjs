@@ -94,47 +94,67 @@ function collect(ts, program, config) {
     typeof checker.isArrayType === "function" && typeof checker.isTupleType === "function" && (checker.isArrayType(t) || checker.isTupleType(t));
   // 함수인가 — 조건 무효화(invalidate(fn))와 헷갈린다
   const isFnType = (t) => t.getCallSignatures().length > 0;
-  // 생성 파일에서 풀리지 않을 이름 — 글자로 옮긴 타입에 맨 이름으로 남은 것을 정의 자리(at)의 범위에서 찾아 가른다.
-  // 같은 이름의 전역(DOM 의 Response 등)이 있어도 정의 파일의 것을 본다. top 이 false 면 export 로 풀 수 없다
+  // 생성 파일에서 이름으로 풀리지 않을 타입 — 상태 타입에서 닿는 타입을 따라가며 그 이름(aliasSymbol · symbol)의 선언을 본다.
+  // 이름으로 찍히는 타입은 속을 따라가지 않고 타입 인자만 따라간다. 이름 없는 타입(객체 리터럴 · 함수 · 유니온)은 속까지 따라간다.
+  // file 이 있으면 그 파일 최상위에서 export 하면 풀리고, 없으면(함수 안 선언 · 타입 매개변수) export 로 풀 수 없다
   const userFile = (sf) => !program.isSourceFileDefaultLibrary(sf) && !program.isSourceFileFromExternalLibrary(sf) && !/\/node_modules\//.test(posix(sf.fileName));
   const resolveAlias = (sym) => (sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym);
-  const hiddenNames = (typeNode, at) => {
-    const bound = new Set();
-    const refs = new Set();
-    const walk = (n) => {
-      if (ts.isTypeParameterDeclaration(n)) bound.add(n.name.text);
-      if (ts.isTypeReferenceNode(n)) {
-        let q = n.typeName;
-        while (ts.isQualifiedName(q)) q = q.left;
-        refs.add(q.text);
+  const NAMED = new Set([ts.SyntaxKind.TypeAliasDeclaration, ts.SyntaxKind.InterfaceDeclaration, ts.SyntaxKind.ClassDeclaration, ts.SyntaxKind.EnumDeclaration]);
+  // 이름 붙은 선언을 가른다 — 이름이 아니면 undefined, 생성 파일에서 풀리면 null, 아니면 { name, file? }
+  const judge = (sym) => {
+    if (!sym) return undefined;
+    let decl = resolveAlias(sym).declarations?.[0];
+    if (decl && ts.isEnumMember(decl)) decl = decl.parent;
+    if (!decl || !NAMED.has(decl.kind) || !decl.name) return undefined;
+    const sf = decl.getSourceFile();
+    const name = decl.name.text;
+    // lib · 패키지 · 전역 스크립트 · declare global 안의 것은 생성 파일에서도 같은 이름으로 풀린다
+    if (!userFile(sf) || !ts.isExternalModule(sf) || ts.findAncestor(decl, (n) => ts.isModuleDeclaration(n) && ts.isGlobalScopeAugmentation(n))) return null;
+    if (decl.parent !== sf) return { name };
+    const mod = checker.getSymbolAtLocation(sf);
+    const exported = mod && checker.getExportsOfModule(mod).some((e) => resolveAlias(e).declarations?.includes(decl));
+    return exported ? null : { name, file: posix(sf.fileName) };
+  };
+  const typeOfSymbol = (sym, at) => (checker.getTypeOfSymbol ? checker.getTypeOfSymbol(sym) : checker.getTypeOfSymbolAtLocation(sym, at));
+  const hiddenTypes = (root, at) => {
+    const hidden = new Map();
+    const seen = new Set();
+    const add = (h) => hidden.set(`${h.name}\0${h.file ?? ""}`, h);
+    const walk = (t) => {
+      if (!t || seen.has(t)) return;
+      seen.add(t);
+      if (t.flags & ts.TypeFlags.TypeParameter) {
+        // 정의 함수 안에서 묶인 매개변수(<U>(u: U) => U · 매핑 타입의 K)와 this 는 그대로 찍혀도 풀린다
+        const decl = t.symbol?.declarations?.[0];
+        if (t.isThisType || (decl && decl.getSourceFile() === at.getSourceFile() && decl.pos >= at.pos && decl.end <= at.end)) return;
+        if (t.symbol) add({ name: t.symbol.name });
+        return;
       }
-      ts.forEachChild(n, walk);
+      const alias = judge(t.aliasSymbol);
+      if (alias !== undefined) {
+        if (alias) add(alias);
+        else for (const a of t.aliasTypeArguments ?? []) walk(a);
+        return;
+      }
+      const ref = t.flags & ts.TypeFlags.Object && t.objectFlags & ts.ObjectFlags.Reference ? checker.getTypeArguments(t) : [];
+      const own = judge(t.symbol);
+      if (own !== undefined) {
+        if (own) add(own);
+        else ref.forEach(walk);
+        return;
+      }
+      ref.forEach(walk);
+      if (t.isUnionOrIntersection()) return t.types.forEach(walk);
+      if (!(t.flags & ts.TypeFlags.Object)) return;
+      for (const p of checker.getPropertiesOfType(t)) walk(typeOfSymbol(p, at));
+      for (const sig of [...t.getCallSignatures(), ...t.getConstructSignatures()]) {
+        for (const p of sig.parameters) walk(typeOfSymbol(p, at));
+        walk(checker.getReturnTypeOfSignature(sig));
+      }
+      for (const info of checker.getIndexInfosOfType(t)) walk(info.type);
     };
-    walk(typeNode);
-    const scope = new Map();
-    for (const sym of checker.getSymbolsInScope(at, ts.SymbolFlags.Type | ts.SymbolFlags.Namespace)) if (!scope.has(sym.name)) scope.set(sym.name, sym);
-    const hidden = [];
-    for (const name of refs) {
-      if (bound.has(name)) continue;
-      const found = scope.get(name);
-      const sym = found && resolveAlias(found);
-      if (!sym || sym.flags & ts.SymbolFlags.TypeParameter) {
-        hidden.push({ name, top: false });
-        continue;
-      }
-      const decl = sym.declarations?.[0];
-      const sf = decl?.getSourceFile();
-      // lib · 패키지 · 전역 스크립트 · declare global 안의 것은 생성 파일에서도 같은 이름으로 풀린다
-      if (!sf || !userFile(sf) || !ts.isExternalModule(sf) || ts.findAncestor(decl, (n) => ts.isModuleDeclaration(n) && ts.isGlobalScopeAugmentation(n))) continue;
-      if (decl.parent !== sf) {
-        hidden.push({ name, top: false });
-        continue;
-      }
-      const mod = checker.getSymbolAtLocation(sf);
-      const exported = mod && checker.getExportsOfModule(mod).some((e) => resolveAlias(e).declarations?.includes(decl));
-      if (!exported) hidden.push({ name, top: true });
-    }
-    return hidden;
+    walk(root);
+    return [...hidden.values()];
   };
   for (const source of program.getSourceFiles()) {
     if (!config.match(source.fileName)) continue;
@@ -160,7 +180,7 @@ function collect(ts, program, config) {
           const text = printer.printNode(ts.EmitHint.Unspecified, typeNode, source).replace(/\r?\n\s*/g, " ");
           const hasAny = (n) => n.kind === ts.SyntaxKind.AnyKeyword || !!ts.forEachChild(n, hasAny);
           // 반환 타입을 적은 정의는 사람이 타입을 정한 것이라 라이브러리 기본 타입 인자의 any 를 허용한다
-          entries.push({ file: posix(source.fileName), key: key.text, text, any: !fn.type && hasAny(typeNode), hidden: hiddenNames(typeNode, fn) });
+          entries.push({ file: posix(source.fileName), key: key.text, text, any: !fn.type && hasAny(typeNode), hidden: hiddenTypes(type, fn) });
         }
       }
       ts.forEachChild(node, visit);
@@ -426,8 +446,10 @@ function writeIfChanged(file, text) {
 // 생성 파일에서 쓸 수 없는 이름을 key 마다 모아 문구로 돌려준다. 없으면 null.
 // collect 가 정의 자리에서 가른 이름(hidden)이 먼저이고, 생성 파일의 「이름을 찾을 수 없다」 진단이 그 밖의 것을 보탠다
 function unexported(ts, program, config, entries) {
-  const byKey = new Map(entries.map((e) => [e, { top: new Set(), local: new Set() }]));
-  for (const e of entries) for (const h of e.hidden ?? []) byKey.get(e)[h.top ? "top" : "local"].add(h.name);
+  const rel = (f) => posix(relative(config.root, f));
+  // top 은 이름 → 선언한 파일(진단으로만 안 이름은 파일을 모른다)
+  const byKey = new Map(entries.map((e) => [e, { top: new Map(), local: new Set() }]));
+  for (const e of entries) for (const h of e.hidden ?? []) h.file ? byKey.get(e).top.set(h.name, rel(h.file)) : byKey.get(e).local.add(h.name);
   const out = posix(config.out).toLowerCase();
   const gen = program.getSourceFiles().find((f) => posix(f.fileName).toLowerCase() === out);
   for (const d of gen ? program.getSemanticDiagnostics(gen) : []) {
@@ -436,14 +458,17 @@ function unexported(ts, program, config, entries) {
     const line = text.slice(text.lastIndexOf("\n", d.start) + 1, text.indexOf("\n", d.start));
     const entry = entries.find((e) => line.startsWith(`    ${JSON.stringify(e.key)}: `));
     const name = text.slice(d.start, d.start + d.length);
-    if (entry && !byKey.get(entry).local.has(name)) byKey.get(entry).top.add(name);
+    if (entry && !byKey.get(entry).local.has(name) && !byKey.get(entry).top.has(name)) byKey.get(entry).top.set(name, undefined);
   }
   const lines = [];
   for (const [e, { top, local }] of byKey) {
-    const at = `${e.key}(${posix(relative(config.root, e.file))})`;
+    const at = `${e.key}(${rel(e.file)})`;
     if (top.size) {
-      const list = [...top].join(", ");
-      lines.push(`${at}: 상태 필드의 타입 ${list} 이 export 되지 않아 생성 파일에서 쓸 수 없다 — ${list} 을 export 한다`);
+      const list = [...top].map(([name, file]) => (file ? `${name}(${file})` : name)).join(", ");
+      const byFile = new Map();
+      for (const [name, file] of top) byFile.set(file, [...(byFile.get(file) ?? []), name]);
+      const fix = [...byFile].map(([file, names]) => (file ? `${file} 에서 ${names.join(", ")}` : names.join(", "))).join(" · ");
+      lines.push(`${at}: 상태 필드의 타입 ${list} 이 export 되지 않아 생성 파일에서 쓸 수 없다 — ${fix} 을 export 한다`);
     }
     if (local.size) lines.push(`${at}: 상태 필드의 타입 ${[...local].join(", ")} 은 최상위에서 export 할 수 있는 타입이 아니다 — 반환 타입을 적거나 최상위 타입으로 옮긴다`);
   }

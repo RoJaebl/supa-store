@@ -716,11 +716,42 @@ createStore("ui.c", () => ({ i: null as I7 | null, d: null as inner.Deep | null 
   assert.deepEqual(genDiagnostics(), []);
 });
 
-const notExported = (names) => (e) => {
-  const list = names.join(", ");
-  assert.equal(e.message, `ui.a(src/a.state.ts): 상태 필드의 타입 ${list} 이 export 되지 않아 생성 파일에서 쓸 수 없다 — ${list} 을 export 한다`);
+const notExported = (names, file = "src/a.state.ts") => (e) => {
+  const list = names.map((n) => `${n}(${file})`).join(", ");
+  assert.equal(e.message, `ui.a(src/a.state.ts): 상태 필드의 타입 ${list} 이 export 되지 않아 생성 파일에서 쓸 수 없다 — ${file} 에서 ${names.join(", ")} 을 export 한다`);
   return true;
 };
+test("다른 모듈의 export 하지 않은 타입이 전역 이름(Response)과 같아도 그 파일을 담아 실패한다", () => {
+  write("src/t.ts", "type Response = { i: 1 };\nexport const make = (): Response => ({ i: 1 });");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import { make } from "./t";
+createStore("ui.a", () => ({ w: make() }));`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notExported(["Response"], "src/t.ts"));
+});
+test("다른 모듈 최상위의 export 하지 않은 타입은 「최상위 아님」이 아니라 그 파일에서 export 하라고 안내한다", () => {
+  write("src/t.ts", "interface Inner { i: 1 }\nexport const make = (): Inner => ({ i: 1 });");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import { make } from "./t";
+createStore("ui.a", () => ({ w: make() }));`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notExported(["Inner"], "src/t.ts"));
+});
+test("export 한 타입의 속에 숨은 타입은 묻지 않고, 순환 타입도 멈춘다", () => {
+  write("src/t.ts", "type Priv = { p: 1 };\nexport interface Shared { p: Priv; self: Shared }\nexport type Tree = { kids: Tree[] };");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { Shared, Tree } from "./t";
+createStore("ui.a", () => ({ s: null as Shared | null, t: null as Tree | null, loop: { n: 1 } as { n: 1; me?: unknown } }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  assert.deepEqual(genDiagnostics(), []);
+});
 test("export 하지 않은 지역 타입을 쓰면 key · 파일 · 이름을 담아 실패하고 생성 파일을 쓰지 않는다", () => {
   write("src/store.gen.ts", "// 앞선 생성본");
   write(
