@@ -755,10 +755,72 @@ createStore("ui.a", () => ({ l: null as Local | null }));`,
   assert.match(read("src/store.gen.ts"), /l: import\("\.\/a\.state"\)\.Local \| null/);
   assert.deepEqual(genDiagnostics(), []);
 });
-test("NodeNext + type: module 에서 resolution-mode 가 붙은 지역 · 패키지 타입도 상대 경로 · 지정자로 찍힌다", () => {
+test("export 하지 않은 지역 타입이 전역 이름(Response)과 같아도 조용히 넘기지 않는다", () => {
+  write("src/store.gen.ts", "// 앞선 생성본");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+type Response = { mine: 1 };
+createStore("ui.a", () => ({ r: null as Response | null }));`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notExported(["Response"]));
+  assert.equal(read("src/store.gen.ts"), "// 앞선 생성본");
+});
+const notTopLevel = (names) => (e) => {
+  assert.equal(
+    e.message,
+    `ui.a(src/a.state.ts): 상태 필드의 타입 ${names.join(", ")} 은 최상위에서 export 할 수 있는 타입이 아니다 — 반환 타입을 적거나 최상위 타입으로 옮긴다`,
+  );
+  return true;
+};
+test("함수 안의 지역 타입은 export 로 풀 수 없다는 문구로 실패한다", () => {
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+function make() {
+  type Inner = { i: 1 };
+  createStore("ui.a", () => ({ v: null as Inner | null }));
+}
+make();`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notTopLevel(["Inner"]));
+});
+test("타입 매개변수도 export 로 풀 수 없다는 문구로 실패하고, 상태 타입 안에서 묶인 매개변수는 넘긴다", () => {
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+export function make<T>() {
+  createStore("ui.a", () => ({ v: null as T | null, pick: <U>(u: U) => u }));
+}`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notTopLevel(["T"]));
+});
+const nodeNextEsm = () => {
   write("package.json", JSON.stringify({ type: "module" }));
   write("tsconfig.json", JSON.stringify({ compilerOptions: { ...COMPILER, module: "NodeNext", moduleResolution: "NodeNext", paths: undefined }, include: ["src"] }));
   installed("node_modules/supa-store");
+};
+test("NodeNext ESM 에서 .cts · 이름이 js 로 끝나는 파일의 타입도 확장자를 붙이고 머리 import 에도 .js 가 붙는다", () => {
+  nodeNextEsm();
+  write("src/c.cts", "export type C = { c: 1 };");
+  write("src/fromjs.ts", "export type F = { f: 1 };");
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import type { C } from "./c.cjs";
+import type { F } from "./fromjs.js";
+createStore("ui.a", () => ({ c: null as C | null, f: null as F | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /^import "\.\/a\.state\.js";$/m);
+  assert.match(out, /c: import\("\.\/c\.cjs"(?:, \{[^()]*\})?\)\.C \| null/);
+  assert.match(out, /f: import\("\.\/fromjs\.js"(?:, \{[^()]*\})?\)\.F \| null/);
+  assert.doesNotMatch(out, NO_PATH);
+  assert.deepEqual(genDiagnostics(), []);
+});
+test("NodeNext + type: module 에서 resolution-mode 가 붙은 지역 · 패키지 타입도 상대 경로 · 지정자로 찍힌다", () => {
+  nodeNextEsm();
   write("node_modules/@fake/lib/package.json", JSON.stringify({ name: "@fake/lib", exports: { ".": { types: "./index.d.ts" } } }));
   write("node_modules/@fake/lib/index.d.ts", `export type Root = { r: 1 };\nexport type { Hidden } from "./lib/hidden.js";`);
   write("node_modules/@fake/lib/lib/hidden.d.ts", "export type Hidden = { h: 1 };");

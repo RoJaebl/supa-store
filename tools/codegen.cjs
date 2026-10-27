@@ -94,6 +94,48 @@ function collect(ts, program, config) {
     typeof checker.isArrayType === "function" && typeof checker.isTupleType === "function" && (checker.isArrayType(t) || checker.isTupleType(t));
   // 함수인가 — 조건 무효화(invalidate(fn))와 헷갈린다
   const isFnType = (t) => t.getCallSignatures().length > 0;
+  // 생성 파일에서 풀리지 않을 이름 — 글자로 옮긴 타입에 맨 이름으로 남은 것을 정의 자리(at)의 범위에서 찾아 가른다.
+  // 같은 이름의 전역(DOM 의 Response 등)이 있어도 정의 파일의 것을 본다. top 이 false 면 export 로 풀 수 없다
+  const userFile = (sf) => !program.isSourceFileDefaultLibrary(sf) && !program.isSourceFileFromExternalLibrary(sf) && !/\/node_modules\//.test(posix(sf.fileName));
+  const resolveAlias = (sym) => (sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym);
+  const hiddenNames = (typeNode, at) => {
+    const bound = new Set();
+    const refs = new Set();
+    const walk = (n) => {
+      if (ts.isTypeParameterDeclaration(n)) bound.add(n.name.text);
+      if (ts.isTypeReferenceNode(n)) {
+        let q = n.typeName;
+        while (ts.isQualifiedName(q)) q = q.left;
+        refs.add(q.text);
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(typeNode);
+    const scope = new Map();
+    for (const sym of checker.getSymbolsInScope(at, ts.SymbolFlags.Type | ts.SymbolFlags.Namespace)) if (!scope.has(sym.name)) scope.set(sym.name, sym);
+    const hidden = [];
+    for (const name of refs) {
+      if (bound.has(name)) continue;
+      const found = scope.get(name);
+      const sym = found && resolveAlias(found);
+      if (!sym || sym.flags & ts.SymbolFlags.TypeParameter) {
+        hidden.push({ name, top: false });
+        continue;
+      }
+      const decl = sym.declarations?.[0];
+      const sf = decl?.getSourceFile();
+      // lib · 패키지 · 전역 스크립트 · declare global 안의 것은 생성 파일에서도 같은 이름으로 풀린다
+      if (!sf || !userFile(sf) || !ts.isExternalModule(sf) || ts.findAncestor(decl, (n) => ts.isModuleDeclaration(n) && ts.isGlobalScopeAugmentation(n))) continue;
+      if (decl.parent !== sf) {
+        hidden.push({ name, top: false });
+        continue;
+      }
+      const mod = checker.getSymbolAtLocation(sf);
+      const exported = mod && checker.getExportsOfModule(mod).some((e) => resolveAlias(e).declarations?.includes(decl));
+      if (!exported) hidden.push({ name, top: true });
+    }
+    return hidden;
+  };
   for (const source of program.getSourceFiles()) {
     if (!config.match(source.fileName)) continue;
     // 문법이 깨진 정의는 반환 타입이 any 로 무너진다 — 그것을 쓰면 타입 검사가 조용히 꺼지므로 아예 짓지 않는다
@@ -118,7 +160,7 @@ function collect(ts, program, config) {
           const text = printer.printNode(ts.EmitHint.Unspecified, typeNode, source).replace(/\r?\n\s*/g, " ");
           const hasAny = (n) => n.kind === ts.SyntaxKind.AnyKeyword || !!ts.forEachChild(n, hasAny);
           // 반환 타입을 적은 정의는 사람이 타입을 정한 것이라 라이브러리 기본 타입 인자의 any 를 허용한다
-          entries.push({ file: posix(source.fileName), key: key.text, text, any: !fn.type && hasAny(typeNode) });
+          entries.push({ file: posix(source.fileName), key: key.text, text, any: !fn.type && hasAny(typeNode), hidden: hiddenNames(typeNode, fn) });
         }
       }
       ts.forEachChild(node, visit);
@@ -132,10 +174,10 @@ function collect(ts, program, config) {
   return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
-// ESM 으로 푸는 상대 경로는 확장자가 있어야 한다 — 실제 파일을 찾아 그 JS 확장자를 붙인다. 못 찾으면 그대로 둔다
+// 상대 경로에 실제 파일을 찾아 그 JS 확장자를 붙인다. 못 찾으면 그대로 둔다
 const JS_EXT = [[".ts", ".js"], [".tsx", ".js"], [".d.ts", ".js"], [".mts", ".mjs"], [".d.mts", ".mjs"], [".cts", ".cjs"], [".d.cts", ".cjs"]];
 const withJsExt = (spec) => {
-  if (/.[cm]?jsx?$/.test(spec)) return spec;
+  if (/\.[cm]?jsx?$/.test(spec)) return spec;
   const hit = JS_EXT.find(([ts]) => existsSync(spec + ts));
   return hit ? spec + hit[1] : spec;
 };
@@ -338,14 +380,23 @@ function packageImport(ts, config, spec, name) {
   return viaNs;
 }
 
-function render(entries, config, ts) {
+// 생성 파일이 Node16 · NodeNext 의 ESM 이면 상대 경로에 확장자가 있어야 한다
+function esmOut(ts, program, config) {
+  const out = posix(config.out).toLowerCase();
+  const sf = program.getSourceFiles().find((f) => posix(f.fileName).toLowerCase() === out);
+  const options = program.getCompilerOptions();
+  const kind = ts.getEmitModuleResolutionKind?.(options) ?? options.moduleResolution;
+  return !!sf && sf.impliedNodeFormat === ts.ModuleKind.ESNext && (kind === ts.ModuleResolutionKind.Node16 || kind === ts.ModuleResolutionKind.NodeNext);
+}
+
+function render(entries, config, ts, esm = false) {
   const files = [...new Set(entries.map((e) => e.file))];
   const types = entries.map((e) => {
     // NodeNext 는 둘째 인자(import("…", { with: { "resolution-mode": "import" } }))를 붙인다 — 경로만 바꾸고 그것은 그대로 둔다
     const text = e.text.replace(/import\("([^"]+)"(,\s*\{[^()]*\})?\)(\.([A-Za-z_$][\w$]*))?/g, (whole, spec, attrs = "", dot, name) => {
       if (!/^(?:[A-Za-z]:)?\//.test(spec)) return whole;
       const hit = packageImport((ts ??= requireTypeScript(config.root)), config, spec, name);
-      if (hit === null) return `import("${relativeFromOut(config, /"import"/.test(attrs) ? withJsExt(spec) : spec)}"${attrs})${dot ?? ""}`;
+      if (hit === null) return `import("${relativeFromOut(config, esm ? withJsExt(spec) : spec)}"${attrs})${dot ?? ""}`;
       if (hit === undefined) throw new Error(`${e.key}(${e.file}): ${name ?? "(이름 없음)"} 을 내보내는 패키지 진입이 없다(export * as 사슬은 3단까지 따라간다) — ${spec}`);
       return `import("${hit.spec}"${attrs})${hit.name ? `.${hit.name}` : ""}`;
     });
@@ -354,7 +405,7 @@ function render(entries, config, ts) {
   return [
     "// 자동 생성 — supa-store 가 쓴다. 고치지 않는다",
     "export {};",
-    ...files.map((f) => `import "${relativeFromOut(config, f).replace(/\.ts$/, "")}";`),
+    ...files.map((f) => `import "${esm ? relativeFromOut(config, f).replace(/\.([cm]?)tsx?$/, ".$1js") : relativeFromOut(config, f).replace(/\.ts$/, "")}";`),
     "",
     'declare module "supa-store" {',
     "  interface StateTypes {",
@@ -370,6 +421,33 @@ function writeIfChanged(file, text) {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, text);
   return true;
+}
+
+// 생성 파일에서 쓸 수 없는 이름을 key 마다 모아 문구로 돌려준다. 없으면 null.
+// collect 가 정의 자리에서 가른 이름(hidden)이 먼저이고, 생성 파일의 「이름을 찾을 수 없다」 진단이 그 밖의 것을 보탠다
+function unexported(ts, program, config, entries) {
+  const byKey = new Map(entries.map((e) => [e, { top: new Set(), local: new Set() }]));
+  for (const e of entries) for (const h of e.hidden ?? []) byKey.get(e)[h.top ? "top" : "local"].add(h.name);
+  const out = posix(config.out).toLowerCase();
+  const gen = program.getSourceFiles().find((f) => posix(f.fileName).toLowerCase() === out);
+  for (const d of gen ? program.getSemanticDiagnostics(gen) : []) {
+    if (!NAME_NOT_FOUND.has(d.code) || d.start === undefined) continue;
+    const text = gen.text;
+    const line = text.slice(text.lastIndexOf("\n", d.start) + 1, text.indexOf("\n", d.start));
+    const entry = entries.find((e) => line.startsWith(`    ${JSON.stringify(e.key)}: `));
+    const name = text.slice(d.start, d.start + d.length);
+    if (entry && !byKey.get(entry).local.has(name)) byKey.get(entry).top.add(name);
+  }
+  const lines = [];
+  for (const [e, { top, local }] of byKey) {
+    const at = `${e.key}(${posix(relative(config.root, e.file))})`;
+    if (top.size) {
+      const list = [...top].join(", ");
+      lines.push(`${at}: 상태 필드의 타입 ${list} 이 export 되지 않아 생성 파일에서 쓸 수 없다 — ${list} 을 export 한다`);
+    }
+    if (local.size) lines.push(`${at}: 상태 필드의 타입 ${[...local].join(", ")} 은 최상위에서 export 할 수 있는 타입이 아니다 — 반환 타입을 적거나 최상위 타입으로 옮긴다`);
+  }
+  return lines.length ? lines.join("\n") : null;
 }
 
 function generate(ts, config) {
@@ -409,30 +487,13 @@ function generate(ts, config) {
   for (let round = 0; round < MAX_ROUNDS; round++) {
     program = ts.createProgram({ rootNames, options, host, oldProgram: program });
     const entries = collect(ts, program, config);
-    const next = render(entries, config, ts);
+    const next = render(entries, config, ts, esmOut(ts, program, config));
     if (next === text) {
-      // 생성 파일에서 이름을 찾지 못하면(export 하지 않은 지역 타입) 그 줄의 key 로 모아 멈춘다 — 반환 타입을 적은 정의도 막는다
-      const missing = new Map();
-      for (const d of program.getSemanticDiagnostics(program.getSourceFiles().find((f) => same(f.fileName) === out))) {
-        if (!NAME_NOT_FOUND.has(d.code) || d.start === undefined) continue;
-        const line = text.slice(text.lastIndexOf("\n", d.start) + 1, text.indexOf("\n", d.start));
-        const entry = entries.find((e) => line.startsWith(`    ${JSON.stringify(e.key)}: `));
-        if (!entry) continue;
-        if (!missing.has(entry)) missing.set(entry, new Set());
-        missing.get(entry).add(text.slice(d.start, d.start + d.length));
-      }
-      if (missing.size)
-        throw new Error(
-          [...missing]
-            .map(([e, names]) => {
-              const list = [...names].join(", ");
-              return `${e.key}(${posix(relative(config.root, e.file))}): 상태 필드의 타입 ${list} 이 export 되지 않아 생성 파일에서 쓸 수 없다 — ${list} 을 export 한다`;
-            })
-            .join("\n"),
-        );
+      const hidden = unexported(ts, program, config, entries);
+      if (hidden) throw new Error(hidden);
       const bad = entries.find((e) => e.any);
       // 고정점에도 any 가 남으면 그 key 의 타입 검사가 조용히 꺼진다 — 쓰지 않고 반환 타입을 적게 한다
-      if (bad) throw new Error(`${bad.key}(${bad.file}) 의 타입에 any 가 남는다 — 반환 타입을 적는다`);
+      if (bad) throw new Error(`${bad.key}(${posix(relative(config.root, bad.file))}) 의 타입에 any 가 남는다 — 반환 타입을 적는다`);
       return writeIfChanged(config.out, text);
     }
     text = next;
@@ -440,4 +501,4 @@ function generate(ts, config) {
   throw new Error(`생성 결과가 ${MAX_ROUNDS} 번 돌아도 멈추지 않는다 — 정의의 반환 타입을 적는다`);
 }
 
-module.exports = { loadConfig, collect, render, generate, writeIfChanged, requireTypeScript };
+module.exports = { loadConfig, collect, render, generate, writeIfChanged, requireTypeScript, esmOut, unexported };
