@@ -110,23 +110,35 @@ function collect(ts, program, config) {
     const name = decl.name.text;
     // lib · 패키지 · 전역 스크립트 · declare global 안의 것은 생성 파일에서도 같은 이름으로 풀린다
     if (!userFile(sf) || !ts.isExternalModule(sf) || ts.findAncestor(decl, (n) => ts.isModuleDeclaration(n) && ts.isGlobalScopeAugmentation(n))) return null;
-    if (decl.parent !== sf) return { name };
+    // 최상위 namespace 안의 것은 그 namespace 로 올려 가른다 — 안쪽 사슬이 모두 export 이면 N.X 로 풀린다
+    const ns = ts.findAncestor(decl.parent, (n) => ts.isModuleDeclaration(n) && n.parent === sf);
+    if (ns) {
+      const chain = [];
+      for (let n = decl; n !== ns; n = n.parent) if (n === decl || ts.isModuleDeclaration(n)) chain.push(n);
+      if (!chain.every((n) => ts.getCombinedModifierFlags(n) & ts.ModifierFlags.Export)) return { name };
+      decl = ns;
+    } else if (decl.parent !== sf) return { name };
     const mod = checker.getSymbolAtLocation(sf);
     const exported = mod && checker.getExportsOfModule(mod).some((e) => resolveAlias(e).declarations?.includes(decl));
-    return exported ? null : { name, file: posix(sf.fileName) };
+    return exported ? null : { name: decl.name.text, file: posix(sf.fileName) };
   };
   const typeOfSymbol = (sym, at) => (checker.getTypeOfSymbol ? checker.getTypeOfSymbol(sym) : checker.getTypeOfSymbolAtLocation(sym, at));
   const hiddenTypes = (root, at) => {
     const hidden = new Map();
     const seen = new Set();
+    // 찍힌 타입 안에서 스스로 묶이는 매개변수 — 시그니처의 <T> 는 따라갈 때 모은다
+    const bound = new Set();
+    const BINDERS = new Set([ts.SyntaxKind.MappedType, ts.SyntaxKind.InferType]);
     const add = (h) => hidden.set(`${h.name}\0${h.file ?? ""}`, h);
     const walk = (t) => {
       if (!t || seen.has(t)) return;
       seen.add(t);
       if (t.flags & ts.TypeFlags.TypeParameter) {
-        // 정의 함수 안에서 묶인 매개변수(<U>(u: U) => U · 매핑 타입의 K)와 this 는 그대로 찍혀도 풀린다
+        // 시그니처 · 매핑 타입 · infer 가 묶은 것, 정의 함수 안에서 선언된 것, this 는 그대로 찍혀도 풀린다.
+        // 남는 것은 정의를 감싸는 바깥 함수 · 클래스의 매개변수다
         const decl = t.symbol?.declarations?.[0];
-        if (t.isThisType || (decl && decl.getSourceFile() === at.getSourceFile() && decl.pos >= at.pos && decl.end <= at.end)) return;
+        if (t.isThisType || bound.has(t) || (decl && BINDERS.has(decl.parent?.kind))) return;
+        if (decl && decl.getSourceFile() === at.getSourceFile() && decl.pos >= at.pos && decl.end <= at.end) return;
         if (t.symbol) add({ name: t.symbol.name });
         return;
       }
@@ -148,6 +160,9 @@ function collect(ts, program, config) {
       if (!(t.flags & ts.TypeFlags.Object)) return;
       for (const p of checker.getPropertiesOfType(t)) walk(typeOfSymbol(p, at));
       for (const sig of [...t.getCallSignatures(), ...t.getConstructSignatures()]) {
+        const params = sig.getTypeParameters() ?? [];
+        for (const tp of params) bound.add(tp);
+        for (const tp of params) walk(tp.getConstraint());
         for (const p of sig.parameters) walk(typeOfSymbol(p, at));
         walk(checker.getReturnTypeOfSignature(sig));
       }

@@ -741,6 +741,44 @@ createStore("ui.a", () => ({ w: make() }));`,
   );
   assert.throws(() => generate(ts, loadConfig(ts, root)), notExported(["Inner"], "src/t.ts"));
 });
+test("시그니처가 스스로 묶은 타입 매개변수는 묻지 않는다", () => {
+  write(
+    "src/t.ts",
+    `export function pick<T>(x: T): T { return x; }
+export function makeApi() { return { get<K extends string>(k: K) { return { k }; } }; }`,
+  );
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+import { pick, makeApi } from "./t";
+createStore("ui.a", () => ({ pick, api: makeApi(), keys: null as { [P in "a" | "b"]: P } | null }));`,
+  );
+  generate(ts, loadConfig(ts, root));
+  const out = read("src/store.gen.ts");
+  assert.match(out, /pick: <T>\(x: T\) => T;/);
+  assert.match(out, /get<K extends string>\(k: K\)/);
+  assert.deepEqual(genDiagnostics(), []);
+});
+test("lib 의 제네릭 함수(Array.from · structuredClone)를 담으면 타입 매개변수가 아니라 any 로 멈춘다", () => {
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+createStore("ui.a", () => ({ from: Array.from, clone: structuredClone }));`,
+  );
+  assert.throws(
+    () => generate(ts, loadConfig(ts, root)),
+    (e) => /ui\.a\(src\/a\.state\.ts\) 의 타입에 any 가 남는다/.test(e.message) && !/최상위/.test(e.message),
+  );
+});
+test("export 하지 않은 namespace 안의 타입은 그 namespace 하나로 알린다", () => {
+  write(
+    "src/a.state.ts",
+    `import { createStore } from "supa-store";
+namespace N { export type X = { x: 1 }; }
+createStore("ui.a", () => ({ x: null as N.X | null }));`,
+  );
+  assert.throws(() => generate(ts, loadConfig(ts, root)), notExported(["N"]));
+});
 test("export 한 타입의 속에 숨은 타입은 묻지 않고, 순환 타입도 멈춘다", () => {
   write("src/t.ts", "type Priv = { p: 1 };\nexport interface Shared { p: Priv; self: Shared }\nexport type Tree = { kids: Tree[] };");
   write(
