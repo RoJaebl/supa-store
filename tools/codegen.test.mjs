@@ -42,6 +42,22 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
+test("소스 캐시를 넘기면 바뀌지 않은 파일은 다시 쓰고 바뀐 파일은 다시 읽는다", () => {
+  write("src/shape.ts", "export interface Shape { n: number }");
+  write("src/a.state.ts", `import { createStore } from "supa-store";\nimport type { Shape } from "./shape";\ncreateStore("a", (): Shape => ({ n: 0 }));`);
+  const config = loadConfig(ts, root);
+  const sources = new Map();
+  generate(ts, config, sources);
+  assert.match(read("src/store.gen.ts"), /"a": Shape|"a": import/);
+  const lib = [...sources].find(([id]) => /lib\.es\d+.*\.d\.ts/.test(id));
+  assert.ok(lib, "lib 파일이 캐시에 들지 않았다");
+  write("src/shape.ts", "export interface Shape { s: string; longer: boolean }");
+  generate(ts, config, sources);
+  assert.equal(sources.get(lib[0]).sf, lib[1].sf, "바뀌지 않은 lib 파일을 다시 파싱했다");
+  const shape = [...sources].find(([id]) => id.includes("shape.ts"))[1].sf;
+  assert.match(shape.text, /longer: boolean/, "바뀐 파일을 다시 읽지 않았다");
+});
+
 test("config 파일이 없으면 기본값을 쓴다", () => {
   const config = loadConfig(ts, root);
   assert.equal(config.out, `${posix(root)}/src/store.gen.ts`);
