@@ -100,7 +100,8 @@ const many = useStore("api.file.dirLevel", { args: dirs.map((dir) => ({ repo, di
 
 `Cache`(`getData` · `invalidate` · `fetch` · `setData`)도 배열을 받는다. `invalidate([])` 는 아무것도 하지 않고, `invalidate()` 는 받아 둔 것 모두를, `invalidate((a) => a.repo === "A")` 는 참인 칸을 고른다.
 고른 칸 가운데 화면이 보는 칸만 곧바로 다시 받고(`await` 는 이것만 기다린다), 보지 않는 칸은 값을 두고 낡음만 표시한다 — 화면이 다시 보거나 `fetch` 하면 그때 받고, `getData` 는 쥔 값을 준다.
-그래서 query 의 args 는 함수로 짓지 않는다(생성기가 막는다).
+그래서 query 의 args 는 함수로 짓지 않는다(생성기가 막는다). 받는 중인 칸은 보지 않아도 곧바로 다시 받는다.
+앞 판에서 옮길 때: 화면 없이 새 값이 필요하면 `invalidate` 뒤 `getData` 가 아니라 `fetch` 를 쓴다 — 보지 않는 칸은 무효화가 곧바로 다시 받지 않는다.
 `fetch` 목록은 하나라도 실패하면 그 오류로 거절한다.
 
 **자원의 `args` 는 배열이나 튜플 타입으로 짓지 않는다** — 생성기가 실패시킨다. 맨 배열을 목록으로 읽기 때문이다. 여러 값은 객체로 묶는다.

@@ -293,6 +293,8 @@ it("무효화: 조건으로 고른 칸만 — 보는 것은 곧바로, 보지 �
   await flush();
   await r.fetch(a2);
   await r.fetch(b1);
+  // idle 칸에는 조건을 부르지 않는다
+  r.setData(undefined, { repo: "A", path: "3" });
   query.mockClear();
   const pick = vi.fn((a: Args) => a.repo === "A");
   await act(() => r.invalidate(pick));
@@ -310,21 +312,36 @@ it("무효화: 목록 꼴로 보는 칸은 칸마다 보는 것이라 모두 곧
   act(() => void state(key).invalidate());
   expect(q.calls.slice(2).map((c) => c.args)).toEqual([{ id: 1 }, { id: 2 }]);
 });
-it("무효화: 낡은 칸을 다시 볼 때 이미 받는 중이면 요청을 더 보내지 않는다", async () => {
+it("무효화: 보지 않는 칸이라도 받는 중이면 곧바로 다시 받고, 다시 보는 화면은 그 요청을 나눠 쓴다", async () => {
   const q = controlled<number>();
   const key = define(() => createResource(() => ({ query: () => q.fn() })));
   const first = renderHook(() => view(key));
   await act(async () => q.calls[0]!.d.resolve(1));
   act(() => void first.result.current.refetch());
   first.unmount();
-  // 보지 않는 동안 무효화 — 받는 중인 요청은 무효화 앞에 떠났다
-  await act(() => state(key).invalidate());
-  expect(q.fn).toHaveBeenCalledTimes(2);
+  // 무효화 앞에 떠난 요청은 버리고 새로 받는다
+  act(() => void state(key).invalidate());
+  expect(q.fn).toHaveBeenCalledTimes(3);
   const { result } = renderHook(() => view(key));
-  expect(q.fn).toHaveBeenCalledTimes(2);
+  expect(q.fn).toHaveBeenCalledTimes(3);
   expect(result.current.isFetching).toBe(true);
-  await act(async () => q.calls[1]!.d.resolve(2));
+  await act(async () => q.calls[1]!.d.resolve(-1));
+  expect(result.current).toMatchObject({ data: 1, isFetching: true });
+  await act(async () => q.calls[2]!.d.resolve(2));
   expect(result.current).toMatchObject({ data: 2, isFetching: false });
+});
+it("무효화: 화면 없이 fetch() 를 띄운 채 invalidate() 하면 그 뒤 값은 새 값이다", async () => {
+  const q = controlled<number>();
+  const key = define(() => createResource(() => ({ query: () => q.fn() })));
+  // fortuna 의 picks 꼴 — 처음 받는 중에 값이 없으면 무효화하고 기다린다
+  const pending = state(key).fetch();
+  const done = state(key).invalidate();
+  expect(q.fn).toHaveBeenCalledTimes(2);
+  q.calls[0]!.d.resolve(1);
+  q.calls[1]!.d.resolve(2);
+  await done;
+  expect(state(key).getData()).toBe(2);
+  expect(await pending).toBe(2);
 });
 it("조회: fetch(args) 는 이미 받은 칸이면 다시 받지 않고 값을 준다", async () => {
   const query = vi.fn(async (id: string) => id.toLowerCase());
@@ -336,7 +353,9 @@ it("조회: fetch(args) 는 이미 받은 칸이면 다시 받지 않고 값을 
 
 it("조회: 다시 받는 중에 fetch 하면 앞 값이 아니라 새 값을 기다려 준다", async () => {
   const q = controlled<number>();
-  const key = define(() => createResource(() => ({ query: () => q.fn() })));
+  const key = define(() => createResource(() => ({ query: () => q.fn() }), { auto: false }));
+  // 보는 칸이라 invalidate 가 곧바로 다시 받는다
+  renderHook(() => view(key));
   const first = state(key).fetch();
   q.calls[0]!.d.resolve(1);
   expect(await first).toBe(1);

@@ -49,7 +49,7 @@ export interface Cache<A, D> {
   /** args 하나면 값 하나, 배열이면 같은 순서의 값 배열 */
   getData(args?: A): D | undefined;
   getData(args: readonly A[]): (D | undefined)[];
-  /** 응답이 실어 온 값으로 바로 고친다 — 다시 받지 않는다. 배열이면 args 마다 updater 를 부른다. undefined 면 그 칸을 비워 idle 로 */
+  /** 응답이 실어 온 값으로 바로 고친다 — 다시 받지 않는다. 배열이면 args 마다 updater 를 부른다. undefined 면 그 칸을 비워 idle 로. 낡음은 끄지 않는다 */
   setData(updater: D | undefined | ((prev: D | undefined, args: A) => D | undefined), args?: A | readonly A[]): void;
   /**
    * 무효화한다 — args 를 주면 그 칸만(배열이면 그 칸들만, 빈 배열은 아무것도 안 함), 함수면 참인 칸, 없으면 받아 둔 칸 모두.
@@ -197,7 +197,7 @@ export function createResource<A = void, D = never, R extends object = object, S
     load: (args) => load(args),
     idOf,
     inflight: (args) => cells.get(idOf(args))?.inflight,
-    // 낡은 칸을 다시 보면 받는다 — 받는 중이면 그것을 나눠 쓴다
+    // 낡은 칸을 다시 보면 받는다 — 그사이 fetch 가 받는 중이면 그것을 나눠 쓴다
     onWatch(args) {
       const cell = cells.get(idOf(args));
       if (!cell?.stale) return;
@@ -262,10 +262,11 @@ export function createResource<A = void, D = never, R extends object = object, S
     // 값을 비우면(받은 적 없는 목록으로 되돌리기) 처음으로 돌린다 — 버린 응답 탓에 loading 에 갇히지 않고 다음에 다시 받는다
     write(cell, { data, status: data === undefined ? "idle" : "ready", error: null });
   };
-  // 보는 칸만 곧바로 다시 받고, 보지 않는 칸은 낡음만 표시한다
+  // 보는 칸만 곧바로 다시 받고, 보지 않는 칸은 낡음만 표시한다. 받는 중인 칸은 보지 않아도 다시 받는다 —
+  // 무효화 앞에 떠난 응답을 뒤 fetch · 다시 보는 화면이 받지 않게. 그래서 낡은 칸에는 앞서 떠난 요청이 없다
   const reload = (cell: Cell<A, D>) => {
     if (cell.view.status === "idle") return;
-    if (refetcher.watching(cell.args as A)) return load(cell.args, true).catch(noop);
+    if (cell.inflight || refetcher.watching(cell.args as A)) return load(cell.args, true).catch(noop);
     cell.stale = true;
   };
   const fetchOne = (args: A | undefined) => {
@@ -278,7 +279,7 @@ export function createResource<A = void, D = never, R extends object = object, S
         (e) => (cell.inflight ? wait(cell.inflight) : Promise.reject(e)),
       );
     if (cell.inflight) return wait(cell.inflight);
-    return cell.view.status === "ready" && !cell.stale ? Promise.resolve(cell.view.data as D) : load(args);
+    return cell.view.status === "ready" && !cell.stale ? Promise.resolve(cell.view.data as D) : wait(load(args));
   };
 
   const cache = {
