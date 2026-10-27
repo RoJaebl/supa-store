@@ -105,7 +105,7 @@ const many = useStore("api.file.dirLevel", { args: dirs.map((dir) => ({ repo, di
 
 **조건 무효화.** `invalidate((a) => a.repo === "A")` 는 받아 둔 칸마다 조건을 불러 참인 칸을 고른다. 범위 규칙은 위와 같다. 그래서 query 의 args 는 함수로 짓지 않는다(생성기가 막는다).
 
-**놓기(`release`).** `createResource(define, { release: 0 })` 은 그 args 를 보던 마지막 화면이 빠지면 칸을 놓고, `release: 5 * 60_000` 은 5분 뒤 놓는다. 그사이 화면이 다시 보면 놓지 않는다. 놓을 때 진행 중인 요청의 응답은 버리고, 놓은 뒤 다시 보면 `loading` 부터 받는다. 화면이 아닌 읽기(`getData` · `fetch`)는 보는 것으로 세지 않는다 — 화면 없이 `fetch` 로 받은 칸은 받기가 끝난 때부터 센다. 생략하거나 `false` 면 놓지 않는다.
+**놓기(`release`).** `createResource(define, { release: 0 })` 은 그 args 를 보던 마지막 화면이 빠지면 칸을 놓고, `release: 5 * 60_000` 은 5분 뒤 놓는다. 그사이 화면이 다시 보면 놓지 않는다. 놓을 때 진행 중인 요청의 응답은 버리고, 놓은 뒤 다시 보면 `loading` 부터 받는다. 화면이 아닌 읽기(`getData` · `fetch`)는 보는 것으로 세지 않는다 — 화면 없이 `fetch` 로 받은 칸은 받기가 끝난 때부터 센다. 생략하거나 `false` 면 놓지 않는다. `release: 0` 은 같은 차례가 아니라 다음 차례에 놓는다 — 같은 args 를 곧바로 다시 거는 렌더(StrictMode 의 두 번 돌기 같은 것)에서 놓았다가 처음부터 다시 받지 않게. `setData` 로만 채운 칸도 보는 화면이 없으면 그때부터 센다.
 
 **자원의 `args` 는 배열이나 튜플 타입으로 짓지 않는다** — 생성기가 실패시킨다. 맨 배열을 목록으로 읽기 때문이다. 여러 값은 객체로 묶는다.
 

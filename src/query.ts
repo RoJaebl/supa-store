@@ -200,18 +200,24 @@ export function createResource<A = void, D = never, R extends object = object, S
   const letGo = (id: string) => {
     if (typeof release !== "number") return;
     clearTimeout(timers.get(id));
-    timers.set(
-      id,
-      setTimeout(() => {
-        timers.delete(id);
-        const cell = cells.get(id);
-        if (!cell || refetcher.watching(cell.args as A)) return;
-        cells.delete(id);
-        // 진행 중 응답은 떨어진 칸에 닿으므로 버려진다 — 주기에도 알리지 않는다
-        cell.seq += 1;
-        cell.inflight = undefined;
-      }, release),
-    );
+    const timer = setTimeout(() => {
+      timers.delete(id);
+      const cell = cells.get(id);
+      if (!cell || refetcher.watching(cell.args as A)) return;
+      cells.delete(id);
+      // 진행 중 응답은 떨어진 칸에 닿으므로 버려진다 — 주기에도 알리지 않는다. 다시 보면 처음 간격부터
+      cell.seq += 1;
+      cell.inflight = undefined;
+      refetcher.forget(cell.args as A);
+    }, release);
+    // 서버에서 fetch 로 받은 칸의 타이머가 프로세스를 붙잡지 않게
+    (timer as { unref?: () => void }).unref?.();
+    timers.set(id, timer);
+  };
+  /** 화면도 타이머도 없는 살아 있는 칸이면 지금부터 센다 — 받기가 끝났을 때 · setData 했을 때 */
+  const countIfLoose = (cell: Cell<A, D>) => {
+    const id = idOf(cell.args);
+    if (cells.get(id) === cell && !timers.has(id) && !refetcher.watching(cell.args as A)) letGo(id);
   };
   const refetcher = createRefetcher<A>({
     resource: options.refetchInterval,
@@ -262,8 +268,7 @@ export function createResource<A = void, D = never, R extends object = object, S
       if (Object.keys(next).length) write(cell, next);
       if (last) refetcher.settled(args as A, ok);
       // 화면 없이 받은 칸은 받기가 끝난 때부터 센다 — 이미 세는 중이면 그대로
-      const id = idOf(args);
-      if (last && cells.get(id) === cell && !timers.has(id) && !refetcher.watching(args as A)) letGo(id);
+      if (last) countIfLoose(cell);
     };
     const request: Promise<D> = new Promise<D>((resolve) => resolve(query!.call(defined, args as A))).then(
       (data) => {
@@ -289,6 +294,8 @@ export function createResource<A = void, D = never, R extends object = object, S
     cell.seq += 1;
     // 값을 비우면(받은 적 없는 목록으로 되돌리기) 처음으로 돌린다 — 버린 응답 탓에 loading 에 갇히지 않고 다음에 다시 받는다
     write(cell, { data, status: data === undefined ? "idle" : "ready", error: null });
+    // setData 로만 만든 칸도 놓인다
+    countIfLoose(cell);
   };
   // 보는 칸만 곧바로 다시 받고, 보지 않는 칸은 낡음만 표시한다. 받는 중인 칸은 보지 않아도 다시 받는다 —
   // 무효화 앞에 떠난 응답을 뒤 fetch · 다시 보는 화면이 받지 않게. 그래서 낡은 칸에는 앞서 떠난 요청이 없다
@@ -300,11 +307,12 @@ export function createResource<A = void, D = never, R extends object = object, S
   const fetchOne = (args: A | undefined) => {
     const cell = cellOf(args);
     // 받는 중이면 끝을 기다려 칸의 값을 준다 — invalidate 뒤 체인이 앞 값을 받지 않게. 그사이 setData 한 값이면 그것이다.
-    // 기다리던 요청을 다른 요청이 밀어냈으면 그것을 다시 기다리고, 그사이 칸을 비웠으면 받은 응답을 준다
+    // 기다리던 요청을 다른 요청이 밀어냈으면 그것을 다시 기다리고, 그사이 칸을 비웠거나 놓았으면 받은 응답을 준다
+    const gone = () => cells.get(idOf(args)) !== cell;
     const wait = (p: Promise<D>): Promise<D> =>
       p.then(
-        (d) => (cell.inflight ? wait(cell.inflight) : cell.view.data === undefined ? d : (cell.view.data as D)),
-        (e) => (cell.inflight ? wait(cell.inflight) : Promise.reject(e)),
+        (d) => (gone() ? d : cell.inflight ? wait(cell.inflight) : cell.view.data === undefined ? d : (cell.view.data as D)),
+        (e) => (!gone() && cell.inflight ? wait(cell.inflight) : Promise.reject(e)),
       );
     if (cell.inflight) return wait(cell.inflight);
     return cell.view.status === "ready" && !cell.stale ? Promise.resolve(cell.view.data as D) : wait(load(args));
@@ -323,7 +331,8 @@ export function createResource<A = void, D = never, R extends object = object, S
           ? [...cells.values()]
           : typeof args === "function"
             ? [...cells.values()].filter((c) => c.view.status !== "idle" && (args as (a: A) => boolean)(c.args as A))
-            : (Array.isArray(args) ? args : [args]).map((a) => cellOf(a));
+            : // 받은 적 없는 args 의 칸은 만들지 않는다
+              (Array.isArray(args) ? args : [args]).flatMap((a) => cells.get(idOf(a)) ?? []);
       await Promise.all(targets.map(reload));
     },
     fetch: (args?: A | readonly A[]) => (Array.isArray(args) ? Promise.all(args.map(fetchOne)) : fetchOne(args as A | undefined)),

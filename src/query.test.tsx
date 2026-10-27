@@ -717,6 +717,29 @@ it("release: 화면 없이 fetch 로 받은 칸은 받기가 끝난 뒤 release 
   vi.advanceTimersByTime(1);
   expect(r.getData("a")).toBeUndefined();
 });
+it("release: setData 로만 만든 칸도 보는 화면이 없으면 놓인다", () => {
+  vi.useFakeTimers();
+  const r = createResource(() => ({ query: async (a: string) => a }), { release: 1000 });
+  r.setData("x", "a");
+  vi.advanceTimersByTime(999);
+  expect(r.getData("a")).toBe("x");
+  vi.advanceTimersByTime(1);
+  expect(r.getData("a")).toBeUndefined();
+});
+it("release: 받는 중에 놓이면 그 요청을 기다리던 fetch 는 옛 값이 아니라 받은 응답을 준다", async () => {
+  vi.useFakeTimers();
+  const q = controlled<string>();
+  const key = define(() => createResource(() => ({ query: (a: string) => q.fn(a) }), { release: 1000 }));
+  const first = renderHook(() => view(key, { args: "a" }));
+  await act(async () => q.calls[0]!.d.resolve("a1"));
+  act(() => void first.result.current.refetch());
+  const waiting = state(key).fetch("a");
+  first.unmount();
+  tick(1000);
+  expect(state(key).getData("a")).toBeUndefined();
+  q.calls[1]!.d.resolve("a2");
+  expect(await waiting).toBe("a2");
+});
 it("release: 주지 않으면 화면이 내려가도 쥔다", async () => {
   vi.useFakeTimers();
   const q = controlled<string>();
