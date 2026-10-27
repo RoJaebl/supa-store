@@ -490,7 +490,8 @@ function unexported(ts, program, config, entries) {
   return lines.length ? lines.join("\n") : null;
 }
 
-function generate(ts, config) {
+// sources 를 주면 읽은 소스 파일을 수정 시각 · 크기와 함께 쥐었다가 다음 generate 에 다시 쓴다 — 감시하며 거듭 돌 때 lib · 의존 타입을 다시 파싱하지 않는다
+function generate(ts, config, sources) {
   const parse = (tsconfig) => {
     const { config: json, error } = ts.readConfigFile(tsconfig, ts.sys.readFile);
     const fail = (d) => new Error(`${basename(tsconfig)}: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`);
@@ -521,8 +522,24 @@ function generate(ts, config) {
   const host = ts.createCompilerHost(options);
   const getSourceFile = host.getSourceFile.bind(host);
   let text = existsSync(config.out) ? readFileSync(config.out, "utf8") : render([], config);
+  const cached = (file, lang, ...rest) => {
+    if (!sources) return getSourceFile(file, lang, ...rest);
+    let stamp;
+    try {
+      const s = statSync(file);
+      stamp = `${s.mtimeMs}:${s.size}`;
+    } catch {
+      return getSourceFile(file, lang, ...rest);
+    }
+    const id = `${file}|${JSON.stringify(lang)}`;
+    const hit = sources.get(id);
+    if (hit?.stamp === stamp) return hit.sf;
+    const sf = getSourceFile(file, lang, ...rest);
+    if (sf) sources.set(id, { stamp, sf });
+    return sf;
+  };
   host.getSourceFile = (file, lang, ...rest) =>
-    same(file) === out ? ts.createSourceFile(file, text, lang) : getSourceFile(file, lang, ...rest);
+    same(file) === out ? ts.createSourceFile(file, text, lang) : cached(file, lang, ...rest);
   let program;
   for (let round = 0; round < MAX_ROUNDS; round++) {
     program = ts.createProgram({ rootNames, options, host, oldProgram: program });

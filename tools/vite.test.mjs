@@ -93,6 +93,35 @@ test("정의를 고치면 타입 글자가 바뀐다", async () => {
   await until((t) => t.includes("s: string"), "s: string 이 생기지 않았다");
 });
 
+test("감시 중 생성은 개발 서버의 스레드를 막지 않는다", async () => {
+  write("src/a.state.ts", def("a", "{ n: 0 }"));
+  await start();
+  let last = Date.now();
+  let max = 0;
+  const tick = setInterval(() => {
+    const now = Date.now();
+    max = Math.max(max, now - last);
+    last = now;
+  }, 10);
+  try {
+    write("src/b.state.ts", def("b", "{ n: 0 }"));
+    await until((t) => t.includes('"b":'), "b 가 생기지 않았다");
+  } finally {
+    clearInterval(tick);
+  }
+  // 같은 스레드에서 돌면 TypeScript 프로그램을 짓는 동안(이 작은 프로젝트에서도 0.5초 넘게) 타이머가 멈춘다
+  assert.ok(max < 200, `이벤트 루프가 ${max}ms 멈췄다`);
+});
+
+test("생성이 도는 동안 들어온 변경은 끝난 뒤 한 번 더 돌아 마지막 정의를 쓴다", async () => {
+  write("src/a.state.ts", def("a", "{ n: 0 }"));
+  await start();
+  write("src/a.state.ts", def("a", '{ s: "" }'));
+  await new Promise((r) => setTimeout(r, 300)); // 디바운스가 지나 생성이 도는 중이다
+  write("src/a.state.ts", def("a", "{ b: true }"));
+  await until((t) => t.includes("b: boolean"), "마지막 정의가 생성 파일에 오지 않았다");
+});
+
 test("감시 중 생성이 실패해도 서버는 살아 있고 고치면 다시 쓴다", async () => {
   write("src/a.state.ts", def("a", "{ n: 0 }"));
   const { errors } = await start();
