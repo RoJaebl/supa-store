@@ -7,6 +7,8 @@ const { basename, dirname, join, relative, resolve } = require("node:path");
 const defaults = { include: ["src/**/*.state.ts"], out: "src/store.gen.ts", targets: ["tsserver", "next", "vite", "cli"] };
 const CONFIG_FILE = "store.config.ts";
 const MAX_ROUNDS = 5;
+// 「이름을 찾을 수 없다」 계열 — 2304 Cannot find name · 2552 Did you mean · 2503 Cannot find namespace
+const NAME_NOT_FOUND = new Set([2304, 2552, 2503]);
 
 const posix = (p) => p.replace(/\\/g, "/");
 
@@ -129,6 +131,14 @@ function collect(ts, program, config) {
   if (fnArgs.length) throw new Error(`${[...new Set(fnArgs)].map((f) => posix(relative(config.root, f))).join(", ")}: 자원의 args 는 함수로 짓지 않는다 — 조건 무효화와 헷갈린다`);
   return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
+
+// ESM 으로 푸는 상대 경로는 확장자가 있어야 한다 — 실제 파일을 찾아 그 JS 확장자를 붙인다. 못 찾으면 그대로 둔다
+const JS_EXT = [[".ts", ".js"], [".tsx", ".js"], [".d.ts", ".js"], [".mts", ".mjs"], [".d.mts", ".mjs"], [".cts", ".cjs"], [".d.cts", ".cjs"]];
+const withJsExt = (spec) => {
+  if (/.[cm]?jsx?$/.test(spec)) return spec;
+  const hit = JS_EXT.find(([ts]) => existsSync(spec + ts));
+  return hit ? spec + hit[1] : spec;
+};
 
 function relativeFromOut(config, file) {
   const rel = posix(relative(dirname(config.out), file));
@@ -331,12 +341,13 @@ function packageImport(ts, config, spec, name) {
 function render(entries, config, ts) {
   const files = [...new Set(entries.map((e) => e.file))];
   const types = entries.map((e) => {
-    const text = e.text.replace(/import\("([^"]+)"\)(\.([A-Za-z_$][\w$]*))?/g, (whole, spec, dot, name) => {
+    // NodeNext 는 둘째 인자(import("…", { with: { "resolution-mode": "import" } }))를 붙인다 — 경로만 바꾸고 그것은 그대로 둔다
+    const text = e.text.replace(/import\("([^"]+)"(,\s*\{[^()]*\})?\)(\.([A-Za-z_$][\w$]*))?/g, (whole, spec, attrs = "", dot, name) => {
       if (!/^(?:[A-Za-z]:)?\//.test(spec)) return whole;
       const hit = packageImport((ts ??= requireTypeScript(config.root)), config, spec, name);
-      if (hit === null) return `import("${relativeFromOut(config, spec)}")${dot ?? ""}`;
+      if (hit === null) return `import("${relativeFromOut(config, /"import"/.test(attrs) ? withJsExt(spec) : spec)}"${attrs})${dot ?? ""}`;
       if (hit === undefined) throw new Error(`${e.key}(${e.file}): ${name ?? "(이름 없음)"} 을 내보내는 패키지 진입이 없다(export * as 사슬은 3단까지 따라간다) — ${spec}`);
-      return `import("${hit.spec}")${hit.name ? `.${hit.name}` : ""}`;
+      return `import("${hit.spec}"${attrs})${hit.name ? `.${hit.name}` : ""}`;
     });
     return `    ${JSON.stringify(e.key)}: ${text};`;
   });
@@ -400,6 +411,25 @@ function generate(ts, config) {
     const entries = collect(ts, program, config);
     const next = render(entries, config, ts);
     if (next === text) {
+      // 생성 파일에서 이름을 찾지 못하면(export 하지 않은 지역 타입) 그 줄의 key 로 모아 멈춘다 — 반환 타입을 적은 정의도 막는다
+      const missing = new Map();
+      for (const d of program.getSemanticDiagnostics(program.getSourceFiles().find((f) => same(f.fileName) === out))) {
+        if (!NAME_NOT_FOUND.has(d.code) || d.start === undefined) continue;
+        const line = text.slice(text.lastIndexOf("\n", d.start) + 1, text.indexOf("\n", d.start));
+        const entry = entries.find((e) => line.startsWith(`    ${JSON.stringify(e.key)}: `));
+        if (!entry) continue;
+        if (!missing.has(entry)) missing.set(entry, new Set());
+        missing.get(entry).add(text.slice(d.start, d.start + d.length));
+      }
+      if (missing.size)
+        throw new Error(
+          [...missing]
+            .map(([e, names]) => {
+              const list = [...names].join(", ");
+              return `${e.key}(${posix(relative(config.root, e.file))}): 상태 필드의 타입 ${list} 이 export 되지 않아 생성 파일에서 쓸 수 없다 — ${list} 을 export 한다`;
+            })
+            .join("\n"),
+        );
       const bad = entries.find((e) => e.any);
       // 고정점에도 any 가 남으면 그 key 의 타입 검사가 조용히 꺼진다 — 쓰지 않고 반환 타입을 적게 한다
       if (bad) throw new Error(`${bad.key}(${bad.file}) 의 타입에 any 가 남는다 — 반환 타입을 적는다`);
