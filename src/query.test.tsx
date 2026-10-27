@@ -305,6 +305,65 @@ it("무효화: 조건으로 고른 칸만 — 보는 것은 곧바로, 보지 �
   await r.fetch(b1);
   expect(query.mock.calls.map(([a]) => a)).toEqual([a1, a2]);
 });
+it("무효화: 낡은 칸을 다시 보는 화면은 첫 판부터 isFetching 이고 앞 값 · ready 를 보인다", async () => {
+  const q = controlled<string>();
+  const key = define(() => createResource(() => ({ query: (a: string) => q.fn(a) })));
+  const first = renderHook(() => view(key, { args: "a" }));
+  await act(async () => q.calls[0]!.d.resolve("a1"));
+  first.unmount();
+  await act(() => state(key).invalidate());
+  const seen: unknown[] = [];
+  const { result } = renderHook(() => {
+    const v = view(key, { args: "a" });
+    seen.push({ data: v.data, status: v.status, isFetching: v.isFetching });
+    return v;
+  });
+  expect(seen[0]).toEqual({ data: "a1", status: "ready", isFetching: true });
+  // 칸의 값은 건드리지 않는다. 효과가 받기를 시작해도 보이는 칸이 같아 다시 그리지 않는다
+  expect(state(key).getData("a")).toBe("a1");
+  expect(q.fn).toHaveBeenCalledTimes(2);
+  expect(seen).toHaveLength(1);
+  await act(async () => q.calls[1]!.d.resolve("a2"));
+  expect(result.current).toMatchObject({ data: "a2", status: "ready", isFetching: false });
+});
+it("무효화: 낡지 않은 칸을 처음 보는 화면은 받는 중으로 보이지 않는다", async () => {
+  const q = controlled<string>();
+  const key = define(() => createResource(() => ({ query: (a: string) => q.fn(a) })));
+  const got = state(key).fetch("a");
+  q.calls[0]!.d.resolve("a1");
+  await got;
+  const seen: boolean[] = [];
+  renderHook(() => {
+    const v = view(key, { args: "a" });
+    seen.push(v.isFetching);
+    return v;
+  });
+  await flush();
+  expect(seen.every((f) => f === false)).toBe(true);
+  expect(q.fn).toHaveBeenCalledTimes(1);
+});
+it("무효화: 목록 꼴도 칸마다 — 낡은 칸만 첫 판부터 isFetching", async () => {
+  const q = controlled<string>();
+  const key = define(() => createResource(() => ({ query: (a: { id: number }) => q.fn(a) })));
+  const r = state(key);
+  const loads = [r.fetch({ id: 1 }), r.fetch({ id: 2 })];
+  q.calls.forEach((c) => c.d.resolve(`v${(c.args as { id: number }).id}`));
+  await Promise.all(loads);
+  await r.invalidate({ id: 1 });
+  const seen: boolean[][] = [];
+  const { result } = renderHook(() => {
+    const v = view(key, { args: [{ id: 1 }, { id: 2 }] });
+    seen.push(v.map((x: { isFetching: boolean }) => x.isFetching));
+    return v;
+  });
+  expect(seen[0]).toEqual([true, false]);
+  expect(q.calls.slice(2).map((c) => c.args)).toEqual([{ id: 1 }]);
+  await act(async () => q.calls[2]!.d.resolve("v1 새"));
+  expect(result.current.map((x: { data: string; isFetching: boolean }) => [x.data, x.isFetching])).toEqual([
+    ["v1 새", false],
+    ["v2", false],
+  ]);
+});
 it("무효화: 목록 꼴로 보는 칸은 칸마다 보는 것이라 모두 곧바로 다시 받는다", async () => {
   const q = controlled<number>();
   const key = define(() => createResource(() => ({ query: (a: { id: number }) => q.fn(a) })));
