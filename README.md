@@ -98,11 +98,14 @@ const many = useStore("api.file.dirLevel", { args: dirs.map((dir) => ({ repo, di
 // many: { data, status }[] — 목록의 pick · omit 은 조회 칸(data · status · error · isPlaceholderData · isFetching · refetch)만 고른다
 ```
 
-`Cache`(`getData` · `invalidate` · `fetch` · `setData`)도 배열을 받는다. `invalidate([])` 는 아무것도 하지 않고, `invalidate()` 는 받아 둔 것 모두를, `invalidate((a) => a.repo === "A")` 는 참인 칸을 고른다.
-고른 칸 가운데 화면이 보는 칸만 곧바로 다시 받고(`await` 는 이것만 기다린다), 보지 않는 칸은 값을 두고 낡음만 표시한다 — 화면이 다시 보거나 `fetch` 하면 그때 받고, `getData` 는 쥔 값을 준다.
-그래서 query 의 args 는 함수로 짓지 않는다(생성기가 막는다). 받는 중인 칸은 보지 않아도 곧바로 다시 받는다.
+`Cache`(`getData` · `invalidate` · `fetch` · `setData`)도 배열을 받는다. `fetch` 목록은 하나라도 실패하면 그 오류로 거절한다.
+
+**무효화 범위.** `invalidate([])` 는 아무것도 하지 않고, `invalidate()` 는 받아 둔 것 모두를 고른다. 고른 칸 가운데 화면이 보는 칸과 받는 중인 칸만 곧바로 다시 받고(`await` 는 이것만 기다린다), 나머지는 값을 두고 낡음만 표시한다 — 화면이 다시 보거나 `fetch` 하면 그때 받고, `getData` 는 쥔 값을 준다.
 앞 판에서 옮길 때: 화면 없이 새 값이 필요하면 `invalidate` 뒤 `getData` 가 아니라 `fetch` 를 쓴다 — 보지 않는 칸은 무효화가 곧바로 다시 받지 않는다.
-`fetch` 목록은 하나라도 실패하면 그 오류로 거절한다.
+
+**조건 무효화.** `invalidate((a) => a.repo === "A")` 는 받아 둔 칸마다 조건을 불러 참인 칸을 고른다. 범위 규칙은 위와 같다. 그래서 query 의 args 는 함수로 짓지 않는다(생성기가 막는다).
+
+**놓기(`release`).** `createResource(define, { release: 0 })` 은 그 args 를 보던 마지막 화면이 빠지면 칸을 놓고, `release: 5 * 60_000` 은 5분 뒤 놓는다. 그사이 화면이 다시 보면 놓지 않는다. 놓을 때 진행 중인 요청의 응답은 버리고, 놓은 뒤 다시 보면 `loading` 부터 받는다. 화면이 아닌 읽기(`getData` · `fetch`)는 보는 것으로 세지 않는다 — 화면 없이 `fetch` 로 받은 칸은 받기가 끝난 때부터 센다. 생략하거나 `false` 면 놓지 않는다.
 
 **자원의 `args` 는 배열이나 튜플 타입으로 짓지 않는다** — 생성기가 실패시킨다. 맨 배열을 목록으로 읽기 때문이다. 여러 값은 객체로 묶는다.
 

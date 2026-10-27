@@ -186,12 +186,33 @@ export function createResource<A = void, D = never, R extends object = object, S
     select?: (data: D, args: A) => S;
     placeholderData?: PlaceholderData<A, D>;
     refetchInterval?: RefetchInterval<A>;
+    /** 그 args 를 보던 마지막 화면이 빠지고(화면 없이 받았으면 받기가 끝나고) 이만큼(ms) 지나면 칸을 놓는다. 생략 · false 면 쥔다 */
+    release?: number | false;
   } = {},
 ): Resource<A, D, R, S> {
   const auto = options.auto ?? true;
   const cells = new Map<string, Cell<A, D>>();
   const listeners = new Set<() => void>();
   const idOf = (args: A | undefined) => JSON.stringify(args ?? null);
+  const { release } = options;
+  // 놓기 타이머는 이 자원의 cells 만 본다 — 다시 지은 자원의 칸을 건드리지 않는다
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const letGo = (id: string) => {
+    if (typeof release !== "number") return;
+    clearTimeout(timers.get(id));
+    timers.set(
+      id,
+      setTimeout(() => {
+        timers.delete(id);
+        const cell = cells.get(id);
+        if (!cell || refetcher.watching(cell.args as A)) return;
+        cells.delete(id);
+        // 진행 중 응답은 떨어진 칸에 닿으므로 버려진다 — 주기에도 알리지 않는다
+        cell.seq += 1;
+        cell.inflight = undefined;
+      }, release),
+    );
+  };
   const refetcher = createRefetcher<A>({
     resource: options.refetchInterval,
     load: (args) => load(args),
@@ -199,11 +220,15 @@ export function createResource<A = void, D = never, R extends object = object, S
     inflight: (args) => cells.get(idOf(args))?.inflight,
     // 낡은 칸을 다시 보면 받는다 — 그사이 fetch 가 받는 중이면 그것을 나눠 쓴다
     onWatch(args) {
-      const cell = cells.get(idOf(args));
+      const id = idOf(args);
+      clearTimeout(timers.get(id));
+      timers.delete(id);
+      const cell = cells.get(id);
       if (!cell?.stale) return;
       cell.stale = false;
       if (cell.view.status !== "idle") load(args).catch(noop);
     },
+    onUnwatch: (args) => letGo(idOf(args)),
   });
   const cellOf = (args: A | undefined): Cell<A, D> => {
     const id = idOf(args);
@@ -236,6 +261,9 @@ export function createResource<A = void, D = never, R extends object = object, S
       const next = { ...(cell.seq === seq ? view : {}), ...(last ? { isFetching: false } : {}) };
       if (Object.keys(next).length) write(cell, next);
       if (last) refetcher.settled(args as A, ok);
+      // 화면 없이 받은 칸은 받기가 끝난 때부터 센다 — 이미 세는 중이면 그대로
+      const id = idOf(args);
+      if (last && cells.get(id) === cell && !timers.has(id) && !refetcher.watching(args as A)) letGo(id);
     };
     const request: Promise<D> = new Promise<D>((resolve) => resolve(query!.call(defined, args as A))).then(
       (data) => {

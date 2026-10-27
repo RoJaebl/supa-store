@@ -1,10 +1,11 @@
 import { act, renderHook } from "@testing-library/react";
-import { beforeEach, expect, expectTypeOf, it, vi } from "vitest";
-import { createStore, getStore, overrideStore, resetStores } from "./index.js";
+import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
+import { createStore, disposeStores, getStore, overrideStore, resetStores } from "./index.js";
 import { createEvent, createResource, type Cache } from "./query.js";
 import { useStore } from "./react.js";
 
 beforeEach(() => resetStores());
+afterEach(() => void vi.useRealTimers());
 
 // 시험마다 새 key 를 쓴다. 꺼내는 쪽 타입은 아래 타입 시험이 따로 본다
 let n = 0;
@@ -628,4 +629,117 @@ it("Cache 목록: setData 의 updater 는 args 마다 (prev, args) 로 불린다
   const r = createResource(() => ({ query: async ({ id }: { id: number }) => id }));
   r.setData((_prev, args) => args.id + 100, [{ id: 1 }, { id: 2 }]);
   expect(r.getData([{ id: 1 }, { id: 2 }])).toEqual([101, 102]);
+});
+
+// ── 놓기(release) ─────────────────────────────────────
+
+const tick = (ms: number) => act(() => void vi.advanceTimersByTime(ms));
+
+it("release: 0 이면 화면이 내려가면 칸을 놓고, 그때 받는 중이던 응답은 칸을 되살리지 않으며, 다시 보면 loading 부터", async () => {
+  vi.useFakeTimers();
+  const q = controlled<string>();
+  const key = define(() => createResource(() => ({ query: (a: string) => q.fn(a) }), { release: 0 }));
+  const first = renderHook(() => view(key, { args: "a" }));
+  await act(async () => q.calls[0]!.d.resolve("a1"));
+  act(() => void first.result.current.refetch());
+  first.unmount();
+  tick(0);
+  expect(state(key).getData("a")).toBeUndefined();
+  await act(async () => q.calls[1]!.d.resolve("늦은 값"));
+  expect(state(key).getData("a")).toBeUndefined();
+  const { result } = renderHook(() => view(key, { args: "a" }));
+  expect(q.fn).toHaveBeenCalledTimes(3);
+  expect(result.current).toMatchObject({ data: undefined, status: "loading" });
+  await act(async () => q.calls[2]!.d.resolve("a2"));
+  expect(result.current).toMatchObject({ data: "a2", status: "ready" });
+});
+it("release: 1000 이면 그 안에 다시 보면 놓지 않고 앞 값을 보이며, 지나면 놓는다", async () => {
+  vi.useFakeTimers();
+  const q = controlled<string>();
+  const key = define(() => createResource(() => ({ query: (a: string) => q.fn(a) }), { release: 1000 }));
+  const first = renderHook(() => view(key, { args: "a" }));
+  await act(async () => q.calls[0]!.d.resolve("a1"));
+  first.unmount();
+  tick(999);
+  const again = renderHook(() => view(key, { args: "a" }));
+  expect(again.result.current).toMatchObject({ data: "a1", status: "ready" });
+  tick(5000);
+  expect(state(key).getData("a")).toBe("a1");
+  again.unmount();
+  tick(999);
+  expect(state(key).getData("a")).toBe("a1");
+  tick(1);
+  expect(state(key).getData("a")).toBeUndefined();
+  expect(q.fn).toHaveBeenCalledTimes(1);
+});
+it("release: 두 화면이 같은 args 를 보다가 하나만 내려가면 놓지 않는다", async () => {
+  vi.useFakeTimers();
+  const q = controlled<string>();
+  const key = define(() => createResource(() => ({ query: (a: string) => q.fn(a) }), { release: 0 }));
+  const one = renderHook(() => view(key, { args: "a" }));
+  const two = renderHook(() => view(key, { args: "a" }));
+  await act(async () => q.calls[0]!.d.resolve("a1"));
+  one.unmount();
+  tick(1000);
+  expect(state(key).getData("a")).toBe("a1");
+  two.unmount();
+  tick(0);
+  expect(state(key).getData("a")).toBeUndefined();
+});
+it("release: 놓기를 기다리는 칸에 setData · invalidate 가 와도 정한 때에 놓이고 던지지 않는다", async () => {
+  vi.useFakeTimers();
+  const q = controlled<string>();
+  const key = define(() => createResource(() => ({ query: (a: string) => q.fn(a) }), { release: 1000 }));
+  const first = renderHook(() => view(key, { args: "a" }));
+  await act(async () => q.calls[0]!.d.resolve("a1"));
+  first.unmount();
+  tick(500);
+  act(() => state(key).setData("x", "a"));
+  await act(() => state(key).invalidate("a"));
+  await act(() => state(key).invalidate());
+  tick(499);
+  expect(state(key).getData("a")).toBe("x");
+  tick(1);
+  expect(state(key).getData("a")).toBeUndefined();
+  await act(() => state(key).invalidate());
+  expect(q.fn).toHaveBeenCalledTimes(1);
+});
+it("release: 화면 없이 fetch 로 받은 칸은 받기가 끝난 뒤 release 가 지나면 놓인다", async () => {
+  vi.useFakeTimers();
+  const q = controlled<string>();
+  const r = createResource(() => ({ query: (a: string) => q.fn(a) }), { release: 1000 });
+  const got = r.fetch("a");
+  vi.advanceTimersByTime(5000);
+  q.calls[0]!.d.resolve("a1");
+  expect(await got).toBe("a1");
+  vi.advanceTimersByTime(999);
+  expect(r.getData("a")).toBe("a1");
+  vi.advanceTimersByTime(1);
+  expect(r.getData("a")).toBeUndefined();
+});
+it("release: 주지 않으면 화면이 내려가도 쥔다", async () => {
+  vi.useFakeTimers();
+  const q = controlled<string>();
+  const key = define(() => createResource(() => ({ query: (a: string) => q.fn(a) })));
+  const first = renderHook(() => view(key, { args: "a" }));
+  await act(async () => q.calls[0]!.d.resolve("a1"));
+  first.unmount();
+  tick(60_000);
+  expect(state(key).getData("a")).toBe("a1");
+});
+it("release: disposeStores 뒤 앞 자원의 타이머가 터져도 다시 지은 자원의 칸을 지우지 않는다", async () => {
+  vi.useFakeTimers();
+  const q = controlled<string>();
+  const key = define(() => createResource(() => ({ query: (a: string) => q.fn(a) }), { release: 1000 }));
+  const first = renderHook(() => view(key, { args: "a" }));
+  await act(async () => q.calls[0]!.d.resolve("a1"));
+  first.unmount();
+  act(() => disposeStores());
+  // 다시 지은 자원을 화면이 본다 — 앞 자원의 타이머(1000ms)가 이 칸을 건드리면 안 된다
+  tick(500);
+  const { result } = renderHook(() => view(key, { args: "a" }));
+  await act(async () => q.calls[1]!.d.resolve("새 a"));
+  tick(600);
+  expect(state(key).getData("a")).toBe("새 a");
+  expect(result.current).toMatchObject({ data: "새 a", status: "ready" });
 });
