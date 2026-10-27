@@ -75,19 +75,23 @@ function collect(ts, program, config) {
   const broken = [];
   const loose = [];
   const arrayArgs = [];
-  // query 의 첫 매개변수가 배열·튜플(유니온의 한 갈래 포함)인가 — 읽지 못하면 아니라고 본다
-  const isArrayArgs = (call) => {
-    // 옛 TypeScript 는 두 검사 함수를 내주지 않는다 — 읽지 못하면 건너뛴다
-    if (typeof checker.isArrayType !== "function" || typeof checker.isTupleType !== "function") return false;
+  const fnArgs = [];
+  // query 의 첫 매개변수 타입의 갈래들(유니온이면 그 갈래 모두) — 읽지 못하면 빈 배열
+  const argsTypes = (call) => {
     const fn = call.arguments[0];
-    if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return false;
+    if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return [];
     const def = checker.getReturnTypeOfSignature(checker.getSignatureFromDeclaration(fn));
     const query = def.getProperty("query");
     const param = query && checker.getTypeOfSymbolAtLocation(query, fn).getCallSignatures()[0]?.parameters[0];
-    if (!param) return false;
+    if (!param) return [];
     const type = checker.getTypeOfSymbolAtLocation(param, fn);
-    return (type.isUnion() ? type.types : [type]).some((t) => checker.isArrayType(t) || checker.isTupleType(t));
+    return type.isUnion() ? type.types : [type];
   };
+  // 배열·튜플인가 — 옛 TypeScript 는 두 검사 함수를 내주지 않는다. 읽지 못하면 건너뛴다
+  const isArrayType = (t) =>
+    typeof checker.isArrayType === "function" && typeof checker.isTupleType === "function" && (checker.isArrayType(t) || checker.isTupleType(t));
+  // 함수인가 — 조건 무효화(invalidate(fn))와 헷갈린다
+  const isFnType = (t) => t.getCallSignatures().length > 0;
   for (const source of program.getSourceFiles()) {
     if (!config.match(source.fileName)) continue;
     // 문법이 깨진 정의는 반환 타입이 any 로 무너진다 — 그것을 쓰면 타입 검사가 조용히 꺼지므로 아예 짓지 않는다
@@ -96,8 +100,10 @@ function collect(ts, program, config) {
       continue;
     }
     const visit = (node) => {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "createResource" && isArrayArgs(node)) {
-        arrayArgs.push(posix(source.fileName));
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "createResource") {
+        const types = argsTypes(node);
+        if (types.some(isArrayType)) arrayArgs.push(posix(source.fileName));
+        if (types.some(isFnType)) fnArgs.push(posix(source.fileName));
       }
       if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "createStore") {
         const [key, fn] = node.arguments;
@@ -120,6 +126,7 @@ function collect(ts, program, config) {
   if (broken.length) throw new Error(`정의 파일의 문법이 깨져 생성 파일을 쓰지 않는다: ${broken.join(", ")}`);
   if (loose.length) throw new Error(`${[...new Set(loose)].map((f) => posix(relative(config.root, f))).join(", ")}: createStore 의 key 는 문자열 그대로 쓴다`);
   if (arrayArgs.length) throw new Error(`${[...new Set(arrayArgs)].map((f) => posix(relative(config.root, f))).join(", ")}: 자원의 args 는 배열로 짓지 않는다 — 여러 값은 객체로 묶는다`);
+  if (fnArgs.length) throw new Error(`${[...new Set(fnArgs)].map((f) => posix(relative(config.root, f))).join(", ")}: 자원의 args 는 함수로 짓지 않는다 — 조건 무효화와 헷갈린다`);
   return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 

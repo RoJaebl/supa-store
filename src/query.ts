@@ -51,8 +51,12 @@ export interface Cache<A, D> {
   getData(args: readonly A[]): (D | undefined)[];
   /** 응답이 실어 온 값으로 바로 고친다 — 다시 받지 않는다. 배열이면 args 마다 updater 를 부른다. undefined 면 그 칸을 비워 idle 로 */
   setData(updater: D | undefined | ((prev: D | undefined, args: A) => D | undefined), args?: A | readonly A[]): void;
-  /** 다시 받는다 — args 를 주면 그 칸만(배열이면 그 칸들만, 빈 배열은 아무것도 안 함), 없으면 받아 둔 칸 모두. 실패는 칸의 error 에 둔다 */
-  invalidate(args?: A | readonly A[]): Promise<void>;
+  /**
+   * 무효화한다 — args 를 주면 그 칸만(배열이면 그 칸들만, 빈 배열은 아무것도 안 함), 함수면 참인 칸, 없으면 받아 둔 칸 모두.
+   * 화면이 보는 칸은 곧바로 다시 받고(이것만 기다린다), 보지 않는 칸은 값을 두고 낡음만 표시해 다시 볼 때 · fetch 할 때 받는다.
+   * 실패는 칸의 error 에 둔다
+   */
+  invalidate(args?: A | readonly A[] | ((args: A) => boolean)): Promise<void>;
   /** 받아서 칸에 넣고 값을 돌려준다 — 받는 중이면 끝을 기다려 칸의 값을, 아니고 이미 받은 칸이면 그 값을 바로 준다(체인에서 쓴다). 실패하면 던진다. 배열이면 하나라도 실패할 때 그 오류로 거절한다 */
   fetch(args?: A): Promise<D>;
   fetch(args: readonly A[]): Promise<D[]>;
@@ -156,6 +160,8 @@ interface Cell<A, D> {
   /** 요청 차례 — 이 차례가 아닌 응답은 버린다 */
   seq: number;
   inflight?: Promise<D>;
+  /** 보지 않는 동안 무효화됐다 — 다시 볼 때 · fetch 할 때 받는다 */
+  stale?: boolean;
 }
 
 /**
@@ -191,6 +197,13 @@ export function createResource<A = void, D = never, R extends object = object, S
     load: (args) => load(args),
     idOf,
     inflight: (args) => cells.get(idOf(args))?.inflight,
+    // 낡은 칸을 다시 보면 받는다 — 받는 중이면 그것을 나눠 쓴다
+    onWatch(args) {
+      const cell = cells.get(idOf(args));
+      if (!cell?.stale) return;
+      cell.stale = false;
+      if (cell.view.status !== "idle") load(args).catch(noop);
+    },
   });
   const cellOf = (args: A | undefined): Cell<A, D> => {
     const id = idOf(args);
@@ -212,6 +225,7 @@ export function createResource<A = void, D = never, R extends object = object, S
     const cell = cellOf(args);
     if (cell.inflight && !force) return cell.inflight;
     const seq = ++cell.seq;
+    cell.stale = false;
     // 받은 값이 있으면 status · error 는 그대로 두고 isFetching 만 켠다
     write(cell, cell.view.data === undefined ? { status: "loading", error: null, isFetching: true } : { isFetching: true });
     // 실행자는 곧바로 돈다 — query 가 동기로 던져도 거절로 바뀐다
@@ -248,7 +262,12 @@ export function createResource<A = void, D = never, R extends object = object, S
     // 값을 비우면(받은 적 없는 목록으로 되돌리기) 처음으로 돌린다 — 버린 응답 탓에 loading 에 갇히지 않고 다음에 다시 받는다
     write(cell, { data, status: data === undefined ? "idle" : "ready", error: null });
   };
-  const reload = (cell: Cell<A, D>) => (cell.view.status === "idle" ? undefined : load(cell.args, true).catch(noop));
+  // 보는 칸만 곧바로 다시 받고, 보지 않는 칸은 낡음만 표시한다
+  const reload = (cell: Cell<A, D>) => {
+    if (cell.view.status === "idle") return;
+    if (refetcher.watching(cell.args as A)) return load(cell.args, true).catch(noop);
+    cell.stale = true;
+  };
   const fetchOne = (args: A | undefined) => {
     const cell = cellOf(args);
     // 받는 중이면 끝을 기다려 칸의 값을 준다 — invalidate 뒤 체인이 앞 값을 받지 않게. 그사이 setData 한 값이면 그것이다.
@@ -259,7 +278,7 @@ export function createResource<A = void, D = never, R extends object = object, S
         (e) => (cell.inflight ? wait(cell.inflight) : Promise.reject(e)),
       );
     if (cell.inflight) return wait(cell.inflight);
-    return cell.view.status === "ready" ? Promise.resolve(cell.view.data as D) : load(args);
+    return cell.view.status === "ready" && !cell.stale ? Promise.resolve(cell.view.data as D) : load(args);
   };
 
   const cache = {
@@ -268,8 +287,14 @@ export function createResource<A = void, D = never, R extends object = object, S
       if (Array.isArray(args)) args.forEach((a) => setOne(updater, a));
       else setOne(updater, args as A | undefined);
     },
-    async invalidate(args?: A | readonly A[]) {
-      const targets = args === undefined ? [...cells.values()] : (Array.isArray(args) ? args : [args]).map((a) => cellOf(a));
+    async invalidate(args?: A | readonly A[] | ((args: A) => boolean)) {
+      // 함수 args 는 생성기가 막으므로 함수면 조건이다. idle 칸은 reload 가 건너뛰므로 조건도 부르지 않는다
+      const targets =
+        args === undefined
+          ? [...cells.values()]
+          : typeof args === "function"
+            ? [...cells.values()].filter((c) => c.view.status !== "idle" && (args as (a: A) => boolean)(c.args as A))
+            : (Array.isArray(args) ? args : [args]).map((a) => cellOf(a));
       await Promise.all(targets.map(reload));
     },
     fetch: (args?: A | readonly A[]) => (Array.isArray(args) ? Promise.all(args.map(fetchOne)) : fetchOne(args as A | undefined)),

@@ -165,6 +165,15 @@ test("TypeScript 가 isArrayType · isTupleType 을 내주지 않으면 배열 �
   };
   assert.doesNotThrow(() => generate(old, loadConfig(ts, root)));
 });
+const FN_ARGS = /src\/a\.state\.ts: 자원의 args 는 함수로 짓지 않는다 — 조건 무효화와 헷갈린다/;
+test("함수 args 를 가진 자원은 실패한다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => createResource(() => ({ query: async (pick: (n: number) => boolean) => pick(1) })));`);
+  assert.throws(() => generate(ts, loadConfig(ts, root)), FN_ARGS);
+});
+test("함수를 낀 유니온 args 도 실패한다", () => {
+  write("src/a.state.ts", `${RES}createStore("a", () => createResource(() => ({ query: async (id: string | (() => string)) => id })));`);
+  assert.throws(() => generate(ts, loadConfig(ts, root)), FN_ARGS);
+});
 test("객체 args 와 인자 없는 query 는 통과한다", () => {
   write("src/a.state.ts", `${RES}createStore("a", () => ({
   r: createResource(() => ({ query: async ({ from, to }: { from: number; to: number }) => from + to })),
