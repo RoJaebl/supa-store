@@ -680,3 +680,25 @@ it("두 store 의 select 가 서로를 읽어도 끝없이 다시 돌지 않는�
   expect(result.current.map((v: any) => v.data)).toEqual([0, 0]);
   expect(renders).toBeLessThan(20);
 });
+it("자원 select 에서 ctx() 로 자기 바꾸기의 inflight 를 읽어 겹을 얹는다", async () => {
+  const save = controlled<Accent>();
+  const key = `api.layer.own${++n}`;
+  createStore(key, (_set, _get, ctx) =>
+    createResource(() => ({ query: async (): Promise<Accent> => ({ accent: "blue" }), patch: (p: Partial<Accent>) => save.fn(p) }), {
+      select: (s: Accent) => (ctx() as any).patch.inflight.reduce((acc: Accent, [p]: [Partial<Accent>]) => ({ ...acc, ...p }), s),
+    }),
+  );
+  const { result } = renderHook(() => view(key, { pick: ["data"] }));
+  await flush();
+  expect(result.current.data).toEqual({ accent: "blue" });
+  act(() => void state(key).patch({ accent: "red" }).catch(noop));
+  expect(result.current.data).toEqual({ accent: "red" });
+  await act(async () => save.calls[0]!.reject(new Error("no")));
+  expect(result.current.data).toEqual({ accent: "blue" });
+});
+it("타입: ctx() 는 자기 key 의 상태 타입이다", () => {
+  type K = keyof import("./index.js").StateTypes & string;
+  const ctx = null as unknown as import("./index.js").Ctx<K>;
+  const check = () => expectTypeOf(ctx()).toEqualTypeOf<import("./index.js").StateOf<K>>();
+  expect(check).toBeTypeOf("function");
+});
