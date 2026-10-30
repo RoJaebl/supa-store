@@ -228,7 +228,7 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
 
     // 바꾸기마다 훅을 정해진 차례로 부른다 — 꼴 · 고르기와 상관없이 훅 순서가 같다
     const views: Record<string, unknown> = {};
-    for (const name of names) views[name] = useMutation(mutations[name]!.call);
+    for (const name of names) views[name] = useSharedMutation(mutations[name]!);
 
     if (list) return items;
     const item = items[0]!;
@@ -237,6 +237,20 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
     const out: Record<string, unknown> = {};
     for (const name of shown) out[name] = name in item ? item[name] : views[name];
     return out;
+  };
+}
+
+/** 바꾸기 하나의 자원이 쥔 상태를 읽는다 — 같은 자원을 보는 화면들이 같은 칸을 본다. 늦은 응답은 바꾸기 안에서 이미 걸러진다 */
+export function useSharedMutation(m: { call: MutationFn<Fn>; channel: MutationChannel }): MutationView<Fn> {
+  const { call, channel } = m;
+  const snap = React.useSyncExternalStore(channel.subscribe, channel.snapshot, channel.snapshot);
+  return {
+    ...snap,
+    mutate(...args) {
+      call(...args).catch(noop);
+    },
+    mutateAsync: (...args) => call(...args),
+    reset: () => call.reset(),
   };
 }
 
@@ -269,6 +283,8 @@ export function useMutation(
   };
   return {
     ...state,
+    // 연결 명령의 화면별 상태는 날아가는 호출 목록을 세지 않는다
+    inflight: [],
     mutate(...args) {
       run(() => fn(...args)).catch(noop);
     },

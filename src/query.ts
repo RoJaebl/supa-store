@@ -81,6 +81,8 @@ export interface MutationView<F extends Fn> {
   mutate(...args: Parameters<F>): void;
   /** 결과를 돌려주고 실패하면 원래 오류를 던진다. error·data 칸도 mutate 와 같이 채운다 */
   mutateAsync(...args: Parameters<F>): Promise<Awaited<ReturnType<F>>>;
+  /** 보냈지만 아직 끝나지 않은 호출들의 인자 — 보낸 차례대로 선다 */
+  readonly inflight: readonly Parameters<F>[];
   pending: boolean;
   error: string | null;
   data: Awaited<ReturnType<F>> | undefined;

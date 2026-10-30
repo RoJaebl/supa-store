@@ -506,20 +506,6 @@ it("타입: 값 꼴 setData 도 undefined 를 받는다 — 낙관적 갱신을 
 
 // ── 바꾸기 ────────────────────────────────────────────
 
-it("바꾸기: 진행·오류·결과는 부른 화면의 것이다", async () => {
-  const m = controlled<number>();
-  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
-  const one = renderHook(() => view(key));
-  const two = renderHook(() => view(key));
-  act(() => void one.result.current.save.mutate(1));
-  expect(one.result.current.save.pending).toBe(true);
-  expect(two.result.current.save.pending).toBe(false);
-  await act(async () => m.calls[0]!.d.resolve(10));
-  expect(one.result.current.save).toMatchObject({ pending: false, data: 10, error: null });
-  expect(two.result.current.save.data).toBeUndefined();
-  act(() => one.result.current.save.reset());
-  expect(one.result.current.save.data).toBeUndefined();
-});
 it("바꾸기: mutate 는 아무것도 돌려주지 않고, 실패는 error 칸에만 둔다", async () => {
   const key = define(() =>
     createResource(() => ({
@@ -600,6 +586,37 @@ it("바꾸기: 화면 안에서 늦게 온 응답은 버린다", async () => {
   await act(async () => m.calls[1]!.d.resolve("둘째"));
   await act(async () => m.calls[0]!.d.resolve("첫째"));
   expect(result.current.go).toMatchObject({ pending: false, data: "둘째" });
+});
+it("바꾸기: 두 화면이 같은 바꾸기 상태를 본다", async () => {
+  const m = controlled<number>();
+  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
+  const one = renderHook(() => view(key));
+  const two = renderHook(() => view(key));
+  act(() => void one.result.current.save.mutate(1));
+  expect(two.result.current.save.pending).toBe(true);
+  expect(two.result.current.save.inflight).toEqual([[1]]);
+  await act(async () => m.calls[0]!.d.resolve(10));
+  expect(two.result.current.save).toMatchObject({ pending: false, data: 10, inflight: [] });
+});
+it("바꾸기: 한 화면의 reset 을 다른 화면도 받는다", async () => {
+  const key = define(() => createResource(() => ({ save: async (x: number) => x })));
+  const one = renderHook(() => view(key));
+  const two = renderHook(() => view(key));
+  await act(async () => void one.result.current.save.mutate(3));
+  expect(two.result.current.save.data).toBe(3);
+  act(() => one.result.current.save.reset());
+  expect(two.result.current.save).toMatchObject({ data: undefined, error: null });
+});
+it("바꾸기: 날아가는 중에 떨어졌다 다시 붙은 화면이 pending 을 본다", async () => {
+  const m = controlled<number>();
+  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
+  const one = renderHook(() => view(key));
+  act(() => void one.result.current.save.mutate(1));
+  one.unmount();
+  const two = renderHook(() => view(key));
+  expect(two.result.current.save.pending).toBe(true);
+  await act(async () => m.calls[0]!.d.resolve(1));
+  expect(two.result.current.save.pending).toBe(false);
 });
 it("바꾸기: store 끼리 부르는 바꾸기는 실패하면 던진다", async () => {
   const key = define(() =>
