@@ -193,10 +193,12 @@ it("줄에서 기다리는 호출의 인자도 inflight 에 있다", async () =>
   const p1 = m.call(1);
   const p2 = m.call(2);
   expect(m.call.inflight).toEqual([[1], [2]]);
+  expect(calls).toHaveLength(1);
   calls[0]!.resolve(1);
   await p1;
   expect(m.call.inflight).toEqual([[2]]);
   await Promise.resolve();
+  expect(calls).toHaveLength(2);
   calls[1]!.resolve(2);
   await p2;
 });
@@ -206,6 +208,7 @@ it("앞 호출이 실패해도 다음 호출이 나간다", async () => {
   const m = createMutation(fn, { scope: { id: "f" } });
   const p1 = m.call(1);
   const p2 = m.call(2);
+  expect(calls).toHaveLength(1);
   calls[0]!.reject(new Error("x"));
   await expect(p1).rejects.toThrow("x");
   await Promise.resolve();
