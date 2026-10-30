@@ -35,6 +35,8 @@ export const QUERY_FIELDS = ["data", "status", "error", "isPlaceholderData", "is
 export const IDLE: CellView<never> = { data: undefined, status: "idle", error: null, isFetching: false };
 export const noop = () => {};
 export const subscribeNone = () => noop;
+const IDLE_MUTATION: MutationSnapshot<Fn> = { inflight: [], pending: false, error: null, data: undefined };
+const idleSnapshot = () => IDLE_MUTATION;
 
 const plain = (x: unknown): x is object => {
   if (typeof x !== "object" || x === null) return false;
@@ -272,9 +274,9 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
       argsList.forEach((a, i) => active[i] && rearm(a));
     }, [intervalKey]);
 
-    // 바꾸기마다 훅을 정해진 차례로 부른다 — 꼴 · 고르기와 상관없이 훅 순서가 같다
+    // 바꾸기마다 훅을 정해진 차례로 부른다 — 꼴 · 고르기와 상관없이 훅 순서가 같다. 보이지 않는 칸은 구독하지 않는다
     const views: Record<string, unknown> = {};
-    for (const name of names) views[name] = useSharedMutation(mutations[name]!);
+    for (const name of names) views[name] = useSharedMutation(mutations[name]!, !list && shown.includes(name));
 
     if (list) return items;
     const item = items[0]!;
@@ -287,9 +289,17 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
 }
 
 /** 바꾸기 하나의 자원이 쥔 상태를 읽는다 — 같은 자원을 보는 화면들이 같은 칸을 본다. 늦은 응답은 바꾸기 안에서 이미 걸러진다 */
-export function useSharedMutation(m: { call: MutationFn<Fn>; channel: MutationChannel }): MutationView<Fn> {
+export function useSharedMutation(
+  m: { call: MutationFn<Fn>; channel: MutationChannel },
+  on = true,
+): MutationView<Fn> {
   const { call, channel } = m;
-  const snap = React.useSyncExternalStore(channel.subscribe, channel.snapshot, channel.snapshot);
+  // 보이지 않는 칸은 구독하지 않고 고정된 스냅숏을 준다 — 바뀌어도 이 화면을 다시 그리지 않는다. 훅 순서는 그대로다
+  const snap = React.useSyncExternalStore(
+    on ? channel.subscribe : subscribeNone,
+    on ? channel.snapshot : idleSnapshot,
+    on ? channel.snapshot : idleSnapshot,
+  );
   return {
     ...snap,
     mutate(...args) {

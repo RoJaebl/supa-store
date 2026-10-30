@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { createMutation } from "./mutation.js";
+import { createMutation, resetScopes } from "./mutation.js";
 
 /** 부를 때마다 새 약속을 내주고, 시험이 차례대로 풀게 한다 */
 function controlled<T>() {
@@ -125,7 +125,8 @@ it("reset 은 error · data 를 지우고 앞서 떠난 호출의 결과를 받�
   calls[1]!.resolve(2);
   await expect(p).resolves.toBe(2);
   expect(m.call.data).toBeUndefined();
-  expect(onSuccess).toHaveBeenCalledTimes(1);
+  // reset 은 칸만 막는다 — 앞서 떠난 호출의 콜백은 돈다
+  expect(onSuccess).toHaveBeenCalledTimes(2);
   expect(m.call.inflight).toEqual([]);
 });
 
@@ -227,4 +228,75 @@ it("scope 가 없으면 동시에 나간다", async () => {
   calls[0]!.resolve(1);
   calls[1]!.resolve(2);
   await Promise.all([p1, p2]);
+});
+
+it("reset 한 뒤에도 앞서 떠난 호출의 onSuccess 는 불린다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onSuccess = vi.fn();
+  const onSettled = vi.fn();
+  const m = createMutation(fn, { onSuccess, onSettled });
+  const p = m.call(1);
+  m.call.reset();
+  calls[0]!.resolve(1);
+  await p;
+  expect(onSuccess).toHaveBeenCalledWith(1, 1);
+  expect(onSettled).toHaveBeenCalledWith(1, null, 1);
+  expect(m.call.data).toBeUndefined();
+});
+
+it("reset 한 뒤에도 앞서 떠난 호출의 onError 는 불리고 error 는 적지 않는다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onError = vi.fn();
+  const m = createMutation(fn, { onError });
+  const p = m.call(1);
+  m.call.reset();
+  calls[0]!.reject(new Error("x"));
+  await expect(p).rejects.toThrow("x");
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(m.call.error).toBeNull();
+});
+
+it("reset 한 뒤에도 scope 줄에서 기다리던 호출의 onSuccess 는 불린다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onSuccess = vi.fn();
+  const m = createMutation(fn, { onSuccess, scope: { id: "reset-wait" } });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  m.call.reset();
+  calls[0]!.resolve(1);
+  await p1;
+  await Promise.resolve();
+  calls[1]!.resolve(2);
+  await p2;
+  expect(onSuccess.mock.calls).toEqual([
+    [1, 1],
+    [2, 2],
+  ]);
+  expect(m.call.data).toBeUndefined();
+});
+
+it("reset 뒤에 보낸 호출은 data 를 적는다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn);
+  const p1 = m.call(1);
+  m.call.reset();
+  const p2 = m.call(2);
+  calls[1]!.resolve(2);
+  await p2;
+  expect(m.call.data).toBe(2);
+  calls[0]!.resolve(1);
+  await p1;
+  expect(m.call.data).toBe(2);
+});
+
+it("resetScopes 는 줄을 비운다 — 뒤 호출이 옛 호출을 기다리지 않는다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn, { scope: { id: "reset-scopes" } });
+  void m.call(1);
+  resetScopes();
+  const p = m.call(2);
+  await Promise.resolve();
+  expect(calls).toHaveLength(2);
+  calls[1]!.resolve(2);
+  await expect(p).resolves.toBe(2);
 });

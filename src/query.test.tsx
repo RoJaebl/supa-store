@@ -691,6 +691,39 @@ it("고르기: pick: [\"save\"] 로 꺼내면 조회를 시작하지 않는다",
   expect(query).not.toHaveBeenCalled();
   expect(Object.keys(result.current)).toEqual(["save"]);
 });
+it("고르기: pick: ['data'] 화면은 다른 화면의 mutate 로 다시 그리지 않는다", async () => {
+  const key = define(() => createResource(() => ({ query: async () => 1, save: async (x: number) => x })));
+  let renders = 0;
+  renderHook(() => (renders++, view(key, { pick: ["data"] })));
+  const other = renderHook(() => view(key));
+  await flush();
+  const before = renders;
+  await act(async () => void other.result.current.save.mutate(2));
+  expect(renders).toBe(before);
+});
+it("고르기: 목록 꼴 화면은 다른 화면의 mutate 로 다시 그리지 않는다", async () => {
+  const key = define(() => createResource(() => ({ query: async (x: number) => x, save: async (x: number) => x })));
+  let renders = 0;
+  renderHook(() => (renders++, view(key, { args: [1, 2] })));
+  const other = renderHook(() => view(key, { args: 1 }));
+  await flush();
+  const before = renders;
+  await act(async () => void other.result.current.save.mutate(2));
+  expect(renders).toBe(before);
+});
+it("바꾸기: resetStores 는 scope 의 줄을 비운다 — 뒤 호출이 옛 호출을 기다리지 않는다", async () => {
+  const m = controlled<number>();
+  const key = define(() =>
+    createResource(() => ({ save: (x: number) => m.fn(x) }), { scope: { save: { id: "reset-stores" } } }),
+  );
+  void state(key).save(1);
+  resetStores();
+  const p = state(key).save(2);
+  await Promise.resolve();
+  expect(m.calls).toHaveLength(2);
+  m.calls[1]!.d.resolve(2);
+  await expect(p).resolves.toBe(2);
+});
 it("this: 메서드 꼴은 this.다른함수() 를 부를 수 있고, 화살표 꼴과 섞어도 된다", async () => {
   const key = define(() =>
     createResource(() => ({

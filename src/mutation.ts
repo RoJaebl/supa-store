@@ -66,7 +66,7 @@ function safely(cb: Fn | undefined, ...args: unknown[]) {
 
 /**
  * 바꾸기 함수를 감싸 상태 칸을 쥔다. 호출마다 안쪽 번호를 매긴다 — 같은 인자로 두 번 불러도 끝난 쪽만 inflight 에서 빼고,
- * 더 나중 번호가 이미 끝났으면(또는 reset 했으면) 그 응답은 늦은 것이라 칸과 콜백을 건드리지 않는다
+ * 더 나중 번호가 이미 끝났으면 그 응답은 늦은 것이라 칸과 콜백을 건드리지 않는다. reset 앞에 보낸 호출은 칸에만 적지 않는다
  */
 export function createMutation<F extends Fn>(
   fn: F,
@@ -76,8 +76,10 @@ export function createMutation<F extends Fn>(
   let state: MutationSnapshot<F> = { inflight: [], pending: false, error: null, data: undefined };
   let calls: { n: number; args: Parameters<F> }[] = [];
   let sent = 0;
-  /** 끝난(또는 reset 한) 가장 큰 번호 — 이보다 작거나 같은 호출의 응답은 늦은 것이다 */
+  /** 끝난 가장 큰 번호 — 이보다 작거나 같은 호출의 응답은 늦은 것이라 칸도 콜백도 건드리지 않는다 */
   let done = 0;
+  /** reset 할 때 보낸 가장 큰 번호 — 이보다 작거나 같은 호출은 칸에 적지 않지만 콜백은 부른다 */
+  let floor = 0;
 
   const write = (patch: Partial<MutationSnapshot<F>>) => {
     state = { ...state, ...patch };
@@ -112,7 +114,7 @@ export function createMutation<F extends Fn>(
       const result = await fn(...args);
       if (n > done) {
         done = n;
-        write({ data: result, error: null });
+        if (n > floor) write({ data: result, error: null });
         safely(hooks.onSuccess, result, ...args);
         safely(hooks.onSettled, result, null, ...args);
       }
@@ -120,7 +122,7 @@ export function createMutation<F extends Fn>(
     } catch (e) {
       if (n > done) {
         done = n;
-        write({ error: message(e) });
+        if (n > floor) write({ error: message(e) });
         safely(hooks.onError, e, ...args);
         safely(hooks.onSettled, undefined, e, ...args);
       }
@@ -139,9 +141,9 @@ export function createMutation<F extends Fn>(
       },
     });
   }
-  // 차례를 올려 앞서 떠난 호출의 결과를 받지 않는다. inflight 는 그 호출이 끝날 때 빠진다
+  // 앞서 떠난 호출이 칸에 적지 못하게 한다 — 그 콜백은 돈다. inflight 는 그 호출이 끝날 때 빠진다
   const reset = () => {
-    done = sent;
+    floor = sent;
     write({ error: null, data: undefined });
   };
   return { call: Object.assign(call, { reset }) as unknown as MutationFn<F>, channel };
