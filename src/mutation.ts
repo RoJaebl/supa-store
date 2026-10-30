@@ -28,8 +28,23 @@ export interface MutationChannel {
 
 export const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-/** 상태 칸을 읽었다고 적는 자리 — 아직 아무것도 하지 않는다 */
-export function noteRead(_channel: MutationChannel): void {}
+/** 지금 도는 track 이 모으는 칸 — track 바깥이면 null 이라 읽어도 적지 않는다 */
+let recording: Set<MutationChannel> | null = null;
+/** 상태 칸을 읽었다고 적는다 — track 이 도는 동안에만 */
+export function noteRead(channel: MutationChannel): void {
+  recording?.add(channel);
+}
+/** run 이 도는 동안 읽힌 바꾸기 칸을 모은다. 겹쳐 부르면 안쪽 것만 모은다 */
+export function track<T>(run: () => T): { value: T; reads: MutationChannel[] } {
+  const outer = recording;
+  const mine = new Set<MutationChannel>();
+  recording = mine;
+  try {
+    return { value: run(), reads: [...mine] };
+  } finally {
+    recording = outer;
+  }
+}
 
 /** scope.id → 그 줄 마지막 호출이 끝나면 풀리는 약속 — 던지지 않는다 */
 const scopes = new Map<string, Promise<void>>();

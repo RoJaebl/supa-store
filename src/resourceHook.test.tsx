@@ -15,6 +15,7 @@ function define(creator: () => object): string {
 const view = (key: string, options?: object): any => (useStore as any)(key, options);
 const state = (key: string): any => getStore(key as never).getState();
 const flush = () => act(async () => {});
+const noop = () => {};
 
 /** 부를 때마다 새 약속을 내주고, 시험이 차례대로 풀게 한다 */
 function controlled<T>() {
@@ -551,4 +552,131 @@ it("목록: 목록에 새로 든 args 는 다른 화면이 받는 중인 요청�
   const { rerender } = renderHook(({ list }) => view(key, { args: ids(...list) }), { initialProps: { list: [1] } });
   rerender({ list: [1, 2] });
   expect(q.calls.map((c) => c.args.id)).toEqual([2, 1]);
+});
+
+// ── select 가 읽은 바꾸기 상태 ──────────────────────────
+
+type Accent = { accent: string };
+/** 받기는 get key, 바꾸기는 patch key — get 의 select 가 patch 의 inflight 를 겹으로 얹는다 */
+function overlay(options: { onSuccess?: "setData" } = {}) {
+  const tag = ++n;
+  const getKey = `api.layer.get${tag}`;
+  const patchKey = `api.layer.patch${tag}`;
+  const save = controlled<Accent>();
+  const fetch = vi.fn(async (): Promise<Accent> => ({ accent: "blue" }));
+  const built = vi.fn();
+  const select = vi.fn((s: Accent, inflight: [Partial<Accent>][]) => inflight.reduce((acc, [p]) => ({ ...acc, ...p }), s));
+  createStore(patchKey, (_set, _get, ctx) => {
+    built();
+    return createResource(() => ({ patch: (p: Partial<Accent>) => save.fn(p) }), {
+      onSuccess:
+        options.onSuccess && ({ patch: (next: Accent) => (ctx(getKey as never) as any).setData(next) } as never),
+    });
+  });
+  createStore(getKey, (_set, _get, ctx) => {
+    built();
+    return createResource(() => ({ query: fetch }), {
+      select: (s: Accent) => select(s, (ctx(patchKey as never) as any).patch.inflight),
+    });
+  });
+  return { getKey, patchKey, save, fetch, built, select };
+}
+
+it("자원 select 가 ctx 로 읽은 다른 store 의 inflight 가 바뀌면 select 만 다시 돈다", async () => {
+  const o = overlay();
+  const { result } = renderHook(() => view(o.getKey, { pick: ["data"] }));
+  await flush();
+  expect(result.current.data).toEqual({ accent: "blue" });
+  const builds = o.built.mock.calls.length;
+  act(() => void state(o.patchKey).patch({ accent: "red" }).catch(noop));
+  expect(result.current.data).toEqual({ accent: "red" });
+  expect(o.fetch).toHaveBeenCalledTimes(1);
+  expect(o.built).toHaveBeenCalledTimes(builds);
+  expect(state(o.getKey).getData()).toEqual({ accent: "blue" });
+});
+it("성공하면 onSuccess 가 캐시를 고친 뒤 겹이 빠져 옛 값이 한 번도 그려지지 않는다", async () => {
+  const o = overlay({ onSuccess: "setData" });
+  const seen: string[] = [];
+  renderHook(() => {
+    const v = view(o.getKey, { pick: ["data"] });
+    seen.push(v.data?.accent);
+    return v;
+  });
+  await flush();
+  act(() => void state(o.patchKey).patch({ accent: "red" }));
+  // 서버가 답하기 전부터 겹으로 빨강이다
+  expect(seen.at(-1)).toBe("red");
+  await act(async () => o.save.calls[0]!.resolve({ accent: "red" }));
+  expect(state(o.getKey).getData()).toEqual({ accent: "red" });
+  expect(seen.at(-1)).toBe("red");
+  expect(seen.slice(seen.indexOf("red"))).not.toContain("blue");
+});
+it("실패하면 겹이 빠지고 원래 값으로 돌아가며 캐시는 바뀌지 않는다", async () => {
+  const o = overlay({ onSuccess: "setData" });
+  const { result } = renderHook(() => view(o.getKey, { pick: ["data"] }));
+  await flush();
+  act(() => void state(o.patchKey).patch({ accent: "red" }).catch(noop));
+  expect(result.current.data).toEqual({ accent: "red" });
+  await act(async () => o.save.calls[0]!.reject(new Error("no")));
+  expect(result.current.data).toEqual({ accent: "blue" });
+  expect(state(o.getKey).getData()).toEqual({ accent: "blue" });
+});
+it("select 가 patch 만 읽으면 patchIcons 가 바뀌어도 다시 돌지 않는다", async () => {
+  const icons = controlled<number>();
+  const select = vi.fn((s: Accent) => s);
+  const key = `api.layer.self${++n}`;
+  createStore(key, (_set, _get, ctx) =>
+    createResource(
+      () => ({ query: async (): Promise<Accent> => ({ accent: "blue" }), patch: async () => 1, patchIcons: () => icons.fn() }),
+      { select: (s: Accent) => (void (ctx(ctx.key as never) as any).patch.inflight, select(s)) },
+    ),
+  );
+  renderHook(() => view(key, { pick: ["data"] }));
+  await flush();
+  const calls = select.mock.calls.length;
+  act(() => void state(key).patchIcons());
+  await act(async () => icons.calls[0]!.resolve(1));
+  expect(select).toHaveBeenCalledTimes(calls);
+  // 읽은 patch 가 바뀌면 다시 돈다
+  await act(async () => void state(key).patch());
+  expect(select.mock.calls.length).toBeGreaterThan(calls);
+});
+it("바꾸기가 날아가는 중에 처음 붙은 화면도 첫 렌더부터 겹을 본다", async () => {
+  const o = overlay();
+  await act(async () => void (await state(o.getKey).fetch()));
+  act(() => void state(o.patchKey).patch({ accent: "red" }).catch(noop));
+  const seen: unknown[] = [];
+  renderHook(() => {
+    const v = view(o.getKey, { pick: ["data"] });
+    seen.push(v.data);
+    return v;
+  });
+  expect(seen[0]).toEqual({ accent: "red" });
+});
+it("두 store 의 select 가 서로를 읽어도 끝없이 다시 돌지 않는다", async () => {
+  const tag = ++n;
+  const [a, b] = [`api.layer.a${tag}`, `api.layer.b${tag}`];
+  const bumps = controlled<number>();
+  const pair = (self: string, other: string) =>
+    createStore(self, (_set, _get, ctx) =>
+      createResource(() => ({ query: async () => 0, bump: () => bumps.fn() }), {
+        select: (s: number) => s + (ctx(other as never) as any).bump.inflight.length,
+      }),
+    );
+  pair(a, b);
+  pair(b, a);
+  let renders = 0;
+  const { result } = renderHook(() => {
+    renders++;
+    return [view(a, { pick: ["data"] }), view(b, { pick: ["data"] })];
+  });
+  await flush();
+  act(() => {
+    state(a).bump();
+    state(b).bump();
+  });
+  expect(result.current.map((v: any) => v.data)).toEqual([1, 1]);
+  await act(async () => bumps.calls.forEach((c) => c.resolve(1)));
+  expect(result.current.map((v: any) => v.data)).toEqual([0, 0]);
+  expect(renders).toBeLessThan(20);
 });

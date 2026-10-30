@@ -1,7 +1,7 @@
 // 자원 훅 — 정의 파일과 함께 서버 쪽에서도 평가되므로 "use client" 를 두지 않고 React 를 이름공간으로 가져온다
 import * as React from "react";
 import type { MutationView, PlaceholderData, Prev, Status } from "./query.js";
-import { type MutationChannel, type MutationFn, message } from "./mutation.js";
+import { type MutationChannel, type MutationFn, type MutationSnapshot, message, track } from "./mutation.js";
 import { type RefetchInterval, valueOf } from "./refetch.js";
 
 export { message };
@@ -61,6 +61,8 @@ type Item = {
   screen: Fn | undefined;
   data: unknown;
   filled: { with: unknown } | undefined;
+  /** 자원 select 가 읽은 바꾸기 칸과 그때의 상태 — 모두 그대로여야 앞 결과를 쓴다 */
+  reads: Array<[MutationChannel, MutationSnapshot<Fn>]>;
 };
 type Last = {
   core: object;
@@ -134,10 +136,23 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         }
         // 자원 select → 화면 select. getSnapshot 은 렌더마다 여러 번 불리므로 받은 값과 화면 select 가 그대로면 앞 결과를 쓴다 —
         // 안 그러면 매번 새 객체를 만드는 select 가 스냅숏을 흔들어 끝없이 다시 그린다. 자원 select 는 core 와 함께 같다
+        // 자원 select 가 읽은 바꾸기 칸도 그대로여야 한다 — 겹이 바뀌면 select 만 다시 돈다(정의 · 캐시 · 받기는 그대로)
         let data: unknown = raw;
-        if (before && Object.is(before.raw, raw) && before.screen === screen) data = before.data;
-        else {
-          if (data !== undefined && select) data = select(data as D, a as A);
+        let reads: Item["reads"] = [];
+        if (
+          before &&
+          Object.is(before.raw, raw) &&
+          before.screen === screen &&
+          before.reads.every(([c, s]) => c.snapshot() === s)
+        ) {
+          data = before.data;
+          reads = before.reads;
+        } else {
+          if (data !== undefined && select) {
+            const run = track(() => select(data as D, a as A));
+            data = run.value;
+            reads = run.reads.map((c) => [c, c.snapshot()]);
+          }
           if (data !== undefined && screen) data = screen(data, a);
         }
         const values: Record<string, unknown> = {
@@ -154,7 +169,7 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
           out = {};
           for (const f of fields) out[f] = values[f];
         }
-        byId.set(id, { on, out, raw, screen, data, filled });
+        byId.set(id, { on, out, raw, screen, data, filled, reads });
         return out;
       });
       const visible = argsList.flatMap((a, i) => {
@@ -170,7 +185,38 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
       last.current = { core, fields: fields.join(), items, byId, visible };
       return items;
     };
-    const items = React.useSyncExternalStore(active.some(Boolean) ? subscribe : subscribeNone, snapshot, snapshot);
+    // 자원 구독에 더해 적힌 바꾸기 칸도 알린다 — 칸 구독은 아래 효과가 렌더마다 맞추고 이 알림 자리를 부른다
+    const notify = React.useRef<(() => void) | null>(null);
+    const anyActive = active.some(Boolean);
+    const subscribeAll = React.useCallback(
+      (listener: () => void) => {
+        notify.current = listener;
+        const off = (anyActive ? subscribe : subscribeNone)(listener);
+        return () => {
+          off();
+          if (notify.current === listener) notify.current = null;
+        };
+      },
+      [core, anyActive],
+    );
+    const items = React.useSyncExternalStore(subscribeAll, snapshot, snapshot);
+    // 적힌 칸을 앞과 견주어 빠진 것만 풀고 새 것만 건다. 렌더와 이 효과 사이에 칸이 바뀌었으면 한 번 알린다
+    const reading = React.useRef(new Map<MutationChannel, () => void>());
+    React.useEffect(() => {
+      const want = new Map<MutationChannel, MutationSnapshot<Fn>>();
+      last.current?.byId.forEach((item) => item.reads.forEach(([c, s]) => want.set(c, s)));
+      const map = reading.current;
+      map.forEach((stop, c) => want.has(c) || (stop(), map.delete(c)));
+      want.forEach((_, c) => map.has(c) || map.set(c, c.subscribe(() => notify.current?.())));
+      for (const [c, s] of want) if (c.snapshot() !== s) return void notify.current?.();
+    });
+    React.useEffect(() => {
+      const map = reading.current;
+      return () => {
+        map.forEach((stop) => stop());
+        map.clear();
+      };
+    }, []);
     // 화면 간격은 렌더마다 새 함수여도 된다 — 타이머가 걸릴 때 마지막 값을 읽는다
     const interval = React.useRef(options?.refetchInterval);
     // 그려진 뒤에야 prev 를 넘긴다 — 한 렌더 안에서 스냅숏이 여러 번 불려도 모두 같은 앞 렌더를 본다
