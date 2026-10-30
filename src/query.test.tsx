@@ -927,3 +927,8 @@ it("release: disposeStores 뒤 앞 자원의 타이머가 터져도 다시 지�
   expect(state(key).getData("a")).toBe("새 a");
   expect(result.current).toMatchObject({ data: "새 a", status: "ready" });
 });
+
+it("타입: 동기 바꾸기도 부르면 Promise 를 돌려준다", () => {
+  const r = createResource(() => ({ double: (x: number) => x * 2 }));
+  expectTypeOf(r.double(1)).toEqualTypeOf<Promise<number>>();
+});

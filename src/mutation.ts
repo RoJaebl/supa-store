@@ -11,8 +11,9 @@ export interface MutationSnapshot<F extends Fn> {
   /** 마지막으로 끝난 호출이 성공했으면 그 결과 */
   readonly data: Awaited<ReturnType<F>> | undefined;
 }
-/** 부를 수 있는 바꾸기 — 상태 칸은 읽기 전용 속성 */
-export type MutationFn<F extends Fn> = F & MutationSnapshot<F> & { reset(): void };
+/** 부를 수 있는 바꾸기 — 언제나 Promise 를 돌려준다(동기 함수여도). 상태 칸은 읽기 전용 속성 */
+export type MutationFn<F extends Fn> = ((...args: Parameters<F>) => Promise<Awaited<ReturnType<F>>>) &
+  MutationSnapshot<F> & { reset(): void };
 export interface MutationHooks<F extends Fn> {
   onSuccess?: (result: Awaited<ReturnType<F>>, ...args: Parameters<F>) => void;
   onError?: (error: unknown, ...args: Parameters<F>) => void;
