@@ -64,6 +64,19 @@ it("실패하면 error 를 적고 onError · onSettled 를 부른 뒤 빠진다"
   expect(m.call.inflight).toEqual([]);
 });
 
+it("호출을 시작하면 앞 실패의 error 를 지운다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn);
+  const p1 = m.call(1);
+  calls[0]!.reject(new Error("boom"));
+  await expect(p1).rejects.toThrow("boom");
+  expect(m.call.error).toBe("boom");
+  const p2 = m.call(2);
+  expect(m.call.error).toBeNull();
+  calls[1]!.resolve(2);
+  await p2;
+});
+
 it("늦은 응답은 data · error · 콜백을 건드리지 않고 자기 결과로 끝난다", async () => {
   const { fn, calls } = controlled<number>();
   const onSuccess = vi.fn();

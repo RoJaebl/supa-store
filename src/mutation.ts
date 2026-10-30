@@ -61,9 +61,9 @@ export function createMutation<F extends Fn>(
     state = { ...state, ...patch };
     listeners.forEach((l) => l());
   };
-  const line = (next: typeof calls) => {
+  const line = (next: typeof calls, patch: Partial<MutationSnapshot<F>> = {}) => {
     calls = next;
-    write({ inflight: next.map((c) => c.args), pending: next.length > 0 });
+    write({ ...patch, inflight: next.map((c) => c.args), pending: next.length > 0 });
   };
   const channel: MutationChannel = {
     subscribe(listener) {
@@ -75,7 +75,8 @@ export function createMutation<F extends Fn>(
 
   const call = async (...args: Parameters<F>) => {
     const n = ++sent;
-    line([...calls, { n, args }]);
+    // 다시 부르면 앞 실패의 문구를 지운다 — 0.2 의 화면별 바꾸기와 같다
+    line([...calls, { n, args }], { error: null });
     try {
       const result = await fn(...args);
       if (n > done) {
