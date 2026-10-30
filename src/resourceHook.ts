@@ -1,7 +1,10 @@
 // 자원 훅 — 정의 파일과 함께 서버 쪽에서도 평가되므로 "use client" 를 두지 않고 React 를 이름공간으로 가져온다
 import * as React from "react";
 import type { MutationView, PlaceholderData, Prev, Status } from "./query.js";
+import { type MutationChannel, type MutationFn, message } from "./mutation.js";
 import { type RefetchInterval, valueOf } from "./refetch.js";
+
+export { message };
 
 type Fn = (...args: any[]) => any;
 type CellView<D> = { data: D | undefined; status: Status; error: string | null; isFetching: boolean };
@@ -19,7 +22,8 @@ export interface ResourceCore<A, D> {
   select: ((data: D, args: A) => unknown) | undefined;
   /** 자원의 자리 채우기 — 화면의 것보다 먼저 구한다 */
   placeholderData: PlaceholderData<A, D> | undefined;
-  mutations: Record<string, Fn>;
+  /** 바꾸기마다 자원이 쥔 상태 — call 은 부를 수 있는 바꾸기, channel 은 그 구독 단위 */
+  mutations: Record<string, { call: MutationFn<Fn>; channel: MutationChannel }>;
   names: string[];
   /** 화면이 args 를 보기 시작한다(주기 받기) — 풀기 함수를 돌려준다 */
   watch(args: A | undefined, screen: RefetchInterval<A | undefined>): () => void;
@@ -29,7 +33,6 @@ export interface ResourceCore<A, D> {
 
 export const QUERY_FIELDS = ["data", "status", "error", "isPlaceholderData", "isFetching", "refetch"];
 export const IDLE: CellView<never> = { data: undefined, status: "idle", error: null, isFetching: false };
-export const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export const noop = () => {};
 export const subscribeNone = () => noop;
 
@@ -225,7 +228,7 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
 
     // 바꾸기마다 훅을 정해진 차례로 부른다 — 꼴 · 고르기와 상관없이 훅 순서가 같다
     const views: Record<string, unknown> = {};
-    for (const name of names) views[name] = useMutation(mutations[name]!);
+    for (const name of names) views[name] = useMutation(mutations[name]!.call);
 
     if (list) return items;
     const item = items[0]!;

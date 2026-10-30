@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { createStore, disposeStores, getStore, overrideStore, resetStores } from "./index.js";
-import { createEvent, createResource, type Cache } from "./query.js";
+import { createEvent, createResource, type Cache, type MutationFn } from "./query.js";
 import { useStore } from "./react.js";
 
 beforeEach(() => resetStores());
@@ -46,7 +46,7 @@ it("타입: cache 를 쓰면 (cache: Cache<A, D>) 로 적고, 상태와 화면�
     },
   }));
   expectTypeOf(resource.getData()).toEqualTypeOf<number[] | undefined>();
-  expectTypeOf(resource.add).toEqualTypeOf<(value: number) => Promise<number>>();
+  expectTypeOf(resource.add).toEqualTypeOf<MutationFn<(value: number) => Promise<number>>>();
   expectTypeOf(resource).not.toHaveProperty("query");
   // cache 를 쓰지 않으면 적지 않아도 query 에서 추론한다
   const plain = createResource(() => ({ query: async (id: string) => id.length }));
@@ -610,6 +610,58 @@ it("바꾸기: store 끼리 부르는 바꾸기는 실패하면 던진다", asyn
     })),
   );
   await expect(state(key).save()).rejects.toThrow("저장하지 못했다");
+});
+it("바꾸기: store 에서 바로 부른 바꾸기도 inflight 에 보인다", async () => {
+  const m = controlled<number>();
+  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
+  const p = state(key).save(1);
+  expect(state(key).save.inflight).toEqual([[1]]);
+  expect(state(key).save.pending).toBe(true);
+  m.calls[0]!.d.resolve(1);
+  await p;
+  expect(state(key).save.inflight).toEqual([]);
+  expect(state(key).save.data).toBe(1);
+});
+it("바꾸기: onSuccess 에서 자기 캐시에 setData 하면 앞서 떠난 받기의 응답이 덮지 못한다", async () => {
+  const q = controlled<number>();
+  const m = controlled<number>();
+  const key = define(() => {
+    const r = createResource(() => ({ query: () => q.fn(), save: (x: number) => m.fn(x) }), {
+      onSuccess: { save: (next) => r.setData(next) },
+    });
+    return r;
+  });
+  const fetching = state(key).fetch();
+  const saving = state(key).save(2);
+  m.calls[0]!.d.resolve(2);
+  await saving;
+  q.calls[0]!.d.resolve(1);
+  await fetching;
+  expect(state(key).getData()).toBe(2);
+});
+it("바꾸기: 날아가는 중에 resetStores 하면 옛 호출은 던지지 않고 새 자원의 inflight 는 비어 있다", async () => {
+  const m = controlled<number>();
+  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
+  const p = state(key).save(1);
+  resetStores();
+  expect(state(key).save.inflight).toEqual([]);
+  m.calls[0]!.d.resolve(1);
+  await expect(p).resolves.toBe(1);
+  expect(state(key).save.inflight).toEqual([]);
+});
+it("타입: 바꾸기의 inflight 는 인자 목록이고, 콜백은 바꾸기 이름을 열쇠로 결과 타입을 받는다", () => {
+  const r = createResource(() => ({ save: async (value: number) => String(value) }), {
+    onSuccess: { save: (result) => expectTypeOf(result).toEqualTypeOf<string>() },
+    onError: { save: (_e, value) => expectTypeOf(value).toEqualTypeOf<number>() },
+    scope: { save: { id: "s" } },
+  });
+  expectTypeOf(r.save.inflight).toEqualTypeOf<readonly [value: number][]>();
+  expectTypeOf(r.save.data).toEqualTypeOf<string | undefined>();
+  expectTypeOf(r.save(1)).toEqualTypeOf<Promise<string>>();
+  createResource(() => ({ save: async (value: number) => String(value) }), {
+    // @ts-expect-error 없는 바꾸기 이름
+    onSuccess: { nope: () => {} },
+  });
 });
 
 // ── 고르기·this·이름 ───────────────────────────────────

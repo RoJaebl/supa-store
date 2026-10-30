@@ -2,8 +2,10 @@
 // 훅은 resourceHook.ts 에 살고, 이 파일은 React 를 가져오지 않는다
 import { USE } from "./index.js";
 import { createRefetcher, type RefetchInterval } from "./refetch.js";
-import { IDLE, makeResourceHook, message, noop, QUERY_FIELDS } from "./resourceHook.js";
+import { createMutation, type MutationFn, type MutationHooks, message } from "./mutation.js";
+import { IDLE, makeResourceHook, noop, QUERY_FIELDS } from "./resourceHook.js";
 
+export type { MutationFn, MutationHooks, MutationSnapshot } from "./mutation.js";
 export type { RefetchInterval };
 
 type Fn = (...args: any[]) => any;
@@ -84,10 +86,14 @@ export interface MutationView<F extends Fn> {
   data: Awaited<ReturnType<F>> | undefined;
   reset(): void;
 }
-/** 정의한 객체에서 query 를 뺀 함수 칸 — 바꾸기 */
-export type Mutations<R> = { [K in keyof R as K extends "query" ? never : R[K] extends Fn ? K : never]: R[K] };
+/** 정의한 객체에서 query 를 뺀 함수 칸 — 정의한 그대로의 바꾸기 함수 */
+type Defined<R> = { [K in keyof R as K extends "query" ? never : R[K] extends Fn ? K : never]: R[K] };
 // & Fn 으로 좁히면 겹친 서명의 마지막인 Fn 이 ReturnType 을 정해 data 가 any 가 된다 — Extract 로 좁힌다
-export type ResourceView<D, R> = QueryView<D> & { [K in keyof Mutations<R>]: MutationView<Extract<Mutations<R>[K], Fn>> };
+/** 바꾸기 — 자원이 상태 칸을 달아 감싼 함수 */
+export type Mutations<R> = { [K in keyof Defined<R>]: MutationFn<Extract<Defined<R>[K], Fn>> };
+export type ResourceView<D, R> = QueryView<D> & { [K in keyof Defined<R>]: MutationView<Extract<Defined<R>[K], Fn>> };
+/** 바꾸기 이름을 열쇠로 그 바꾸기의 콜백(또는 scope)을 적는다 — 없는 이름은 타입 오류다 */
+type ByName<R, H extends keyof MutationHooks<Fn>> = { [K in keyof Defined<R>]?: MutationHooks<Extract<Defined<R>[K], Fn>>[H] };
 type ViewName<D, R> = keyof ResourceView<D, R> & string;
 /** 이 화면이 바로 전 렌더에 보이던 args 와 그 값(select 전 D) */
 export type Prev<A, D> = { args: A; data: D };
@@ -188,6 +194,11 @@ export function createResource<A = void, D = never, R extends object = object, S
     refetchInterval?: RefetchInterval<A>;
     /** 그 args 를 보던 마지막 화면이 빠지고(화면 없이 받았으면 받기가 끝나고) 이만큼(ms) 지나면 칸을 놓는다. 생략 · false 면 쥔다 */
     release?: number | false;
+    /** 바꾸기가 늦지 않게 성공했을 때 — 결과를 다른 곳에 넘기는 일(setData · emit)은 여기에 적는다 */
+    onSuccess?: ByName<R, "onSuccess">;
+    onError?: ByName<R, "onError">;
+    onSettled?: ByName<R, "onSettled">;
+    scope?: ByName<R, "scope">;
   } = {},
 ): Resource<A, D, R, S> {
   const auto = options.auto ?? true;
@@ -340,16 +351,21 @@ export function createResource<A = void, D = never, R extends object = object, S
 
   const defined = define(cache) as Record<string, unknown>;
   const query = defined.query as ((args: A) => Promise<D>) | undefined;
-  const mutations: Record<string, Fn> = {};
+  const mutations: Record<string, ReturnType<typeof createMutation<Fn>>> = {};
+  const hooksOf = (name: string) => {
+    const { onSuccess, onError, onSettled, scope } = options as Record<string, Record<string, any> | undefined>;
+    return { onSuccess: onSuccess?.[name], onError: onError?.[name], onSettled: onSettled?.[name], scope: scope?.[name] };
+  };
   for (const [name, value] of Object.entries(defined)) {
     if (name === "query" || typeof value !== "function") continue;
     if (RESERVED.includes(name)) throw new Error(`바꾸기 이름으로 쓸 수 없다: ${name}`);
-    mutations[name] = (value as Fn).bind(defined);
+    mutations[name] = createMutation((value as Fn).bind(defined), hooksOf(name));
   }
   const names = Object.keys(mutations);
+  const calls = Object.fromEntries(names.map((name) => [name, mutations[name]!.call]));
 
   const { select, placeholderData } = options;
   const { watch, rearm } = refetcher;
   const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names, watch, rearm });
-  return Object.assign(cache, mutations, { [USE]: useResource }) as unknown as Resource<A, D, R, S>;
+  return Object.assign(cache, calls, { [USE]: useResource }) as unknown as Resource<A, D, R, S>;
 }
