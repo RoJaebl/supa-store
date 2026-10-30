@@ -1,7 +1,10 @@
 // 자원 훅 — 정의 파일과 함께 서버 쪽에서도 평가되므로 "use client" 를 두지 않고 React 를 이름공간으로 가져온다
 import * as React from "react";
 import type { MutationView, PlaceholderData, Prev, Status } from "./query.js";
+import { type MutationChannel, type MutationFn, type MutationSnapshot, message, track } from "./mutation.js";
 import { type RefetchInterval, valueOf } from "./refetch.js";
+
+export { message };
 
 type Fn = (...args: any[]) => any;
 type CellView<D> = { data: D | undefined; status: Status; error: string | null; isFetching: boolean };
@@ -9,7 +12,7 @@ type CellView<D> = { data: D | undefined; status: Status; error: string | null; 
 /** createResource 가 훅에 넘기는 안쪽 */
 export interface ResourceCore<A, D> {
   /** stale 은 보지 않는 동안 무효화된 칸 — 화면이 보기 시작하면 곧바로 다시 받는다 */
-  cellOf(args: A | undefined): { view: CellView<D>; inflight?: Promise<D>; stale?: boolean };
+  cellOf(args: A | undefined): { view: CellView<D>; request?: Promise<D>; stale?: boolean };
   load(args: A | undefined, force?: boolean): Promise<D>;
   subscribe(listener: () => void): () => void;
   idOf(args: A | undefined): string;
@@ -19,7 +22,8 @@ export interface ResourceCore<A, D> {
   select: ((data: D, args: A) => unknown) | undefined;
   /** 자원의 자리 채우기 — 화면의 것보다 먼저 구한다 */
   placeholderData: PlaceholderData<A, D> | undefined;
-  mutations: Record<string, Fn>;
+  /** 바꾸기마다 자원이 쥔 상태 — call 은 부를 수 있는 바꾸기, channel 은 그 구독 단위 */
+  mutations: Record<string, { call: MutationFn<Fn>; channel: MutationChannel }>;
   names: string[];
   /** 화면이 args 를 보기 시작한다(주기 받기) — 풀기 함수를 돌려준다 */
   watch(args: A | undefined, screen: RefetchInterval<A | undefined>): () => void;
@@ -29,9 +33,10 @@ export interface ResourceCore<A, D> {
 
 export const QUERY_FIELDS = ["data", "status", "error", "isPlaceholderData", "isFetching", "refetch"];
 export const IDLE: CellView<never> = { data: undefined, status: "idle", error: null, isFetching: false };
-export const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export const noop = () => {};
 export const subscribeNone = () => noop;
+const IDLE_MUTATION: MutationSnapshot<Fn> = { inflight: [], pending: false, error: null, data: undefined };
+const idleSnapshot = () => IDLE_MUTATION;
 
 const plain = (x: unknown): x is object => {
   if (typeof x !== "object" || x === null) return false;
@@ -58,6 +63,8 @@ type Item = {
   screen: Fn | undefined;
   data: unknown;
   filled: { with: unknown } | undefined;
+  /** 자원 select 가 읽은 바꾸기 칸과 그때의 상태 — 모두 그대로여야 앞 결과를 쓴다 */
+  reads: Array<[MutationChannel, MutationSnapshot<Fn>]>;
 };
 type Last = {
   core: object;
@@ -131,10 +138,23 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         }
         // 자원 select → 화면 select. getSnapshot 은 렌더마다 여러 번 불리므로 받은 값과 화면 select 가 그대로면 앞 결과를 쓴다 —
         // 안 그러면 매번 새 객체를 만드는 select 가 스냅숏을 흔들어 끝없이 다시 그린다. 자원 select 는 core 와 함께 같다
+        // 자원 select 가 읽은 바꾸기 칸도 그대로여야 한다 — 겹이 바뀌면 select 만 다시 돈다(정의 · 캐시 · 받기는 그대로)
         let data: unknown = raw;
-        if (before && Object.is(before.raw, raw) && before.screen === screen) data = before.data;
-        else {
-          if (data !== undefined && select) data = select(data as D, a as A);
+        let reads: Item["reads"] = [];
+        if (
+          before &&
+          Object.is(before.raw, raw) &&
+          before.screen === screen &&
+          before.reads.every(([c, s]) => c.snapshot() === s)
+        ) {
+          data = before.data;
+          reads = before.reads;
+        } else {
+          if (data !== undefined && select) {
+            const run = track(() => select(data as D, a as A));
+            data = run.value;
+            reads = run.reads.map((c) => [c, c.snapshot()]);
+          }
           if (data !== undefined && screen) data = screen(data, a);
         }
         const values: Record<string, unknown> = {
@@ -151,7 +171,7 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
           out = {};
           for (const f of fields) out[f] = values[f];
         }
-        byId.set(id, { on, out, raw, screen, data, filled });
+        byId.set(id, { on, out, raw, screen, data, filled, reads });
         return out;
       });
       const visible = argsList.flatMap((a, i) => {
@@ -167,7 +187,38 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
       last.current = { core, fields: fields.join(), items, byId, visible };
       return items;
     };
-    const items = React.useSyncExternalStore(active.some(Boolean) ? subscribe : subscribeNone, snapshot, snapshot);
+    // 자원 구독에 더해 적힌 바꾸기 칸도 알린다 — 칸 구독은 아래 효과가 렌더마다 맞추고 이 알림 자리를 부른다
+    const notify = React.useRef<(() => void) | null>(null);
+    const anyActive = active.some(Boolean);
+    const subscribeAll = React.useCallback(
+      (listener: () => void) => {
+        notify.current = listener;
+        const off = (anyActive ? subscribe : subscribeNone)(listener);
+        return () => {
+          off();
+          if (notify.current === listener) notify.current = null;
+        };
+      },
+      [core, anyActive],
+    );
+    const items = React.useSyncExternalStore(subscribeAll, snapshot, snapshot);
+    // 적힌 칸을 앞과 견주어 빠진 것만 풀고 새 것만 건다. 렌더와 이 효과 사이에 칸이 바뀌었으면 한 번 알린다
+    const reading = React.useRef(new Map<MutationChannel, () => void>());
+    React.useEffect(() => {
+      const want = new Map<MutationChannel, MutationSnapshot<Fn>>();
+      last.current?.byId.forEach((item) => item.reads.forEach(([c, s]) => want.set(c, s)));
+      const map = reading.current;
+      map.forEach((stop, c) => want.has(c) || (stop(), map.delete(c)));
+      want.forEach((_, c) => map.has(c) || map.set(c, c.subscribe(() => notify.current?.())));
+      for (const [c, s] of want) if (c.snapshot() !== s) return void notify.current?.();
+    });
+    React.useEffect(() => {
+      const map = reading.current;
+      return () => {
+        map.forEach((stop) => stop());
+        map.clear();
+      };
+    }, []);
     // 화면 간격은 렌더마다 새 함수여도 된다 — 타이머가 걸릴 때 마지막 값을 읽는다
     const interval = React.useRef(options?.refetchInterval);
     // 그려진 뒤에야 prev 를 넘긴다 — 한 렌더 안에서 스냅숏이 여러 번 불려도 모두 같은 앞 렌더를 본다
@@ -190,7 +241,7 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         // 하나 꼴의 args 가 바뀐 것만 넘어온 것이다 — 목록에 새로 든 args 는 남이 받는 중인 요청을 나눠 쓴다
         const moved = !list && before !== null && !before.has(id);
         const cell = cellOf(a);
-        if (cell.view.status === "ready" || (cell.inflight && !moved)) return;
+        if (cell.view.status === "ready" || (cell.request && !moved)) return;
         load(a, moved).catch(noop);
       });
       // 자원을 다시 지으면 core 가 새 객체다 — 새 칸은 idle 이므로 다시 받는다
@@ -223,9 +274,9 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
       argsList.forEach((a, i) => active[i] && rearm(a));
     }, [intervalKey]);
 
-    // 바꾸기마다 훅을 정해진 차례로 부른다 — 꼴 · 고르기와 상관없이 훅 순서가 같다
+    // 바꾸기마다 훅을 정해진 차례로 부른다 — 꼴 · 고르기와 상관없이 훅 순서가 같다. 보이지 않는 칸은 구독하지 않는다
     const views: Record<string, unknown> = {};
-    for (const name of names) views[name] = useMutation(mutations[name]!);
+    for (const name of names) views[name] = useSharedMutation(mutations[name]!, !list && shown.includes(name));
 
     if (list) return items;
     const item = items[0]!;
@@ -234,6 +285,28 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
     const out: Record<string, unknown> = {};
     for (const name of shown) out[name] = name in item ? item[name] : views[name];
     return out;
+  };
+}
+
+/** 바꾸기 하나의 자원이 쥔 상태를 읽는다 — 같은 자원을 보는 화면들이 같은 칸을 본다. 늦은 응답은 바꾸기 안에서 이미 걸러진다 */
+export function useSharedMutation(
+  m: { call: MutationFn<Fn>; channel: MutationChannel },
+  on = true,
+): MutationView<Fn> {
+  const { call, channel } = m;
+  // 보이지 않는 칸은 구독하지 않고 고정된 스냅숏을 준다 — 바뀌어도 이 화면을 다시 그리지 않는다. 훅 순서는 그대로다
+  const snap = React.useSyncExternalStore(
+    on ? channel.subscribe : subscribeNone,
+    on ? channel.snapshot : idleSnapshot,
+    on ? channel.snapshot : idleSnapshot,
+  );
+  return {
+    ...snap,
+    mutate(...args) {
+      call(...args).catch(noop);
+    },
+    mutateAsync: (...args) => call(...args),
+    reset: () => call.reset(),
   };
 }
 
@@ -266,6 +339,8 @@ export function useMutation(
   };
   return {
     ...state,
+    // 연결 명령의 화면별 상태는 날아가는 호출 목록을 세지 않는다
+    inflight: [],
     mutate(...args) {
       run(() => fn(...args)).catch(noop);
     },

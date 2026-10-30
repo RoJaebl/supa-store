@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { createStore, disposeStores, getStore, overrideStore, resetStores } from "./index.js";
-import { createEvent, createResource, type Cache } from "./query.js";
+import { createEvent, createResource, type Cache, type MutationFn } from "./query.js";
 import { useStore } from "./react.js";
 
 beforeEach(() => resetStores());
@@ -46,7 +46,7 @@ it("타입: cache 를 쓰면 (cache: Cache<A, D>) 로 적고, 상태와 화면�
     },
   }));
   expectTypeOf(resource.getData()).toEqualTypeOf<number[] | undefined>();
-  expectTypeOf(resource.add).toEqualTypeOf<(value: number) => Promise<number>>();
+  expectTypeOf(resource.add).toEqualTypeOf<MutationFn<(value: number) => Promise<number>>>();
   expectTypeOf(resource).not.toHaveProperty("query");
   // cache 를 쓰지 않으면 적지 않아도 query 에서 추론한다
   const plain = createResource(() => ({ query: async (id: string) => id.length }));
@@ -506,20 +506,6 @@ it("타입: 값 꼴 setData 도 undefined 를 받는다 — 낙관적 갱신을 
 
 // ── 바꾸기 ────────────────────────────────────────────
 
-it("바꾸기: 진행·오류·결과는 부른 화면의 것이다", async () => {
-  const m = controlled<number>();
-  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
-  const one = renderHook(() => view(key));
-  const two = renderHook(() => view(key));
-  act(() => void one.result.current.save.mutate(1));
-  expect(one.result.current.save.pending).toBe(true);
-  expect(two.result.current.save.pending).toBe(false);
-  await act(async () => m.calls[0]!.d.resolve(10));
-  expect(one.result.current.save).toMatchObject({ pending: false, data: 10, error: null });
-  expect(two.result.current.save.data).toBeUndefined();
-  act(() => one.result.current.save.reset());
-  expect(one.result.current.save.data).toBeUndefined();
-});
 it("바꾸기: mutate 는 아무것도 돌려주지 않고, 실패는 error 칸에만 둔다", async () => {
   const key = define(() =>
     createResource(() => ({
@@ -601,6 +587,37 @@ it("바꾸기: 화면 안에서 늦게 온 응답은 버린다", async () => {
   await act(async () => m.calls[0]!.d.resolve("첫째"));
   expect(result.current.go).toMatchObject({ pending: false, data: "둘째" });
 });
+it("바꾸기: 두 화면이 같은 바꾸기 상태를 본다", async () => {
+  const m = controlled<number>();
+  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
+  const one = renderHook(() => view(key));
+  const two = renderHook(() => view(key));
+  act(() => void one.result.current.save.mutate(1));
+  expect(two.result.current.save.pending).toBe(true);
+  expect(two.result.current.save.inflight).toEqual([[1]]);
+  await act(async () => m.calls[0]!.d.resolve(10));
+  expect(two.result.current.save).toMatchObject({ pending: false, data: 10, inflight: [] });
+});
+it("바꾸기: 한 화면의 reset 을 다른 화면도 받는다", async () => {
+  const key = define(() => createResource(() => ({ save: async (x: number) => x })));
+  const one = renderHook(() => view(key));
+  const two = renderHook(() => view(key));
+  await act(async () => void one.result.current.save.mutate(3));
+  expect(two.result.current.save.data).toBe(3);
+  act(() => one.result.current.save.reset());
+  expect(two.result.current.save).toMatchObject({ data: undefined, error: null });
+});
+it("바꾸기: 날아가는 중에 떨어졌다 다시 붙은 화면이 pending 을 본다", async () => {
+  const m = controlled<number>();
+  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
+  const one = renderHook(() => view(key));
+  act(() => void one.result.current.save.mutate(1));
+  one.unmount();
+  const two = renderHook(() => view(key));
+  expect(two.result.current.save.pending).toBe(true);
+  await act(async () => m.calls[0]!.d.resolve(1));
+  expect(two.result.current.save.pending).toBe(false);
+});
 it("바꾸기: store 끼리 부르는 바꾸기는 실패하면 던진다", async () => {
   const key = define(() =>
     createResource(() => ({
@@ -610,6 +627,58 @@ it("바꾸기: store 끼리 부르는 바꾸기는 실패하면 던진다", asyn
     })),
   );
   await expect(state(key).save()).rejects.toThrow("저장하지 못했다");
+});
+it("바꾸기: store 에서 바로 부른 바꾸기도 inflight 에 보인다", async () => {
+  const m = controlled<number>();
+  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
+  const p = state(key).save(1);
+  expect(state(key).save.inflight).toEqual([[1]]);
+  expect(state(key).save.pending).toBe(true);
+  m.calls[0]!.d.resolve(1);
+  await p;
+  expect(state(key).save.inflight).toEqual([]);
+  expect(state(key).save.data).toBe(1);
+});
+it("바꾸기: onSuccess 에서 자기 캐시에 setData 하면 앞서 떠난 받기의 응답이 덮지 못한다", async () => {
+  const q = controlled<number>();
+  const m = controlled<number>();
+  const key = define(() => {
+    const r = createResource(() => ({ query: () => q.fn(), save: (x: number) => m.fn(x) }), {
+      onSuccess: { save: (next) => r.setData(next) },
+    });
+    return r;
+  });
+  const fetching = state(key).fetch();
+  const saving = state(key).save(2);
+  m.calls[0]!.d.resolve(2);
+  await saving;
+  q.calls[0]!.d.resolve(1);
+  await fetching;
+  expect(state(key).getData()).toBe(2);
+});
+it("바꾸기: 날아가는 중에 resetStores 하면 옛 호출은 던지지 않고 새 자원의 inflight 는 비어 있다", async () => {
+  const m = controlled<number>();
+  const key = define(() => createResource(() => ({ save: (x: number) => m.fn(x) })));
+  const p = state(key).save(1);
+  resetStores();
+  expect(state(key).save.inflight).toEqual([]);
+  m.calls[0]!.d.resolve(1);
+  await expect(p).resolves.toBe(1);
+  expect(state(key).save.inflight).toEqual([]);
+});
+it("타입: 바꾸기의 inflight 는 인자 목록이고, 콜백은 바꾸기 이름을 열쇠로 결과 타입을 받는다", () => {
+  const r = createResource(() => ({ save: async (value: number) => String(value) }), {
+    onSuccess: { save: (result) => expectTypeOf(result).toEqualTypeOf<string>() },
+    onError: { save: (_e, value) => expectTypeOf(value).toEqualTypeOf<number>() },
+    scope: { save: { id: "s" } },
+  });
+  expectTypeOf(r.save.inflight).toEqualTypeOf<readonly [value: number][]>();
+  expectTypeOf(r.save.data).toEqualTypeOf<string | undefined>();
+  expectTypeOf(r.save(1)).toEqualTypeOf<Promise<string>>();
+  createResource(() => ({ save: async (value: number) => String(value) }), {
+    // @ts-expect-error 없는 바꾸기 이름
+    onSuccess: { nope: () => {} },
+  });
 });
 
 // ── 고르기·this·이름 ───────────────────────────────────
@@ -621,6 +690,39 @@ it("고르기: pick: [\"save\"] 로 꺼내면 조회를 시작하지 않는다",
   await flush();
   expect(query).not.toHaveBeenCalled();
   expect(Object.keys(result.current)).toEqual(["save"]);
+});
+it("고르기: pick: ['data'] 화면은 다른 화면의 mutate 로 다시 그리지 않는다", async () => {
+  const key = define(() => createResource(() => ({ query: async () => 1, save: async (x: number) => x })));
+  let renders = 0;
+  renderHook(() => (renders++, view(key, { pick: ["data"] })));
+  const other = renderHook(() => view(key));
+  await flush();
+  const before = renders;
+  await act(async () => void other.result.current.save.mutate(2));
+  expect(renders).toBe(before);
+});
+it("고르기: 목록 꼴 화면은 다른 화면의 mutate 로 다시 그리지 않는다", async () => {
+  const key = define(() => createResource(() => ({ query: async (x: number) => x, save: async (x: number) => x })));
+  let renders = 0;
+  renderHook(() => (renders++, view(key, { args: [1, 2] })));
+  const other = renderHook(() => view(key, { args: 1 }));
+  await flush();
+  const before = renders;
+  await act(async () => void other.result.current.save.mutate(2));
+  expect(renders).toBe(before);
+});
+it("바꾸기: resetStores 는 scope 의 줄을 비운다 — 뒤 호출이 옛 호출을 기다리지 않는다", async () => {
+  const m = controlled<number>();
+  const key = define(() =>
+    createResource(() => ({ save: (x: number) => m.fn(x) }), { scope: { save: { id: "reset-stores" } } }),
+  );
+  void state(key).save(1);
+  resetStores();
+  const p = state(key).save(2);
+  await Promise.resolve();
+  expect(m.calls).toHaveLength(2);
+  m.calls[1]!.d.resolve(2);
+  await expect(p).resolves.toBe(2);
 });
 it("this: 메서드 꼴은 this.다른함수() 를 부를 수 있고, 화살표 꼴과 섞어도 된다", async () => {
   const key = define(() =>
@@ -824,4 +926,9 @@ it("release: disposeStores 뒤 앞 자원의 타이머가 터져도 다시 지�
   tick(600);
   expect(state(key).getData("a")).toBe("새 a");
   expect(result.current).toMatchObject({ data: "새 a", status: "ready" });
+});
+
+it("타입: 동기 바꾸기도 부르면 Promise 를 돌려준다", () => {
+  const r = createResource(() => ({ double: (x: number) => x * 2 }));
+  expectTypeOf(r.double(1)).toEqualTypeOf<Promise<number>>();
 });

@@ -259,3 +259,14 @@ it("dispose: ctx 로 읽은 store 가 다시 지어지면 읽던 store 의 [DISP
   expect(readerDisposers[0]).toHaveBeenCalledTimes(1);
   expect(readerDisposers).toHaveLength(2);
 });
+it("ctx() 는 짓기가 끝난 뒤 자기 상태를 준다", () => {
+  let self: () => unknown = () => null;
+  createStore("ctx.self", (_set, _get, ctx) => ({ n: 1, read: () => (self = () => ctx(), ctx()) }));
+  const state = getStore("ctx.self" as never).getState() as any;
+  expect(state.read()).toBe(state);
+  expect(self()).toBe(getStore("ctx.self" as never).getState());
+});
+it("짓는 동안 ctx() 를 부르면 정해진 문구로 실패한다", () => {
+  createStore("ctx.early", (_set, _get, ctx) => ({ n: (ctx() as any).n }));
+  expect(() => getStore("ctx.early" as never).getState()).toThrow("짓는 동안에는 자기 자신을 꺼낼 수 없다: ctx.early");
+});

@@ -1,3 +1,5 @@
+import { resetScopes } from "./mutation.js";
+
 /** 상태에 이 표식으로 함수를 두면 useStore 가 꺼내기를 그 함수에 맡긴다 — 그 함수는 훅이다 */
 export const USE: unique symbol = Symbol.for("supa-store.use") as never;
 /** 상태 객체에 `[DISPOSE]: () => void` 가 있으면 그 store 를 다시 짓기 직전과 disposeStores 에서 부른다 */
@@ -34,11 +36,13 @@ export type Picked<K, O> = O extends { pick: readonly (infer N)[] }
     : StateOf<K>;
 
 /** creator 의 셋째 인자 — 다른 store 의 부르는 순간의 값을 꺼낸다. 구독은 없다 */
-export interface Ctx {
+export interface Ctx<Self extends StateKey = StateKey> {
+  /** 인자 없이 부르면 자기 상태를 준다. 짓는 동안에는 쓸 수 없고, 짓기 기록에도 적지 않는다 */
+  (): StateOf<Self>;
   <K extends StateKey>(key: K): StateOf<K>;
   <K extends StateKey, N extends Names<K>, O extends PickOptions<K, N>>(key: K, options: O): Picked<K, O>;
   /** 지금 짓고 있는 store 의 key — event 에 「누가」를 남길 때 쓴다 */
-  readonly key: string;
+  readonly key: Self;
 }
 
 type Creator = (set: SetState<any>, get: GetState<any>, ctx: Ctx) => object;
@@ -104,7 +108,12 @@ function makeEntry(key: string, definition: Creator): Entry {
     listeners.forEach((l) => l());
   };
   const ctx = Object.assign(
-    (other: string, options?: PickFromOptions) => {
+    (...args: [other?: string, options?: PickFromOptions]) => {
+      const [other, options] = args;
+      if (other === undefined) {
+        if (building[building.length - 1] === key) throw new Error(`짓는 동안에는 자기 자신을 꺼낼 수 없다: ${key}`);
+        return entry.api.getState();
+      }
       // 짓는 동안 꺼낸 key 만 기록한다. 동작 안에서 부를 때 꺼낸 것은 기댐이 아니다
       if (building[building.length - 1] === key) entry.deps.add(other);
       return pickFrom(ensure(entryOf(other)).api.getState(), options);
@@ -172,7 +181,7 @@ function rebuild(keys: Iterable<string>): void {
 /** key 로 등록한다. 짓는 것은 처음 꺼낼 때다. set·get 의 타입은 생성된 StateTypes 에서 온다 */
 export function createStore<K extends string>(
   key: K,
-  creator: (set: SetState<StateOf<K>>, get: GetState<StateOf<K>>, ctx: Ctx) => object,
+  creator: (set: SetState<StateOf<K>>, get: GetState<StateOf<K>>, ctx: Ctx<K & StateKey>) => object,
 ): void {
   const existing = registry.get(key);
   if (!existing) {
@@ -190,7 +199,7 @@ export function createStore<K extends string>(
 /** 처음 등록한 정의 대신 이것으로 짓는다. 그 key 에 기대던 store 도 다시 짓는다 */
 export function overrideStore<K extends StateKey>(
   key: K,
-  creator: (set: SetState<StateOf<K>>, get: GetState<StateOf<K>>, ctx: Ctx) => object,
+  creator: (set: SetState<StateOf<K>>, get: GetState<StateOf<K>>, ctx: Ctx<K>) => object,
 ): void {
   entryOf(key).override = creator as Creator;
   rebuild([key]);
@@ -205,6 +214,7 @@ export function getStore<K extends StateKey>(key: K): StoreApi<StateOf<K>> {
 export function resetStores(): void {
   registry.forEach((entry) => (entry.override = undefined));
   rebuild(registry.keys());
+  resetScopes();
 }
 
 /** 지어진 모든 store 의 [DISPOSE] 를 부르고 지어지지 않은 상태로 되돌린다. 다시 짓지 않는다(다음에 꺼낼 때 짓는다) — 구독자는 남는다 */

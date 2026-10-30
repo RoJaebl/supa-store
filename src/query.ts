@@ -2,8 +2,10 @@
 // 훅은 resourceHook.ts 에 살고, 이 파일은 React 를 가져오지 않는다
 import { USE } from "./index.js";
 import { createRefetcher, type RefetchInterval } from "./refetch.js";
-import { IDLE, makeResourceHook, message, noop, QUERY_FIELDS } from "./resourceHook.js";
+import { createMutation, type MutationFn, type MutationHooks, message } from "./mutation.js";
+import { IDLE, makeResourceHook, noop, QUERY_FIELDS } from "./resourceHook.js";
 
+export type { MutationFn, MutationHooks, MutationSnapshot } from "./mutation.js";
 export type { RefetchInterval };
 
 type Fn = (...args: any[]) => any;
@@ -79,15 +81,21 @@ export interface MutationView<F extends Fn> {
   mutate(...args: Parameters<F>): void;
   /** 결과를 돌려주고 실패하면 원래 오류를 던진다. error·data 칸도 mutate 와 같이 채운다 */
   mutateAsync(...args: Parameters<F>): Promise<Awaited<ReturnType<F>>>;
+  /** 보냈지만 아직 끝나지 않은 호출들의 인자 — 보낸 차례대로 선다 */
+  readonly inflight: readonly Parameters<F>[];
   pending: boolean;
   error: string | null;
   data: Awaited<ReturnType<F>> | undefined;
   reset(): void;
 }
-/** 정의한 객체에서 query 를 뺀 함수 칸 — 바꾸기 */
-export type Mutations<R> = { [K in keyof R as K extends "query" ? never : R[K] extends Fn ? K : never]: R[K] };
+/** 정의한 객체에서 query 를 뺀 함수 칸 — 정의한 그대로의 바꾸기 함수 */
+type Defined<R> = { [K in keyof R as K extends "query" ? never : R[K] extends Fn ? K : never]: R[K] };
 // & Fn 으로 좁히면 겹친 서명의 마지막인 Fn 이 ReturnType 을 정해 data 가 any 가 된다 — Extract 로 좁힌다
-export type ResourceView<D, R> = QueryView<D> & { [K in keyof Mutations<R>]: MutationView<Extract<Mutations<R>[K], Fn>> };
+/** 바꾸기 — 자원이 상태 칸을 달아 감싼 함수 */
+export type Mutations<R> = { [K in keyof Defined<R>]: MutationFn<Extract<Defined<R>[K], Fn>> };
+export type ResourceView<D, R> = QueryView<D> & { [K in keyof Defined<R>]: MutationView<Extract<Defined<R>[K], Fn>> };
+/** 바꾸기 이름을 열쇠로 그 바꾸기의 콜백(또는 scope)을 적는다 — 없는 이름은 타입 오류다 */
+type ByName<R, H extends keyof MutationHooks<Fn>> = { [K in keyof Defined<R>]?: MutationHooks<Extract<Defined<R>[K], Fn>>[H] };
 type ViewName<D, R> = keyof ResourceView<D, R> & string;
 /** 이 화면이 바로 전 렌더에 보이던 args 와 그 값(select 전 D) */
 export type Prev<A, D> = { args: A; data: D };
@@ -159,7 +167,7 @@ interface Cell<A, D> {
   view: { data: D | undefined; status: Status; error: string | null; isFetching: boolean };
   /** 요청 차례 — 이 차례가 아닌 응답은 버린다 */
   seq: number;
-  inflight?: Promise<D>;
+  request?: Promise<D>;
   /** 보지 않는 동안 무효화됐다 — 다시 볼 때 · fetch 할 때 받는다 */
   stale?: boolean;
 }
@@ -188,6 +196,11 @@ export function createResource<A = void, D = never, R extends object = object, S
     refetchInterval?: RefetchInterval<A>;
     /** 그 args 를 보던 마지막 화면이 빠지고(화면 없이 받았으면 받기가 끝나고) 이만큼(ms) 지나면 칸을 놓는다. 생략 · false 면 쥔다 */
     release?: number | false;
+    /** 바꾸기가 늦지 않게 성공했을 때 — 결과를 다른 곳에 넘기는 일(setData · emit)은 여기에 적는다 */
+    onSuccess?: ByName<R, "onSuccess">;
+    onError?: ByName<R, "onError">;
+    onSettled?: ByName<R, "onSettled">;
+    scope?: ByName<R, "scope">;
   } = {},
 ): Resource<A, D, R, S> {
   const auto = options.auto ?? true;
@@ -207,7 +220,7 @@ export function createResource<A = void, D = never, R extends object = object, S
       cells.delete(id);
       // 진행 중 응답은 떨어진 칸에 닿으므로 버려진다 — 주기에도 알리지 않는다. 다시 보면 처음 간격부터
       cell.seq += 1;
-      cell.inflight = undefined;
+      cell.request = undefined;
       refetcher.forget(cell.args as A);
     }, release);
     // 서버에서 fetch 로 받은 칸의 타이머가 프로세스를 붙잡지 않게
@@ -223,7 +236,7 @@ export function createResource<A = void, D = never, R extends object = object, S
     resource: options.refetchInterval,
     load: (args) => load(args),
     idOf,
-    inflight: (args) => cells.get(idOf(args))?.inflight,
+    inflight: (args) => cells.get(idOf(args))?.request,
     // 낡은 칸을 다시 보면 받는다 — 그사이 fetch 가 받는 중이면 그것을 나눠 쓴다
     onWatch(args) {
       const id = idOf(args);
@@ -254,7 +267,7 @@ export function createResource<A = void, D = never, R extends object = object, S
   /** 받는다. 진행 중인 요청이 있으면 그것을 나눠 쓰고, force 면 새로 보내 앞 요청의 응답을 버린다 */
   const load = (args: A | undefined, force = false): Promise<D> => {
     const cell = cellOf(args);
-    if (cell.inflight && !force) return cell.inflight;
+    if (cell.request && !force) return cell.request;
     const seq = ++cell.seq;
     cell.stale = false;
     // 받은 값이 있으면 status · error 는 그대로 두고 isFetching 만 켠다
@@ -262,8 +275,8 @@ export function createResource<A = void, D = never, R extends object = object, S
     // 실행자는 곧바로 돈다 — query 가 동기로 던져도 거절로 바뀐다
     // 이 칸의 마지막 요청이 끝날 때만 주기에 알린다 — setData 로 응답을 버려도 끝은 알린다
     const end = (ok: boolean, view: Partial<Cell<A, D>["view"]>) => {
-      const last = cell.inflight === request;
-      if (last) cell.inflight = undefined;
+      const last = cell.request === request;
+      if (last) cell.request = undefined;
       const next = { ...(cell.seq === seq ? view : {}), ...(last ? { isFetching: false } : {}) };
       if (Object.keys(next).length) write(cell, next);
       if (last) refetcher.settled(args as A, ok);
@@ -280,7 +293,7 @@ export function createResource<A = void, D = never, R extends object = object, S
         throw e;
       },
     );
-    cell.inflight = request;
+    cell.request = request;
     return request;
   };
 
@@ -301,7 +314,7 @@ export function createResource<A = void, D = never, R extends object = object, S
   // 무효화 앞에 떠난 응답을 뒤 fetch · 다시 보는 화면이 받지 않게. 그래서 낡은 칸에는 앞서 떠난 요청이 없다
   const reload = (cell: Cell<A, D>) => {
     if (cell.view.status === "idle") return;
-    if (cell.inflight || refetcher.watching(cell.args as A)) return load(cell.args, true).catch(noop);
+    if (cell.request || refetcher.watching(cell.args as A)) return load(cell.args, true).catch(noop);
     cell.stale = true;
   };
   const fetchOne = (args: A | undefined) => {
@@ -311,10 +324,10 @@ export function createResource<A = void, D = never, R extends object = object, S
     const gone = () => cells.get(idOf(args)) !== cell;
     const wait = (p: Promise<D>): Promise<D> =>
       p.then(
-        (d) => (gone() ? d : cell.inflight ? wait(cell.inflight) : cell.view.data === undefined ? d : (cell.view.data as D)),
-        (e) => (!gone() && cell.inflight ? wait(cell.inflight) : Promise.reject(e)),
+        (d) => (gone() ? d : cell.request ? wait(cell.request) : cell.view.data === undefined ? d : (cell.view.data as D)),
+        (e) => (!gone() && cell.request ? wait(cell.request) : Promise.reject(e)),
       );
-    if (cell.inflight) return wait(cell.inflight);
+    if (cell.request) return wait(cell.request);
     return cell.view.status === "ready" && !cell.stale ? Promise.resolve(cell.view.data as D) : wait(load(args));
   };
 
@@ -340,16 +353,21 @@ export function createResource<A = void, D = never, R extends object = object, S
 
   const defined = define(cache) as Record<string, unknown>;
   const query = defined.query as ((args: A) => Promise<D>) | undefined;
-  const mutations: Record<string, Fn> = {};
+  const mutations: Record<string, ReturnType<typeof createMutation<Fn>>> = {};
+  const hooksOf = (name: string) => {
+    const { onSuccess, onError, onSettled, scope } = options as Record<string, Record<string, any> | undefined>;
+    return { onSuccess: onSuccess?.[name], onError: onError?.[name], onSettled: onSettled?.[name], scope: scope?.[name] };
+  };
   for (const [name, value] of Object.entries(defined)) {
     if (name === "query" || typeof value !== "function") continue;
     if (RESERVED.includes(name)) throw new Error(`바꾸기 이름으로 쓸 수 없다: ${name}`);
-    mutations[name] = (value as Fn).bind(defined);
+    mutations[name] = createMutation((value as Fn).bind(defined), hooksOf(name));
   }
   const names = Object.keys(mutations);
+  const calls = Object.fromEntries(names.map((name) => [name, mutations[name]!.call]));
 
   const { select, placeholderData } = options;
   const { watch, rearm } = refetcher;
   const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names, watch, rearm });
-  return Object.assign(cache, mutations, { [USE]: useResource }) as unknown as Resource<A, D, R, S>;
+  return Object.assign(cache, calls, { [USE]: useResource }) as unknown as Resource<A, D, R, S>;
 }
