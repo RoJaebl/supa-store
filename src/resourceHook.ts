@@ -9,7 +9,7 @@ type CellView<D> = { data: D | undefined; status: Status; error: string | null; 
 /** createResource 가 훅에 넘기는 안쪽 */
 export interface ResourceCore<A, D> {
   /** stale 은 보지 않는 동안 무효화된 칸 — 화면이 보기 시작하면 곧바로 다시 받는다 */
-  cellOf(args: A | undefined): { view: CellView<D>; inflight?: Promise<D>; stale?: boolean };
+  cellOf(args: A | undefined): { view: CellView<D>; request?: Promise<D>; stale?: boolean };
   load(args: A | undefined, force?: boolean): Promise<D>;
   subscribe(listener: () => void): () => void;
   idOf(args: A | undefined): string;
@@ -190,7 +190,7 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
         // 하나 꼴의 args 가 바뀐 것만 넘어온 것이다 — 목록에 새로 든 args 는 남이 받는 중인 요청을 나눠 쓴다
         const moved = !list && before !== null && !before.has(id);
         const cell = cellOf(a);
-        if (cell.view.status === "ready" || (cell.inflight && !moved)) return;
+        if (cell.view.status === "ready" || (cell.request && !moved)) return;
         load(a, moved).catch(noop);
       });
       // 자원을 다시 지으면 core 가 새 객체다 — 새 칸은 idle 이므로 다시 받는다

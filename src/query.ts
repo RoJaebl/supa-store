@@ -159,7 +159,7 @@ interface Cell<A, D> {
   view: { data: D | undefined; status: Status; error: string | null; isFetching: boolean };
   /** 요청 차례 — 이 차례가 아닌 응답은 버린다 */
   seq: number;
-  inflight?: Promise<D>;
+  request?: Promise<D>;
   /** 보지 않는 동안 무효화됐다 — 다시 볼 때 · fetch 할 때 받는다 */
   stale?: boolean;
 }
@@ -207,7 +207,7 @@ export function createResource<A = void, D = never, R extends object = object, S
       cells.delete(id);
       // 진행 중 응답은 떨어진 칸에 닿으므로 버려진다 — 주기에도 알리지 않는다. 다시 보면 처음 간격부터
       cell.seq += 1;
-      cell.inflight = undefined;
+      cell.request = undefined;
       refetcher.forget(cell.args as A);
     }, release);
     // 서버에서 fetch 로 받은 칸의 타이머가 프로세스를 붙잡지 않게
@@ -223,7 +223,7 @@ export function createResource<A = void, D = never, R extends object = object, S
     resource: options.refetchInterval,
     load: (args) => load(args),
     idOf,
-    inflight: (args) => cells.get(idOf(args))?.inflight,
+    inflight: (args) => cells.get(idOf(args))?.request,
     // 낡은 칸을 다시 보면 받는다 — 그사이 fetch 가 받는 중이면 그것을 나눠 쓴다
     onWatch(args) {
       const id = idOf(args);
@@ -254,7 +254,7 @@ export function createResource<A = void, D = never, R extends object = object, S
   /** 받는다. 진행 중인 요청이 있으면 그것을 나눠 쓰고, force 면 새로 보내 앞 요청의 응답을 버린다 */
   const load = (args: A | undefined, force = false): Promise<D> => {
     const cell = cellOf(args);
-    if (cell.inflight && !force) return cell.inflight;
+    if (cell.request && !force) return cell.request;
     const seq = ++cell.seq;
     cell.stale = false;
     // 받은 값이 있으면 status · error 는 그대로 두고 isFetching 만 켠다
@@ -262,8 +262,8 @@ export function createResource<A = void, D = never, R extends object = object, S
     // 실행자는 곧바로 돈다 — query 가 동기로 던져도 거절로 바뀐다
     // 이 칸의 마지막 요청이 끝날 때만 주기에 알린다 — setData 로 응답을 버려도 끝은 알린다
     const end = (ok: boolean, view: Partial<Cell<A, D>["view"]>) => {
-      const last = cell.inflight === request;
-      if (last) cell.inflight = undefined;
+      const last = cell.request === request;
+      if (last) cell.request = undefined;
       const next = { ...(cell.seq === seq ? view : {}), ...(last ? { isFetching: false } : {}) };
       if (Object.keys(next).length) write(cell, next);
       if (last) refetcher.settled(args as A, ok);
@@ -280,7 +280,7 @@ export function createResource<A = void, D = never, R extends object = object, S
         throw e;
       },
     );
-    cell.inflight = request;
+    cell.request = request;
     return request;
   };
 
@@ -301,7 +301,7 @@ export function createResource<A = void, D = never, R extends object = object, S
   // 무효화 앞에 떠난 응답을 뒤 fetch · 다시 보는 화면이 받지 않게. 그래서 낡은 칸에는 앞서 떠난 요청이 없다
   const reload = (cell: Cell<A, D>) => {
     if (cell.view.status === "idle") return;
-    if (cell.inflight || refetcher.watching(cell.args as A)) return load(cell.args, true).catch(noop);
+    if (cell.request || refetcher.watching(cell.args as A)) return load(cell.args, true).catch(noop);
     cell.stale = true;
   };
   const fetchOne = (args: A | undefined) => {
@@ -311,10 +311,10 @@ export function createResource<A = void, D = never, R extends object = object, S
     const gone = () => cells.get(idOf(args)) !== cell;
     const wait = (p: Promise<D>): Promise<D> =>
       p.then(
-        (d) => (gone() ? d : cell.inflight ? wait(cell.inflight) : cell.view.data === undefined ? d : (cell.view.data as D)),
-        (e) => (!gone() && cell.inflight ? wait(cell.inflight) : Promise.reject(e)),
+        (d) => (gone() ? d : cell.request ? wait(cell.request) : cell.view.data === undefined ? d : (cell.view.data as D)),
+        (e) => (!gone() && cell.request ? wait(cell.request) : Promise.reject(e)),
       );
-    if (cell.inflight) return wait(cell.inflight);
+    if (cell.request) return wait(cell.request);
     return cell.view.status === "ready" && !cell.stale ? Promise.resolve(cell.view.data as D) : wait(load(args));
   };
 
