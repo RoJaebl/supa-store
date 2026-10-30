@@ -1,3 +1,5 @@
+import { resetScopes } from "./mutation.js";
+
 /** 상태에 이 표식으로 함수를 두면 useStore 가 꺼내기를 그 함수에 맡긴다 — 그 함수는 훅이다 */
 export const USE: unique symbol = Symbol.for("supa-store.use") as never;
 /** 상태 객체에 `[DISPOSE]: () => void` 가 있으면 그 store 를 다시 짓기 직전과 disposeStores 에서 부른다 */
@@ -205,6 +207,7 @@ export function getStore<K extends StateKey>(key: K): StoreApi<StateOf<K>> {
 export function resetStores(): void {
   registry.forEach((entry) => (entry.override = undefined));
   rebuild(registry.keys());
+  resetScopes();
 }
 
 /** 지어진 모든 store 의 [DISPOSE] 를 부르고 지어지지 않은 상태로 되돌린다. 다시 짓지 않는다(다음에 꺼낼 때 짓는다) — 구독자는 남는다 */

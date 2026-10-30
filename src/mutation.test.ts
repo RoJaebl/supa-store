@@ -168,3 +168,60 @@ it("상태가 바뀔 때마다 구독자에게 알리고 snapshot 이 새 객체
   m.call.reset();
   expect(seen).toHaveLength(count + 1);
 });
+
+it("같은 scope.id 의 바꾸기는 다른 자원이어도 차례대로 나간다", async () => {
+  const a = controlled<number>();
+  const b = controlled<number>();
+  const ma = createMutation(a.fn, { scope: { id: "s" } });
+  const mb = createMutation(b.fn, { scope: { id: "s" } });
+  const pa = ma.call(1);
+  const pb = mb.call(2);
+  await Promise.resolve();
+  expect(a.calls).toHaveLength(1);
+  expect(b.calls).toHaveLength(0);
+  a.calls[0]!.resolve(1);
+  await pa;
+  await Promise.resolve();
+  expect(b.calls).toHaveLength(1);
+  b.calls[0]!.resolve(2);
+  await pb;
+});
+
+it("줄에서 기다리는 호출의 인자도 inflight 에 있다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn, { scope: { id: "w" } });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  expect(m.call.inflight).toEqual([[1], [2]]);
+  calls[0]!.resolve(1);
+  await p1;
+  expect(m.call.inflight).toEqual([[2]]);
+  await Promise.resolve();
+  calls[1]!.resolve(2);
+  await p2;
+});
+
+it("앞 호출이 실패해도 다음 호출이 나간다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn, { scope: { id: "f" } });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  calls[0]!.reject(new Error("x"));
+  await expect(p1).rejects.toThrow("x");
+  await Promise.resolve();
+  expect(calls).toHaveLength(2);
+  calls[1]!.resolve(2);
+  await expect(p2).resolves.toBe(2);
+});
+
+it("scope 가 없으면 동시에 나간다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn);
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  await Promise.resolve();
+  expect(calls).toHaveLength(2);
+  calls[0]!.resolve(1);
+  calls[1]!.resolve(2);
+  await Promise.all([p1, p2]);
+});

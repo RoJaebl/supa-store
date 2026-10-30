@@ -31,6 +31,13 @@ export const message = (e: unknown) => (e instanceof Error ? e.message : String(
 /** 상태 칸을 읽었다고 적는 자리 — 아직 아무것도 하지 않는다 */
 export function noteRead(_channel: MutationChannel): void {}
 
+/** scope.id → 그 줄 마지막 호출이 끝나면 풀리는 약속 — 던지지 않는다 */
+const scopes = new Map<string, Promise<void>>();
+/** 시험 사이에 줄이 남지 않도록 비운다 */
+export function resetScopes(): void {
+  scopes.clear();
+}
+
 const FIELDS = ["inflight", "pending", "error", "data"] as const;
 
 /** 콜백이 던져도 호출의 결과와 inflight 를 붙잡지 않는다 — 콘솔에 남기고 삼킨다 */
@@ -77,7 +84,16 @@ export function createMutation<F extends Fn>(
     const n = ++sent;
     // 다시 부르면 앞 실패의 문구를 지운다 — 0.2 의 화면별 바꾸기와 같다
     line([...calls, { n, args }], { error: null });
+    // 같은 scope 의 앞 호출이 끝나기를 기다린다 — 앞이 실패해도 줄은 풀린다
+    const id = hooks.scope?.id;
+    const prev = id === undefined ? undefined : scopes.get(id);
+    let release = () => {};
+    if (id !== undefined) {
+      const mine = new Promise<void>((r) => (release = () => (scopes.get(id) === mine && scopes.delete(id), r())));
+      scopes.set(id, mine);
+    }
     try {
+      if (prev) await prev;
       const result = await fn(...args);
       if (n > done) {
         done = n;
@@ -97,6 +113,7 @@ export function createMutation<F extends Fn>(
     } finally {
       // 칸과 콜백이 먼저 — 그 뒤에 빠져야 캐시가 서버 값이 된 다음 겹이 빠진다
       line(calls.filter((c) => c.n !== n));
+      release();
     }
   };
   for (const field of FIELDS) {
