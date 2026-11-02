@@ -202,6 +202,7 @@ export function createResource<A = void, D = never, R extends object = object, S
     onSuccess?: ByName<R, "onSuccess">;
     onError?: ByName<R, "onError">;
     onSettled?: ByName<R, "onSettled">;
+    onAllSettled?: ByName<R, "onAllSettled">;
     scope?: ByName<R, "scope">;
   } = {},
 ): Resource<A, D, R, S> {
@@ -357,8 +358,14 @@ export function createResource<A = void, D = never, R extends object = object, S
   const query = defined.query as ((args: A) => Promise<D>) | undefined;
   const mutations: Record<string, ReturnType<typeof createMutation<Fn>>> = {};
   const hooksOf = (name: string) => {
-    const { onSuccess, onError, onSettled, scope } = options as Record<string, Record<string, any> | undefined>;
-    return { onSuccess: onSuccess?.[name], onError: onError?.[name], onSettled: onSettled?.[name], scope: scope?.[name] };
+    const { onSuccess, onError, onSettled, onAllSettled, scope } = options as Record<string, Record<string, any> | undefined>;
+    return {
+      onSuccess: onSuccess?.[name],
+      onError: onError?.[name],
+      onSettled: onSettled?.[name],
+      onAllSettled: onAllSettled?.[name],
+      scope: scope?.[name],
+    };
   };
   for (const [name, value] of Object.entries(defined)) {
     if (name === "query" || typeof value !== "function") continue;

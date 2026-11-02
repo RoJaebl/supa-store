@@ -681,6 +681,94 @@ it("타입: 바꾸기의 inflight 는 인자 목록이고, 콜백은 바꾸기 �
   });
 });
 
+const confirmed = () => {
+  const q = controlled<string>();
+  const m = controlled<string>();
+  const key = define(() => {
+    const r = createResource(() => ({ query: () => q.fn(), patch: (v: string) => m.fn(v) }), {
+      onSuccess: { patch: (next) => r.setData(next) },
+      onAllSettled: { patch: (): Promise<void> => r.invalidate() },
+    });
+    return r;
+  });
+  return { q, m, key };
+};
+it("바꾸기: 서버가 차례를 지키지 않아도 onAllSettled 의 다시 받기가 끝나면 서버 값이 된다", async () => {
+  const { q, m, key } = confirmed();
+  renderHook(() => view(key));
+  await flush();
+  q.calls[0]!.d.resolve("blue");
+  await flush();
+  const red = state(key).patch("red");
+  const green = state(key).patch("green");
+  expect(state(key).patch.inflight).toEqual([["red"], ["green"]]);
+  expect(state(key).patch.optimistic).toEqual([["red"], ["green"]]);
+  expect(state(key).getData()).toBe("blue");
+  m.calls[1]!.d.resolve("green");
+  await green;
+  expect(state(key).patch.inflight).toEqual([["red"]]);
+  expect(state(key).patch.optimistic).toEqual([["green"]]);
+  expect(state(key).getData()).toBe("green");
+  m.calls[0]!.d.resolve("red");
+  await red;
+  await flush();
+  expect(state(key).patch.inflight).toEqual([]);
+  expect(state(key).patch.optimistic).toEqual([["green"]]);
+  expect(state(key).getData()).toBe("green");
+  expect(q.calls).toHaveLength(2);
+  q.calls[1]!.d.resolve("red");
+  await flush();
+  expect(state(key).getData()).toBe("red");
+  expect(state(key).patch.optimistic).toEqual([]);
+});
+it("바꾸기: 확인 응답은 확인 중에 성공한 새 호출의 setData 를 덮지 않는다", async () => {
+  const { q, m, key } = confirmed();
+  renderHook(() => view(key));
+  await flush();
+  q.calls[0]!.d.resolve("blue");
+  await flush();
+  const a = state(key).patch("a");
+  m.calls[0]!.d.resolve("a");
+  await a;
+  await flush();
+  expect(q.calls).toHaveLength(2);
+  const x = state(key).patch("x");
+  m.calls[1]!.d.resolve("x");
+  await x;
+  expect(state(key).getData()).toBe("x");
+  q.calls[1]!.d.resolve("old");
+  await flush();
+  expect(state(key).getData()).toBe("x");
+});
+it("바꾸기: invalidate 의 다시 받기가 실패하면 optimistic 이 비고 실패는 받은 칸의 error 에 남는다", async () => {
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  const { q, m, key } = confirmed();
+  const { result } = renderHook(() => view(key));
+  await flush();
+  q.calls[0]!.d.resolve("blue");
+  await flush();
+  const p = state(key).patch("red");
+  m.calls[0]!.d.resolve("red");
+  await p;
+  await flush();
+  q.calls[1]!.d.reject(new Error("down"));
+  await flush();
+  expect(state(key).patch.optimistic).toEqual([]);
+  expect(result.current.error).toBe("down");
+  expect(logged).not.toHaveBeenCalled();
+  logged.mockRestore();
+});
+it("타입: optimistic 은 인자 목록이고, onAllSettled 의 열쇠는 바꾸기 이름이다", () => {
+  const r = createResource(() => ({ save: async (value: number) => String(value) }), {
+    onAllSettled: { save: () => Promise.resolve() },
+  });
+  expectTypeOf(r.save.optimistic).toEqualTypeOf<readonly [value: number][]>();
+  createResource(() => ({ save: async (value: number) => String(value) }), {
+    // @ts-expect-error 없는 바꾸기 이름
+    onAllSettled: { nope: () => {} },
+  });
+});
+
 // ── 고르기·this·이름 ───────────────────────────────────
 
 it("고르기: pick: [\"save\"] 로 꺼내면 조회를 시작하지 않는다", async () => {

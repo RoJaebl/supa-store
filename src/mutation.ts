@@ -20,6 +20,8 @@ export interface MutationHooks<F extends Fn> {
   onSuccess?: (result: Awaited<ReturnType<F>>, ...args: Parameters<F>) => void;
   onError?: (error: unknown, ...args: Parameters<F>) => void;
   onSettled?: (result: Awaited<ReturnType<F>> | undefined, error: unknown, ...args: Parameters<F>) => void;
+  /** 이 바꾸기의 inflight 가 빌 때마다 한 번 — 돌려준 Promise 가 끝날 때까지 끝난 호출을 optimistic 에 남긴다 */
+  onAllSettled?: () => unknown;
   /** 같은 id 의 바꾸기를 한 줄에 세운다 */
   scope?: { id: string };
 }
@@ -86,6 +88,8 @@ export function createMutation<F extends Fn>(
   let sent = 0;
   /** 성공한 가장 큰 번호 — 이보다 작은 호출은 밀려나 칸도 콜백도 건드리지 않는다 */
   let won = 0;
+  /** 시작한 확인의 수 — 가장 나중 확인이 끝날 때만 겹을 비운다 */
+  let confirms = 0;
   /** reset 할 때 보낸 가장 큰 번호 — 이보다 작거나 같은 호출은 칸에 적지 않지만 콜백은 부른다 */
   let floor = 0;
 
@@ -101,6 +105,20 @@ export function createMutation<F extends Fn>(
       return () => void listeners.delete(listener);
     },
     snapshot: () => state,
+  };
+
+  // 확인이 던지거나 거부되어도 끝난 것으로 본다 — 앞 확인이 뒤 확인의 겹을 비우지 않게 번호로 가린다
+  const confirm = async () => {
+    const mine = ++confirms;
+    try {
+      await hooks.onAllSettled!();
+    } catch (e) {
+      console.error(e);
+    }
+    if (mine === confirms && calls.length === 0) {
+      shown = [];
+      publish();
+    }
   };
 
   const call = async (...args: Parameters<F>) => {
@@ -139,9 +157,12 @@ export function createMutation<F extends Fn>(
     } finally {
       // 칸과 콜백이 먼저 — 그 뒤에 빠져야 캐시가 서버 값이 된 다음 겹이 빠진다
       calls = calls.filter((c) => c !== mine);
-      shown = shown.filter((c) => c !== mine);
+      // 확인을 켰으면 끝난 호출은 확인이 끝날 때까지 겹에 남는다 — 밀려났으면 위에서 이미 빠졌다
+      if (!hooks.onAllSettled) shown = shown.filter((c) => c !== mine);
       publish();
       release();
+      // 호출의 Promise 사슬 밖에서 돈다 — mutateAsync 는 확인을 기다리지 않는다
+      if (hooks.onAllSettled && calls.length === 0) void confirm();
     }
   };
   for (const field of FIELDS) {
