@@ -83,6 +83,8 @@ export interface MutationView<F extends Fn> {
   mutateAsync(...args: Parameters<F>): Promise<Awaited<ReturnType<F>>>;
   /** 보냈지만 아직 끝나지 않은 호출들의 인자 — 보낸 차례대로 선다 */
   readonly inflight: readonly Parameters<F>[];
+  /** 겹에 얹을 호출들의 인자 — inflight 에서 밀려난 호출을 뺀 것 */
+  readonly optimistic: readonly Parameters<F>[];
   pending: boolean;
   error: string | null;
   data: Awaited<ReturnType<F>> | undefined;
