@@ -35,7 +35,7 @@ export const QUERY_FIELDS = ["data", "status", "error", "isPlaceholderData", "is
 export const IDLE: CellView<never> = { data: undefined, status: "idle", error: null, isFetching: false };
 export const noop = () => {};
 export const subscribeNone = () => noop;
-const IDLE_MUTATION: MutationSnapshot<Fn> = { inflight: [], pending: false, error: null, data: undefined };
+const IDLE_MUTATION: MutationSnapshot<Fn> = { inflight: [], optimistic: [], pending: false, error: null, data: undefined };
 const idleSnapshot = () => IDLE_MUTATION;
 
 const plain = (x: unknown): x is object => {
@@ -341,6 +341,7 @@ export function useMutation(
     ...state,
     // 연결 명령의 화면별 상태는 날아가는 호출 목록을 세지 않는다
     inflight: [],
+    optimistic: [],
     mutate(...args) {
       run(() => fn(...args)).catch(noop);
     },

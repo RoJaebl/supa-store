@@ -5,10 +5,12 @@ type Fn = (...args: any[]) => any;
 export interface MutationSnapshot<F extends Fn> {
   /** 보냈지만 아직 끝나지 않은 호출들의 인자 — 보낸 차례대로 선다 */
   readonly inflight: readonly Parameters<F>[];
+  /** 겹에 얹을 호출들의 인자 — inflight 에서 밀려난 호출을 뺀 것. 보낸 차례대로 선다 */
+  readonly optimistic: readonly Parameters<F>[];
   readonly pending: boolean;
-  /** 마지막으로 끝난 호출이 실패했으면 그 문구 */
+  /** 마지막으로 끝난, 밀려나지 않은 호출이 실패했으면 그 문구 */
   readonly error: string | null;
-  /** 마지막으로 끝난 호출이 성공했으면 그 결과 */
+  /** 마지막으로 성공한, 밀려나지 않은 호출의 결과 */
   readonly data: Awaited<ReturnType<F>> | undefined;
 }
 /** 부를 수 있는 바꾸기 — 언제나 Promise 를 돌려준다(동기 함수여도). 상태 칸은 읽기 전용 속성 */
@@ -18,6 +20,8 @@ export interface MutationHooks<F extends Fn> {
   onSuccess?: (result: Awaited<ReturnType<F>>, ...args: Parameters<F>) => void;
   onError?: (error: unknown, ...args: Parameters<F>) => void;
   onSettled?: (result: Awaited<ReturnType<F>> | undefined, error: unknown, ...args: Parameters<F>) => void;
+  /** 이 바꾸기의 inflight 가 빌 때마다 한 번 — 돌려준 Promise 가 끝날 때까지 성공한 호출을 optimistic 에 남긴다 */
+  onAllSettled?: () => unknown;
   /** 같은 id 의 바꾸기를 한 줄에 세운다 */
   scope?: { id: string };
 }
@@ -54,7 +58,7 @@ export function resetScopes(): void {
   scopes.clear();
 }
 
-const FIELDS = ["inflight", "pending", "error", "data"] as const;
+const FIELDS = ["inflight", "optimistic", "pending", "error", "data"] as const;
 
 /** 콜백이 던져도 호출의 결과와 inflight 를 붙잡지 않는다 — 콘솔에 남기고 삼킨다 */
 function safely(cb: Fn | undefined, ...args: unknown[]) {
@@ -66,19 +70,26 @@ function safely(cb: Fn | undefined, ...args: unknown[]) {
 }
 
 /**
- * 바꾸기 함수를 감싸 상태 칸을 쥔다. 호출마다 안쪽 번호를 매긴다 — 같은 인자로 두 번 불러도 끝난 쪽만 inflight 에서 빼고,
- * 더 나중 번호가 이미 끝났으면 그 응답은 늦은 것이라 칸과 콜백을 건드리지 않는다. reset 앞에 보낸 호출은 칸에만 적지 않는다
+ * 바꾸기 함수를 감싸 상태 칸을 쥔다. 호출마다 안쪽 번호를 매긴다 — 같은 인자로 두 번 불러도 끝난 쪽만 inflight 에서 뺀다.
+ * 나중에 보낸 호출이 성공하면 앞 호출은 모두 밀려난다: 그 순간 optimistic 에서 빠지고, 응답은 칸과 콜백을 건드리지 않는다.
+ * 나중 호출의 실패는 아무것도 밀어내지 않는다. reset 앞에 보낸 호출은 칸에만 적지 않는다
  */
 export function createMutation<F extends Fn>(
   fn: F,
   hooks: MutationHooks<F> = {},
 ): { call: MutationFn<F>; channel: MutationChannel } {
   const listeners = new Set<() => void>();
-  let state: MutationSnapshot<F> = { inflight: [], pending: false, error: null, data: undefined };
-  let calls: { n: number; args: Parameters<F> }[] = [];
+  let state: MutationSnapshot<F> = { inflight: [], optimistic: [], pending: false, error: null, data: undefined };
+  type Call = { n: number; args: Parameters<F> };
+  /** 응답을 기다리는 호출 — inflight */
+  let calls: Call[] = [];
+  /** 겹에 얹을 호출 — optimistic */
+  let shown: Call[] = [];
   let sent = 0;
-  /** 끝난 가장 큰 번호 — 이보다 작거나 같은 호출의 응답은 늦은 것이라 칸도 콜백도 건드리지 않는다 */
-  let done = 0;
+  /** 성공한 가장 큰 번호 — 이보다 작은 호출은 밀려나 칸도 콜백도 건드리지 않는다 */
+  let won = 0;
+  /** 시작한 확인의 수 — 가장 나중 확인이 끝날 때만 겹을 비운다 */
+  let confirms = 0;
   /** reset 할 때 보낸 가장 큰 번호 — 이보다 작거나 같은 호출은 칸에 적지 않지만 콜백은 부른다 */
   let floor = 0;
 
@@ -86,10 +97,8 @@ export function createMutation<F extends Fn>(
     state = { ...state, ...patch };
     listeners.forEach((l) => l());
   };
-  const line = (next: typeof calls, patch: Partial<MutationSnapshot<F>> = {}) => {
-    calls = next;
-    write({ ...patch, inflight: next.map((c) => c.args), pending: next.length > 0 });
-  };
+  const publish = (patch: Partial<MutationSnapshot<F>> = {}) =>
+    write({ ...patch, inflight: calls.map((c) => c.args), optimistic: shown.map((c) => c.args), pending: calls.length > 0 });
   const channel: MutationChannel = {
     subscribe(listener) {
       listeners.add(listener);
@@ -98,14 +107,32 @@ export function createMutation<F extends Fn>(
     snapshot: () => state,
   };
 
+  // 확인이 던지거나 거부되어도 끝난 것으로 본다 — 앞 확인이 뒤 확인의 겹을 비우지 않게 번호로 가린다
+  const confirm = async () => {
+    const mine = ++confirms;
+    try {
+      await hooks.onAllSettled!();
+    } catch (e) {
+      console.error(e);
+    }
+    if (mine === confirms && calls.length === 0) {
+      shown = [];
+      publish();
+    }
+  };
+
   const call = async (...args: Parameters<F>) => {
     const n = ++sent;
+    const mine: Call = { n, args };
+    calls = [...calls, mine];
+    shown = [...shown, mine];
     // 다시 부르면 앞 실패의 문구를 지운다 — 0.2 의 화면별 바꾸기와 같다
-    line([...calls, { n, args }], { error: null });
+    publish({ error: null });
     // 같은 scope 의 앞 호출이 끝나기를 기다린다 — 앞이 실패해도 줄은 풀린다
     const id = hooks.scope?.id;
     const prev = id === undefined ? undefined : scopes.get(id);
     let release = () => {};
+    let ok = false;
     if (id !== undefined) {
       const mine = new Promise<void>((r) => (release = () => (scopes.get(id) === mine && scopes.delete(id), r())));
       scopes.set(id, mine);
@@ -113,16 +140,17 @@ export function createMutation<F extends Fn>(
     try {
       if (prev) await prev;
       const result = await fn(...args);
-      if (n > done) {
-        done = n;
-        if (n > floor) write({ data: result, error: null });
+      ok = true;
+      if (n > won) {
+        won = n;
+        shown = shown.filter((c) => c.n >= n);
+        publish(n > floor ? { data: result, error: null } : {});
         safely(hooks.onSuccess, result, ...args);
         safely(hooks.onSettled, result, null, ...args);
       }
       return result;
     } catch (e) {
-      if (n > done) {
-        done = n;
+      if (n > won) {
         if (n > floor) write({ error: message(e) });
         safely(hooks.onError, e, ...args);
         safely(hooks.onSettled, undefined, e, ...args);
@@ -130,8 +158,13 @@ export function createMutation<F extends Fn>(
       throw e;
     } finally {
       // 칸과 콜백이 먼저 — 그 뒤에 빠져야 캐시가 서버 값이 된 다음 겹이 빠진다
-      line(calls.filter((c) => c.n !== n));
+      calls = calls.filter((c) => c !== mine);
+      // 확인을 켰으면 성공한 호출은 확인이 끝날 때까지 겹에 남는다 — 실패한 호출은 바로 빠지고, 밀려났으면 위에서 이미 빠졌다
+      if (!hooks.onAllSettled || !ok) shown = shown.filter((c) => c !== mine);
+      publish();
       release();
+      // 호출의 Promise 사슬 밖에서 돈다 — mutateAsync 는 확인을 기다리지 않는다
+      if (hooks.onAllSettled && calls.length === 0) void confirm();
     }
   };
   for (const field of FIELDS) {

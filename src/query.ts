@@ -83,6 +83,8 @@ export interface MutationView<F extends Fn> {
   mutateAsync(...args: Parameters<F>): Promise<Awaited<ReturnType<F>>>;
   /** 보냈지만 아직 끝나지 않은 호출들의 인자 — 보낸 차례대로 선다 */
   readonly inflight: readonly Parameters<F>[];
+  /** 겹에 얹을 호출들의 인자 — inflight 에서 밀려난 호출을 뺀 것 */
+  readonly optimistic: readonly Parameters<F>[];
   pending: boolean;
   error: string | null;
   data: Awaited<ReturnType<F>> | undefined;
@@ -200,6 +202,7 @@ export function createResource<A = void, D = never, R extends object = object, S
     onSuccess?: ByName<R, "onSuccess">;
     onError?: ByName<R, "onError">;
     onSettled?: ByName<R, "onSettled">;
+    onAllSettled?: ByName<R, "onAllSettled">;
     scope?: ByName<R, "scope">;
   } = {},
 ): Resource<A, D, R, S> {
@@ -355,8 +358,14 @@ export function createResource<A = void, D = never, R extends object = object, S
   const query = defined.query as ((args: A) => Promise<D>) | undefined;
   const mutations: Record<string, ReturnType<typeof createMutation<Fn>>> = {};
   const hooksOf = (name: string) => {
-    const { onSuccess, onError, onSettled, scope } = options as Record<string, Record<string, any> | undefined>;
-    return { onSuccess: onSuccess?.[name], onError: onError?.[name], onSettled: onSettled?.[name], scope: scope?.[name] };
+    const { onSuccess, onError, onSettled, onAllSettled, scope } = options as Record<string, Record<string, any> | undefined>;
+    return {
+      onSuccess: onSuccess?.[name],
+      onError: onError?.[name],
+      onSettled: onSettled?.[name],
+      onAllSettled: onAllSettled?.[name],
+      scope: scope?.[name],
+    };
   };
   for (const [name, value] of Object.entries(defined)) {
     if (name === "query" || typeof value !== "function") continue;

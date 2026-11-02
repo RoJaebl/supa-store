@@ -23,7 +23,7 @@ allowBuilds:
   "supa-store@https://codeload.github.com/RoJaebl/supa-store/tar.gz/<커밋>": true
 ```
 
-커밋을 바꿀 때는 두 자리의 `<커밋>` 을 함께 바꾼다. npm 판이 나오면 `"supa-store": "^0.4.0"` 으로 바꾸고 `allowBuilds` 줄은 지운다.
+커밋을 바꿀 때는 두 자리의 `<커밋>` 을 함께 바꾼다. npm 판이 나오면 `"supa-store": "^0.5.0"` 으로 바꾸고 `allowBuilds` 줄은 지운다.
 
 ## 시작 절차
 
@@ -121,9 +121,9 @@ const n = await save.mutateAsync("a");     // 결과를 받고, 실패는 catch 
 
 바꾸기 이름은 `data` · `status` · `error` · `isPlaceholderData` · `isFetching` · `refetch` · `fetch` · `getData` · `setData` · `invalidate` 와 겹칠 수 없다.
 
-**바꾸기의 상태는 자원이 쥔다.** 바꾸기마다 `inflight`(보냈지만 응답이 오지 않은 호출들의 인자 배열) · `pending`(`inflight.length > 0`) · `error` · `data` 와 `reset()` 이 있고, 같은 key 를 꺼낸 모든 화면과 store 가 같은 값을 본다. 화면에서는 `useStore(key).save.inflight`, store 에서는 `ctx(key).save.inflight` 로 읽는다(`ctx(key).save(…)` 는 지금처럼 함수로 부른다 — 그 호출도 `inflight` 에 보인다). 새 호출이 시작되면 `error` 가 지워지고, 실패해도 앞 `data` 는 남는다. `reset()` 은 `error` · `data` 를 지우고 모든 화면에 알리지만 `inflight` 는 지우지 않는다. 그 앞에 보낸 호출은 끝나도 `data` · `error` 를 적지 않지만 콜백은 부른다.
+**바꾸기의 상태는 자원이 쥔다.** 바꾸기마다 `inflight`(보냈지만 응답이 오지 않은 호출들의 인자 배열) · `optimistic`(겹에 얹을 호출들의 인자 — `inflight` 에서 밀려난 호출을 빼고, `onAllSettled` 를 적었으면 확인을 기다리는 성공한 호출을 더한 것) · `pending`(`inflight.length > 0`) · `error` · `data` 와 `reset()` 이 있고, 같은 key 를 꺼낸 모든 화면과 store 가 같은 값을 본다. 화면에서는 `useStore(key).save.inflight`, store 에서는 `ctx(key).save.inflight` 로 읽는다(`ctx(key).save(…)` 는 지금처럼 함수로 부른다 — 그 호출도 `inflight` 에 보인다). 새 호출이 시작되면 `error` 가 지워지고, 실패해도 앞 `data` 는 남는다. `reset()` 은 `error` · `data` 를 지우고 모든 화면에 알리지만 `inflight` 는 지우지 않는다. 그 앞에 보낸 호출은 끝나도 `data` · `error` 를 적지 않지만 콜백은 부른다.
 
-**겹 얹기.** 바꾸기를 보낸 직후 `inflight` 를 캐시에 얹어 임시로 보인다. 겹은 캐시에 쓰지 않으므로, 끝나면 서버가 준 값이 그대로 남고 실패하면 겹이 빠지며 돌아간다. `select` 가 읽은 바꾸기 상태가 바뀌면 그 `select` 만 다시 돈다 — 정의를 다시 짓지 않고 다시 받지도 않는다. 안에서 읽는 `ctx` 는 상대의 원래 상태를 주고 상대의 `select` 결과를 주지 않으므로 한 단계에서 멈춘다.
+**겹 얹기.** 바꾸기를 보낸 직후 `optimistic` 을 캐시에 얹어 임시로 보인다. 겹은 캐시에 쓰지 않으므로, 끝나면 서버가 준 값이 그대로 남고 실패하면 겹이 빠지며 돌아간다. `select` 가 읽은 바꾸기 상태가 바뀌면 그 `select` 만 다시 돈다 — 정의를 다시 짓지 않고 다시 받지도 않는다. 안에서 읽는 `ctx` 는 상대의 원래 상태를 주고 상대의 `select` 결과를 주지 않으므로 한 단계에서 멈춘다.
 
 ```ts
 // 받기와 바꾸기가 한 key 에 있을 때
@@ -140,7 +140,7 @@ createStore("api.workspace.appearance", (_set, _get, ctx) =>
     },
     select: (s) => {
       const self = ctx();
-      return [...self.patch.inflight, ...self.patchIcons.inflight].reduce((acc, [p]) => acc.with(p), s);
+      return [...self.patch.optimistic, ...self.patchIcons.optimistic].reduce((acc, [p]) => acc.with(p), s);
     },
   }),
 );
@@ -159,7 +159,7 @@ createStore("api.workspace.patchSettings", (_set, _get, ctx) =>
 
 createStore("api.workspace.getSettings", (_set, _get, ctx) => {
   const settings = createResource(() => ({ query: fetchSettings }), {
-    select: (s) => ctx("api.workspace.patchSettings").patch.inflight.reduce((acc, [p]) => acc.with(p), s),
+    select: (s) => ctx("api.workspace.patchSettings").patch.optimistic.reduce((acc, [p]) => acc.with(p), s),
   });
   ctx("event.workspace.settingsPatched").on(ctx.key, ({ settings: next }) => settings.setData(next));
   return settings;
@@ -168,13 +168,23 @@ createStore("api.workspace.getSettings", (_set, _get, ctx) => {
 
 두 꼴 모두 화면은 `useStore("api.workspace.getSettings")` 로 꺼내기만 한다. 겹이 있다는 것을 몰라도 된다.
 
-**결과 처리와 호출 순서.** `createResource` 옵션에 바꾸기 이름을 열쇠로 `onSuccess(result, ...args)` · `onError(error, ...args)` · `onSettled(result, error, ...args)` 와 `scope: { [name]: { id } }` 를 적는다. 기본은 동시에 보낸다. 같은 `scope.id` 의 바꾸기는 key 가 달라도 한 줄에 서서 차례대로 나가고, 기다리는 호출의 인자도 `inflight` 에 보인다. 호출 하나는 `inflight` 에 들어가고 → 함수가 돌고 → `data`/`error` 와 콜백이 일어난 **뒤에** `inflight` 에서 빠진다. 그래서 성공하면 캐시가 먼저 서버 값이 되고 그다음에 겹이 빠진다. 콜백이 던지면 `console.error` 로 남기고 `mutateAsync` 에는 영향이 없다. 다른 곳에 결과를 넘기는 `emit` · `setData` 는 바꾸기 함수 안이 아니라 `onSuccess` 에 적는다 — 늦은 응답이면 부르지 않기 때문이다.
+**결과 처리와 호출 순서.** `createResource` 옵션에 바꾸기 이름을 열쇠로 `onSuccess(result, ...args)` · `onError(error, ...args)` · `onSettled(result, error, ...args)` · `onAllSettled()` 와 `scope: { [name]: { id } }` 를 적는다. 기본은 동시에 보낸다. 같은 `scope.id` 의 바꾸기는 key 가 달라도 한 줄에 서서 차례대로 나가고, 기다리는 호출의 인자도 `inflight` 에 보인다. 호출 하나는 `inflight` 에 들어가고 → 함수가 돌고 → `data`/`error` 와 콜백이 일어난 **뒤에** `inflight` 에서 빠진다. 그래서 성공하면 캐시가 먼저 서버 값이 되고 그다음에 겹이 빠진다. 콜백이 던지면 `console.error` 로 남기고 `mutateAsync` 에는 영향이 없다. 다른 곳에 결과를 넘기는 `emit` · `setData` 는 바꾸기 함수 안이 아니라 `onSuccess` 에 적는다 — 밀려난 응답이면 부르지 않기 때문이다.
 
-**늦은 응답.** 같은 바꾸기에서 더 나중에 보낸 호출이 먼저 끝났으면 앞 호출의 응답은 `data` · `error` 를 고치지 않고 콜백도 부르지 않는다. 그 호출의 `mutateAsync` 는 자기 결과로 끝난다. 서버가 받은 차례대로 처리하지 않을 수 있으면 `scope` 를 쓴다.
+**밀려남.** 같은 바꾸기에서 나중에 보낸 호출이 **성공**하면 그 앞에 보낸 호출은 모두 밀려난다. 밀려난 호출은 그 순간 `optimistic` 에서 빠지고(`inflight` 에는 응답이 올 때까지 남는다), 그 응답은 `data` · `error` 를 고치지 않고 콜백도 부르지 않는다. 그 호출의 `mutateAsync` 는 자기 결과로 끝난다. 나중 호출의 실패는 아무것도 밀어내지 않는다 — 앞 호출이 나중에 성공하면 그 `onSuccess` 가 돈다.
+
+**서버가 받은 차례대로 처리하지 않을 수 있으면** `onAllSettled` 로 마지막에 한 번 다시 받거나 `scope` 로 줄을 세운다. `onAllSettled: { [name]: () => … }` 는 그 바꾸기의 `inflight` 가 빌 때마다 한 번 돈다(호출이 하나여도, 마지막 호출이 실패해도). 적지 않으면 돌지 않는다. 돌려준 Promise 가 끝날 때까지 성공한 호출이 `optimistic` 에 남으므로(실패한 호출은 바로 빠진다) 다시 받은 값이 오기 전에 옛 캐시가 그려지지 않는다. 확인하는 동안 `pending` 은 `false` 다. 확인 중에 새 호출이 성공해 `setData` 하면 그보다 먼저 떠난 확인 응답은 캐시를 덮지 못한다. `invalidate()` 의 다시 받기가 실패하면 그 실패는 받은 칸의 `error` 에 남고, 함수가 직접 던지면 `console.error` 로 남긴다.
+
+```ts
+createResource(() => ({ query: fetchAppearance, async patch(p: AppearancePatch) { /* … */ } }), {
+  onSuccess: { patch: (next) => ctx().setData(next) },
+  onAllSettled: { patch: () => ctx().invalidate() },
+  select: (s) => ctx().patch.optimistic.reduce((acc, [p]) => acc.with(p), s),
+});
+```
 
 **`scope` 안에서 같은 줄을 기다리지 않는다.** 바꾸기 함수가 같은 `scope.id` 의 다른 바꾸기를 부르고 `await` 하면 그 호출은 자기 뒤에 서므로 영원히 끝나지 않는다.
 
-**캐시 맞추기는 `onSuccess` 에서 `setData` · `emit` 으로 한다.** `invalidate()` 처럼 다시 받기를 기다리는 길은 받기가 끝나기 전에 `inflight` 에서 빠지므로 겹이 먼저 사라져 옛 값이 잠깐 보인다.
+**캐시 맞추기는 `onSuccess` 에서 `setData` · `emit` 으로 한다.** `onSuccess` 에서 `invalidate()` 로 다시 받기를 기다리는 길은 받기가 끝나기 전에 겹에서 빠지므로 겹이 먼저 사라져 옛 값이 잠깐 보인다. 다시 받아야 하면 `onAllSettled` 에 적는다 — 그 확인이 끝날 때까지 겹이 남는다.
 
 **`ctx()`.** 인자 없이 부르면 자기 자신의 상태다(`ctx(ctx.key)` 와 같다). 정의 함수가 도는 동안에는 부를 수 없고 `짓는 동안에는 자기 자신을 꺼낼 수 없다: <key>` 로 막힌다. `select` · 콜백 · 바꾸기 함수 · event 를 받는 쪽에서는 언제나 쓸 수 있다. 골라 꺼내려면 `ctx(ctx.key, { pick })` 을 쓴다.
 
@@ -236,9 +246,9 @@ useStore("api.todos", { select: (titles) => titles.length });                   
 | `setQueryData` · `getQueryData` | `getData(args)` · `setData(updater, args)` |
 | `invalidateQueries` | `invalidate(args)`, 다른 자원이 바뀔 때는 event 의 `on` |
 | `onMutate` 낙관적 갱신 · `useInfiniteQuery` | 바꾸기 함수 안에서 `getData` · `setData` |
-| `onSuccess` · `onError` · `onSettled` · `scope.id` | 같은 이름(`createResource` 옵션, 바꾸기 이름이 열쇠). 낙관적 표시는 `inflight` 겹 |
+| `onSuccess` · `onError` · `onSettled` · `scope.id` | 같은 이름(`createResource` 옵션, 바꾸기 이름이 열쇠). 낙관적 표시는 `optimistic` 겹. 모든 호출이 끝난 뒤 한 번 다시 받기는 `onAllSettled` |
 
-**TanStack 과 다른 점.** supa-store 의 콜백은 늦은 응답에서 부르지 않는다. 같은 바꾸기에서 더 나중에 보낸 호출이 먼저 끝났으면 앞 호출의 `onSuccess` · `onError` · `onSettled` 는 불리지 않고 `data` · `error` 도 그대로다(그 호출의 `mutateAsync` 는 자기 결과로 끝난다). 이 단위는 화면이 아니라 자원의 바꾸기 이름이어서, 어느 화면 · store 에서 불렀든 같다.
+**TanStack 과 다른 점.** supa-store 의 콜백은 밀려난 응답에서 부르지 않는다. 같은 바꾸기에서 나중에 보낸 호출이 성공했으면 앞 호출의 `onSuccess` · `onError` · `onSettled` 는 불리지 않고 `data` · `error` 도 그대로다(그 호출의 `mutateAsync` 는 자기 결과로 끝난다). 이 단위는 화면이 아니라 자원의 바꾸기 이름이어서, 어느 화면 · store 에서 불렀든 같다. `onAllSettled` 는 TanStack 에 없다 — 호출마다가 아니라 그 바꾸기의 모든 호출이 끝났을 때 한 번 돈다.
 
 ```ts
 import type { Cache } from "supa-store/query";
@@ -285,7 +295,7 @@ createStore("api.graph", (set, get, ctx) => {
 ### 0.4 에서 옮길 때
 
 - 바꾸기 상태가 화면 사이에 나뉜다. 같은 key 의 바꾸기를 꺼낸 두 화면이 `pending` · `error` · `data` 를 함께 보고, 한 화면의 `reset()` 이 다른 화면의 `error` 도 지운다.
-- 늦은 응답을 가리는 단위가 화면에서 자원의 바꾸기 이름으로 넓어졌다. 어느 화면 · store 에서 불렀든 뒤 호출이 앞 호출을 넘어서면 앞 응답은 버려진다.
+- 늦은 응답을 가리는 단위가 화면에서 자원의 바꾸기 이름으로 넓어졌다. 어느 화면 · store 에서 불렀든 나중 호출이 성공하면 앞 호출은 밀려나 그 응답이 버려진다. 나중 호출이 실패하면 앞 응답은 버려지지 않는다.
 - 바꾸기는 동기 함수여도 부르면 언제나 Promise 를 돌려준다(타입도 그렇다). 동기로 던지던 것은 거절된 Promise 가 된다.
 - 정의 파일은 고치지 않아도 된다.
 

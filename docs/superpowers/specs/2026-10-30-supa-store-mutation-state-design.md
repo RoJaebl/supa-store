@@ -131,6 +131,8 @@ select: (s) => {
 **결과를 다른 곳에 넘기는 일(`emit` · `setData`)은 바꾸기 함수 안이 아니라 `onSuccess` 에 적는다.** 함수 안에서 `emit` 하면
 라이브러리가 그 호출이 늦은 응답인지 가리기 전에 이미 일어나 버린다.
 
+> 2026-11-02 보완: 늦은 응답의 기준과 겹의 칸이 바뀌었다 — [보완 설계](./2026-11-02-supa-store-optimistic-allsettled-design.md) 가 이 절을 고친다.
+
 **동시에 보내는 것이 기본이다.** TanStack 과 같다.
 
 - 동시에 보내다가 더 나중에 보낸 호출이 먼저 끝났으면, 앞 호출의 응답은 **늦은 응답** 이다. 늦은 응답은 `data` · `error` 를
@@ -161,6 +163,8 @@ select: (s) => {
 캐시의 값, 곧 서버가 준 값이다.
 
 ## 3. 쓰는 모습
+
+> 2026-11-02 보완: 늦은 응답의 기준과 겹의 칸이 바뀌었다 — [보완 설계](./2026-11-02-supa-store-optimistic-allsettled-design.md) 가 이 절을 고친다.
 
 ### 받기와 바꾸기가 한 key 에 있을 때
 
@@ -255,6 +259,8 @@ createStore('api.workspace.getSettings', (_set, _get, ctx) => {
   다른 점 — **supa-store 의 콜백은 늦은 응답에서 부르지 않는다** — 을 적는다.
 
 ## 8. 시험
+
+> 2026-11-02 보완: 늦은 응답의 기준과 겹의 칸이 바뀌었다 — [보완 설계](./2026-11-02-supa-store-optimistic-allsettled-design.md) 가 이 절을 고친다.
 
 - 두 화면이 같은 바꾸기 상태(`inflight` · `pending` · `error` · `data`)를 보고, 한 화면의 `reset` 을 다른 화면도 받는다.
 - `ctx(key).patch(p)` 로 store 에서 부른 호출도 `inflight` 에 보인다.

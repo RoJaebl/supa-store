@@ -35,7 +35,7 @@ export type Picked<K, O> = O extends { pick: readonly (infer N)[] }
     ? Omit<StateOf<K>, N & keyof StateOf<K>>
     : StateOf<K>;
 
-/** creator 의 셋째 인자 — 다른 store 의 부르는 순간의 값을 꺼낸다. 구독은 없다 */
+/** creator 의 셋째 인자 — 다른 store 의 부르는 순간의 값을 꺼낸다. 인자 없이 부르면 자기 자신. select 안에서 바꾸기 상태를 읽으면 그 칸을 따라간다 */
 export interface Ctx<Self extends StateKey = StateKey> {
   /** 인자 없이 부르면 자기 상태를 준다. 짓는 동안에는 쓸 수 없고, 짓기 기록에도 적지 않는다 */
   (): StateOf<Self>;
