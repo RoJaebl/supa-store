@@ -121,7 +121,7 @@ const n = await save.mutateAsync("a");     // 결과를 받고, 실패는 catch 
 
 바꾸기 이름은 `data` · `status` · `error` · `isPlaceholderData` · `isFetching` · `refetch` · `fetch` · `getData` · `setData` · `invalidate` 와 겹칠 수 없다.
 
-**바꾸기의 상태는 자원이 쥔다.** 바꾸기마다 `inflight`(보냈지만 응답이 오지 않은 호출들의 인자 배열) · `optimistic`(겹에 얹을 호출들의 인자 — `inflight` 에서 밀려난 호출을 빼고, `onAllSettled` 를 적었으면 확인을 기다리는 호출을 더한 것) · `pending`(`inflight.length > 0`) · `error` · `data` 와 `reset()` 이 있고, 같은 key 를 꺼낸 모든 화면과 store 가 같은 값을 본다. 화면에서는 `useStore(key).save.inflight`, store 에서는 `ctx(key).save.inflight` 로 읽는다(`ctx(key).save(…)` 는 지금처럼 함수로 부른다 — 그 호출도 `inflight` 에 보인다). 새 호출이 시작되면 `error` 가 지워지고, 실패해도 앞 `data` 는 남는다. `reset()` 은 `error` · `data` 를 지우고 모든 화면에 알리지만 `inflight` 는 지우지 않는다. 그 앞에 보낸 호출은 끝나도 `data` · `error` 를 적지 않지만 콜백은 부른다.
+**바꾸기의 상태는 자원이 쥔다.** 바꾸기마다 `inflight`(보냈지만 응답이 오지 않은 호출들의 인자 배열) · `optimistic`(겹에 얹을 호출들의 인자 — `inflight` 에서 밀려난 호출을 빼고, `onAllSettled` 를 적었으면 확인을 기다리는 성공한 호출을 더한 것) · `pending`(`inflight.length > 0`) · `error` · `data` 와 `reset()` 이 있고, 같은 key 를 꺼낸 모든 화면과 store 가 같은 값을 본다. 화면에서는 `useStore(key).save.inflight`, store 에서는 `ctx(key).save.inflight` 로 읽는다(`ctx(key).save(…)` 는 지금처럼 함수로 부른다 — 그 호출도 `inflight` 에 보인다). 새 호출이 시작되면 `error` 가 지워지고, 실패해도 앞 `data` 는 남는다. `reset()` 은 `error` · `data` 를 지우고 모든 화면에 알리지만 `inflight` 는 지우지 않는다. 그 앞에 보낸 호출은 끝나도 `data` · `error` 를 적지 않지만 콜백은 부른다.
 
 **겹 얹기.** 바꾸기를 보낸 직후 `optimistic` 을 캐시에 얹어 임시로 보인다. 겹은 캐시에 쓰지 않으므로, 끝나면 서버가 준 값이 그대로 남고 실패하면 겹이 빠지며 돌아간다. `select` 가 읽은 바꾸기 상태가 바뀌면 그 `select` 만 다시 돈다 — 정의를 다시 짓지 않고 다시 받지도 않는다. 안에서 읽는 `ctx` 는 상대의 원래 상태를 주고 상대의 `select` 결과를 주지 않으므로 한 단계에서 멈춘다.
 
@@ -172,7 +172,7 @@ createStore("api.workspace.getSettings", (_set, _get, ctx) => {
 
 **밀려남.** 같은 바꾸기에서 나중에 보낸 호출이 **성공**하면 그 앞에 보낸 호출은 모두 밀려난다. 밀려난 호출은 그 순간 `optimistic` 에서 빠지고(`inflight` 에는 응답이 올 때까지 남는다), 그 응답은 `data` · `error` 를 고치지 않고 콜백도 부르지 않는다. 그 호출의 `mutateAsync` 는 자기 결과로 끝난다. 나중 호출의 실패는 아무것도 밀어내지 않는다 — 앞 호출이 나중에 성공하면 그 `onSuccess` 가 돈다.
 
-**서버가 받은 차례대로 처리하지 않을 수 있으면** `onAllSettled` 로 마지막에 한 번 다시 받거나 `scope` 로 줄을 세운다. `onAllSettled: { [name]: () => … }` 는 그 바꾸기의 `inflight` 가 빌 때마다 한 번 돈다(호출이 하나여도, 마지막 호출이 실패해도). 적지 않으면 돌지 않는다. 돌려준 Promise 가 끝날 때까지 끝난 호출이 `optimistic` 에 남으므로 다시 받은 값이 오기 전에 옛 캐시가 그려지지 않는다. 확인하는 동안 `pending` 은 `false` 다. 확인 중에 새 호출이 성공해 `setData` 하면 그보다 먼저 떠난 확인 응답은 캐시를 덮지 못한다. `invalidate()` 의 다시 받기가 실패하면 그 실패는 받은 칸의 `error` 에 남고, 함수가 직접 던지면 `console.error` 로 남긴다.
+**서버가 받은 차례대로 처리하지 않을 수 있으면** `onAllSettled` 로 마지막에 한 번 다시 받거나 `scope` 로 줄을 세운다. `onAllSettled: { [name]: () => … }` 는 그 바꾸기의 `inflight` 가 빌 때마다 한 번 돈다(호출이 하나여도, 마지막 호출이 실패해도). 적지 않으면 돌지 않는다. 돌려준 Promise 가 끝날 때까지 성공한 호출이 `optimistic` 에 남으므로(실패한 호출은 바로 빠진다) 다시 받은 값이 오기 전에 옛 캐시가 그려지지 않는다. 확인하는 동안 `pending` 은 `false` 다. 확인 중에 새 호출이 성공해 `setData` 하면 그보다 먼저 떠난 확인 응답은 캐시를 덮지 못한다. `invalidate()` 의 다시 받기가 실패하면 그 실패는 받은 칸의 `error` 에 남고, 함수가 직접 던지면 `console.error` 로 남긴다.
 
 ```ts
 createResource(() => ({ query: fetchAppearance, async patch(p: AppearancePatch) { /* … */ } }), {

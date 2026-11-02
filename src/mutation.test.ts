@@ -424,14 +424,19 @@ it("확인이 끝나기 전에는 optimistic 이 남고 pending 은 false 다", 
   expect(m.call.optimistic).toEqual([]);
 });
 
-it("실패한 호출도 확인이 끝날 때까지 optimistic 에 남는다", async () => {
+it("실패한 호출은 확인을 기다리지 않고 바로 optimistic 에서 빠진다 — 확인은 그래도 돈다", async () => {
   const { fn, calls } = controlled<number>();
   const c = confirming();
   const m = createMutation(fn, { onAllSettled: c.fn });
-  const p = m.call(1);
-  calls[0]!.reject(new Error("x"));
-  await expect(p).rejects.toThrow("x");
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  calls[1]!.reject(new Error("x"));
+  await expect(p2).rejects.toThrow("x");
+  expect(m.call.optimistic).toEqual([[1]]);
+  calls[0]!.resolve(1);
+  await p1;
   await tick();
+  expect(c.fn).toHaveBeenCalledTimes(1);
   expect(m.call.optimistic).toEqual([[1]]);
   c.done[0]!.resolve();
   await tick();

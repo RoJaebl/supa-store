@@ -20,7 +20,7 @@ export interface MutationHooks<F extends Fn> {
   onSuccess?: (result: Awaited<ReturnType<F>>, ...args: Parameters<F>) => void;
   onError?: (error: unknown, ...args: Parameters<F>) => void;
   onSettled?: (result: Awaited<ReturnType<F>> | undefined, error: unknown, ...args: Parameters<F>) => void;
-  /** 이 바꾸기의 inflight 가 빌 때마다 한 번 — 돌려준 Promise 가 끝날 때까지 끝난 호출을 optimistic 에 남긴다 */
+  /** 이 바꾸기의 inflight 가 빌 때마다 한 번 — 돌려준 Promise 가 끝날 때까지 성공한 호출을 optimistic 에 남긴다 */
   onAllSettled?: () => unknown;
   /** 같은 id 의 바꾸기를 한 줄에 세운다 */
   scope?: { id: string };
@@ -132,6 +132,7 @@ export function createMutation<F extends Fn>(
     const id = hooks.scope?.id;
     const prev = id === undefined ? undefined : scopes.get(id);
     let release = () => {};
+    let ok = false;
     if (id !== undefined) {
       const mine = new Promise<void>((r) => (release = () => (scopes.get(id) === mine && scopes.delete(id), r())));
       scopes.set(id, mine);
@@ -139,6 +140,7 @@ export function createMutation<F extends Fn>(
     try {
       if (prev) await prev;
       const result = await fn(...args);
+      ok = true;
       if (n > won) {
         won = n;
         shown = shown.filter((c) => c.n >= n);
@@ -157,8 +159,8 @@ export function createMutation<F extends Fn>(
     } finally {
       // 칸과 콜백이 먼저 — 그 뒤에 빠져야 캐시가 서버 값이 된 다음 겹이 빠진다
       calls = calls.filter((c) => c !== mine);
-      // 확인을 켰으면 끝난 호출은 확인이 끝날 때까지 겹에 남는다 — 밀려났으면 위에서 이미 빠졌다
-      if (!hooks.onAllSettled) shown = shown.filter((c) => c !== mine);
+      // 확인을 켰으면 성공한 호출은 확인이 끝날 때까지 겹에 남는다 — 실패한 호출은 바로 빠지고, 밀려났으면 위에서 이미 빠졌다
+      if (!hooks.onAllSettled || !ok) shown = shown.filter((c) => c !== mine);
       publish();
       release();
       // 호출의 Promise 사슬 밖에서 돈다 — mutateAsync 는 확인을 기다리지 않는다
