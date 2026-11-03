@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { createStore, disposeStores, getStore, overrideStore, resetStores } from "./index.js";
 import { createEvent, createResource, keepEqual, type Cache, type MutationFn } from "./query.js";
 import { useStore } from "./react.js";
+import { track } from "./track.js";
 
 beforeEach(() => resetStores());
 afterEach(() => void vi.useRealTimers());
@@ -1040,4 +1041,31 @@ it("보통 객체와 배열만 깊이 견준다", () => {
   const m = new Map();
   const prev2 = { m, a: [1, { b: 2 }] };
   expect(keepEqual(prev2, { m, a: [1, { b: 2 }] })).toBe(prev2);
+});
+
+it("자원 select 가 ctx 로 읽은 store 가 바뀌면 select 만 다시 돈다", async () => {
+  const fkey = `state.test.filter${++n}`;
+  createStore(fkey, (set: any) => ({ word: "a", setWord: (word: string) => set({ word }) }));
+  const query = vi.fn(async () => ["a1", "b1"]);
+  const key = `api.test.r${++n}`;
+  createStore(key, (_s: any, _g: any, ctx: any) =>
+    createResource(() => ({ query }), { select: (d: string[]) => d.filter((s) => s.startsWith(ctx(fkey).word)) }),
+  );
+  const { result } = renderHook(() => view(key, { pick: ["data"] }));
+  await flush();
+  expect(result.current.data).toEqual(["a1"]);
+  act(() => state(fkey).setWord("b"));
+  expect(result.current.data).toEqual(["b1"]);
+  expect(query).toHaveBeenCalledTimes(1);
+});
+
+it("다른 store 의 함수 안 ctx 도 적힌다", () => {
+  const a = `state.test.a${++n}`;
+  const b = `state.test.b${++n}`;
+  createStore(b, () => ({ name: "x" }));
+  createStore(a, (_s: any, _g: any, ctx: any) => ({ label: () => ctx(b).name }));
+  const run = track(() => state(a).label());
+  expect(run.value).toBe("x");
+  // getStore 는 적지 않는다 — state.a 의 함수 안 ctx 가 읽은 b 하나가 적힌다
+  expect(run.reads.length).toBe(1);
 });

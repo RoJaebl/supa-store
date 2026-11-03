@@ -1,4 +1,5 @@
 import { resetScopes } from "./mutation.js";
+import { noteRead, type Channel } from "./track.js";
 
 /** 상태에 이 표식으로 함수를 두면 useStore 가 꺼내기를 그 함수에 맡긴다 — 그 함수는 훅이다 */
 export const USE: unique symbol = Symbol.for("supa-store.use") as never;
@@ -59,6 +60,8 @@ interface Entry {
   deps: Set<string>;
   listeners: Set<() => void>;
   api: StoreApi<any>;
+  /** 계산 공간이 이 store 를 읽었을 때 적는 채널 — 상태 객체가 바뀌면 달라진다 */
+  channel: Channel;
   build(): void;
   /** 지어져 있으면 앞 상태의 [DISPOSE] 를 부른다. 던져도 삼킨다 — 다시 짓기를 막지 않는다 */
   dispose(): void;
@@ -118,7 +121,10 @@ function makeEntry(key: string, definition: Creator): Entry {
       }
       // 짓는 동안 꺼낸 key 만 기록한다. 동작 안에서 부를 때 꺼낸 것은 기댐이 아니다
       if (building[building.length - 1] === key) entry.deps.add(other);
-      return pickFrom(ensure(entryOf(other)).api.getState(), options);
+      const target = ensure(entryOf(other));
+      // 계산 공간(track) 안이면 읽었다고 적는다 — 어느 store 의 ctx 로 읽었는지는 가리지 않는다
+      noteRead(target.channel);
+      return pickFrom(target.api.getState(), options);
     },
     { key },
   ) as Ctx;
@@ -137,6 +143,13 @@ function makeEntry(key: string, definition: Creator): Entry {
         listeners.add(listener);
         return () => void listeners.delete(listener);
       },
+    },
+    channel: {
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => void listeners.delete(listener);
+      },
+      snapshot: () => (ensure(entry), state),
     },
     dispose() {
       if (!entry.built) return;
