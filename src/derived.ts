@@ -19,19 +19,18 @@ export function createDerived<T>(compute: (prev: T | undefined) => T): Derived<T
   const listeners = new Set<() => void>();
   /** 구독자가 있는 동안 건 채널 구독 — 채널 → 푸는 함수 */
   const held = new Map<Channel, () => void>();
+  /** 구독자에게 마지막으로 알린 값 — 알림은 이것과 견준다(get 이 먼저 다시 지었어도 알림을 잃지 않는다) */
+  let shown: { value: T } | null = null;
 
   const fresh = () => has && reads.every(([c, s]) => Object.is(c.snapshot(), s));
-  /** 다시 짓는다. 결과가 앞과 다르면 참 */
-  const run = (): boolean => {
+  const run = () => {
     if (computing) throw new Error("파생 store 가 계산 중에 자기 자신을 읽었다");
     computing = true;
     try {
       const r = track(() => compute(has ? value : undefined));
       reads = r.reads.map((c) => [c, c.snapshot()]);
-      const changed = !has || !Object.is(r.value, value);
       value = r.value;
       has = true;
-      return changed;
     } finally {
       computing = false;
     }
@@ -42,7 +41,8 @@ export function createDerived<T>(compute: (prev: T | undefined) => T): Derived<T
     held.forEach((stop, c) => want.has(c) || (stop(), held.delete(c)));
     for (const c of want) {
       if (held.has(c)) continue;
-      const off = c.subscribe(changed);
+      // 채널마다 새 함수를 넘긴다 — 여러 채널이 한 listeners 를 나눠 써도(자원 칸들) 한 칸을 풀 때 다른 칸의 구독이 빠지지 않는다
+      const off = c.subscribe(() => changed());
       const unwatch = c.watch?.();
       held.set(c, () => (off(), unwatch?.()));
     }
@@ -50,24 +50,34 @@ export function createDerived<T>(compute: (prev: T | undefined) => T): Derived<T
   const release = () => {
     held.forEach((stop) => stop());
     held.clear();
+    shown = null;
+  };
+  /** 낡았으면 다시 짓고 구독을 맞춘다 */
+  const refresh = () => {
+    if (fresh()) return;
+    run();
+    if (listeners.size > 0) hold();
   };
   function changed() {
-    if (listeners.size === 0 || fresh()) return;
-    const differs = run();
-    hold();
-    if (differs) listeners.forEach((l) => l());
+    if (listeners.size === 0) return;
+    refresh();
+    if (shown !== null && Object.is(shown.value, value)) return;
+    shown = { value: value as T };
+    listeners.forEach((l) => l());
   }
 
   const get = (): T => {
-    // 구독 중이면 changed 가 이미 맞춰 두었다
-    if (listeners.size === 0 ? !fresh() : !has) run();
+    if (computing) throw new Error("파생 store 가 계산 중에 자기 자신을 읽었다");
+    // 구독 중이어도 읽은 것이 바뀌었으면 여기서 다시 짓는다 — 알림 차례에 따라 중간값을 보이지 않게
+    refresh();
     return value as T;
   };
   const subscribe = (listener: () => void) => {
     if (listeners.size === 0) {
-      if (!fresh()) run();
       listeners.add(listener);
+      refresh();
       hold();
+      shown = { value: value as T };
     } else listeners.add(listener);
     return () => {
       listeners.delete(listener);

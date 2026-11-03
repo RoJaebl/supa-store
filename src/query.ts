@@ -4,7 +4,7 @@ import { USE } from "./index.js";
 import { createRefetcher, type RefetchInterval } from "./refetch.js";
 import { createMutation, type MutationFn, type MutationHooks, message } from "./mutation.js";
 import { IDLE, makeResourceHook, noop, plain, QUERY_FIELDS } from "./resourceHook.js";
-import { noteRead, type Channel } from "./track.js";
+import { isTracking, noteRead, type Channel } from "./track.js";
 
 export type { MutationFn, MutationHooks, MutationSnapshot } from "./mutation.js";
 export type { RefetchInterval };
@@ -345,7 +345,8 @@ export function createResource<A = void, D = never, R extends object = object, S
   };
   // 목록은 Array.isArray 로 가른다 — 생성기가 args 자체가 배열인 자원을 막는다
   const getOne = (args: A | undefined) => {
-    noteRead(channelOf(args));
+    // 계산 공간 밖(바꾸기 · 콜백)에서 읽으면 채널을 짓지 않는다 — args 마다 쌓이지 않게
+    if (isTracking()) noteRead(channelOf(args));
     return cells.get(idOf(args))?.view.data;
   };
   const setOne = (updater: unknown, args: A | undefined) => {

@@ -15,6 +15,11 @@ export const DERIVED: unique symbol = Symbol.for("supa-store.derived") as never;
 /** 지금 도는 track 이 모으는 채널 — track 바깥이면 null 이라 읽어도 적지 않는다 */
 let recording: Set<Channel> | null = null;
 
+/** 지금 track 이 돌고 있는가 — 적을 것을 지을 값이 들 때 먼저 묻는다 */
+export function isTracking(): boolean {
+  return recording !== null;
+}
+
 /** 읽었다고 적는다 — track 이 도는 동안에만 */
 export function noteRead(channel: Channel): void {
   recording?.add(channel);

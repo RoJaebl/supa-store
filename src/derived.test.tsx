@@ -16,6 +16,13 @@ declare module "./index.js" {
     "state.d.pick": { id: number; setId: (id: number) => void };
     "state.d.label": Derived<string>;
     "state.d.itemOne": Derived<{ id: number; name: string } | undefined>;
+    "api.d.cell": Resource<{ id: number }, number, object>;
+    "state.d.ids": { ids: number[]; setIds: (ids: number[]) => void };
+    "state.d.cells": Derived<string>;
+    "state.d.tens": Derived<number>;
+    "state.d.pair": Derived<string>;
+    "state.d.flag": { on: boolean; turnOn: () => void };
+    "state.d.self": Derived<number>;
   }
 }
 
@@ -160,5 +167,43 @@ it("다시 받은 응답이 같으면 깨우지 않는다", async () => {
   calls = 0;
   await act(() => getStore("api.d.item").getState().invalidate({ id: 1 }));
   expect(calls).toBe(0);
+  stop();
+});
+
+// ── 검토가 짚은 결함 ─────────────────────────────────
+
+createStore("api.d.cell", () => createResource(() => ({ query: async () => 0 }), { auto: false }));
+createStore("state.d.ids", (set) => ({ ids: [1, 2], setIds: (ids: number[]) => set({ ids }) }));
+createStore("state.d.cells", (_s, _g, ctx) =>
+  createDerived(() => ctx("state.d.ids").ids.map((id) => ctx("api.d.cell").getData({ id }) ?? 0).join(",")),
+);
+createStore("state.d.tens", (_s, _g, ctx) => createDerived(() => ctx("state.d.a").n * 10));
+createStore("state.d.pair", (_s, _g, ctx) => createDerived(() => `${ctx("state.d.a").n}/${ctx("state.d.tens")}`));
+createStore("state.d.flag", (set) => ({ on: false, turnOn: () => set({ on: true }) }));
+createStore("state.d.self", (_s, _g, ctx) => createDerived((): number => (ctx("state.d.flag").on ? ctx("state.d.self") + 1 : 0)));
+
+it("자원 칸 하나를 놓아도 같은 자원의 다른 칸은 계속 따라간다", () => {
+  const cells = getStore("state.d.cells").getState();
+  const stop = cells.subscribe(() => {});
+  getStore("state.d.ids").getState().setIds([2]);
+  getStore("api.d.cell").getState().setData(5, { id: 2 });
+  expect(cells.get()).toBe("5");
+  stop();
+});
+
+it("다이아몬드 의존에서 중간값을 보이지 않는다", () => {
+  const pair = getStore("state.d.pair").getState();
+  const seen: string[] = [];
+  const stop = pair.subscribe(() => seen.push(pair.get()));
+  expect(pair.get()).toBe("1/10");
+  a().inc();
+  expect(seen).toEqual(["2/20"]);
+  stop();
+});
+
+it("구독 중에 자기 자신을 읽으면 그 뜻의 오류로 멈춘다", () => {
+  const self = getStore("state.d.self").getState();
+  const stop = self.subscribe(() => {});
+  expect(() => getStore("state.d.flag").getState().turnOn()).toThrow("파생 store 가 계산 중에 자기 자신을 읽었다");
   stop();
 });
