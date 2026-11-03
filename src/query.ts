@@ -7,6 +7,7 @@ import { IDLE, makeResourceHook, noop, plain, QUERY_FIELDS } from "./resourceHoo
 
 export type { MutationFn, MutationHooks, MutationSnapshot } from "./mutation.js";
 export type { RefetchInterval };
+export { createDerived } from "./derived.js";
 
 type Fn = (...args: any[]) => any;
 

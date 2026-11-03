@@ -9,6 +9,9 @@ export interface Channel {
   watch?(): () => void;
 }
 
+/** 파생 store 의 상태가 이 표식으로 자기 채널을 둔다 — ctx 가 파생을 알아보고 값을 꺼낸다 */
+export const DERIVED: unique symbol = Symbol.for("supa-store.derived") as never;
+
 /** 지금 도는 track 이 모으는 채널 — track 바깥이면 null 이라 읽어도 적지 않는다 */
 let recording: Set<Channel> | null = null;
 
