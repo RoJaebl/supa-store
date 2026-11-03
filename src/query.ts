@@ -3,7 +3,7 @@
 import { USE } from "./index.js";
 import { createRefetcher, type RefetchInterval } from "./refetch.js";
 import { createMutation, type MutationFn, type MutationHooks, message } from "./mutation.js";
-import { IDLE, makeResourceHook, noop, QUERY_FIELDS } from "./resourceHook.js";
+import { IDLE, makeResourceHook, noop, plain, QUERY_FIELDS } from "./resourceHook.js";
 
 export type { MutationFn, MutationHooks, MutationSnapshot } from "./mutation.js";
 export type { RefetchInterval };
@@ -162,6 +162,21 @@ export const keepPreviousData = ((...a: any[]) => {
   return list ? prev.find((p) => JSON.stringify(p.args ?? null) === id)?.data : prev[0]?.data;
 }) as KeepPrevious;
 
+/**
+ * 내용이 같으면 앞 값을, 아니면 새 값을 준다 — 다시 받은 응답이 그대로면 앞 객체를 두어 그것을 읽는 쪽이 깨지 않게 한다.
+ * 둘 다 배열이거나 둘 다 보통 객체일 때만 칸마다 깊이 견준다. Date · Map · 클래스 인스턴스는 Object.is 로만 본다
+ */
+export function keepEqual<T>(prev: T | undefined, next: T): T {
+  return equal(prev, next) ? (prev as T) : next;
+}
+function equal(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal(v, b[i]));
+  if (!plain(a) || !plain(b) || Array.isArray(a) || Array.isArray(b)) return false;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => k in b && equal((a as any)[k], (b as any)[k]));
+}
+
 const RESERVED = [...QUERY_FIELDS, "fetch", "getData", "setData", "invalidate"];
 
 interface Cell<A, D> {
@@ -287,7 +302,9 @@ export function createResource<A = void, D = never, R extends object = object, S
       if (last) countIfLoose(cell);
     };
     const request: Promise<D> = new Promise<D>((resolve) => resolve(query!.call(defined, args as A))).then(
-      (data) => {
+      (fresh) => {
+        // 내용이 같으면 앞 객체를 둔다 — 같은 응답을 다시 받아도 읽는 쪽(화면 · 파생)이 깨지 않는다
+        const data = keepEqual(cell.view.data, fresh);
         end(true, { data, status: "ready", error: null });
         return data;
       },

@@ -38,7 +38,7 @@ export const subscribeNone = () => noop;
 const IDLE_MUTATION: MutationSnapshot<Fn> = { inflight: [], optimistic: [], pending: false, error: null, data: undefined };
 const idleSnapshot = () => IDLE_MUTATION;
 
-const plain = (x: unknown): x is object => {
+export const plain = (x: unknown): x is object => {
   if (typeof x !== "object" || x === null) return false;
   const proto = Object.getPrototypeOf(x);
   return proto === Object.prototype || proto === null;

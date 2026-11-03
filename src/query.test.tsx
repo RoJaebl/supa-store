@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { createStore, disposeStores, getStore, overrideStore, resetStores } from "./index.js";
-import { createEvent, createResource, type Cache, type MutationFn } from "./query.js";
+import { createEvent, createResource, keepEqual, type Cache, type MutationFn } from "./query.js";
 import { useStore } from "./react.js";
 
 beforeEach(() => resetStores());
@@ -1019,4 +1019,25 @@ it("release: disposeStores 뒤 앞 자원의 타이머가 터져도 다시 지�
 it("타입: 동기 바꾸기도 부르면 Promise 를 돌려준다", () => {
   const r = createResource(() => ({ double: (x: number) => x * 2 }));
   expectTypeOf(r.double(1)).toEqualTypeOf<Promise<number>>();
+});
+
+it("다시 받은 응답이 내용이 같으면 앞 객체를 둔다", async () => {
+  let n = 0;
+  const r = createResource(() => ({ query: async () => ({ a: [1, 2], b: { c: n } }) }));
+  const first = await r.fetch();
+  await r.invalidate();
+  expect(await r.fetch()).toBe(first);
+  n = 1;
+  await r.invalidate();
+  const third = await r.fetch();
+  expect(third).not.toBe(first);
+  expect(third.b.c).toBe(1);
+});
+
+it("보통 객체와 배열만 깊이 견준다", () => {
+  const prev = { d: new Date(0) };
+  expect(keepEqual(prev, { d: new Date(0) })).not.toBe(prev);
+  const m = new Map();
+  const prev2 = { m, a: [1, { b: 2 }] };
+  expect(keepEqual(prev2, { m, a: [1, { b: 2 }] })).toBe(prev2);
 });
