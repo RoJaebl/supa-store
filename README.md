@@ -23,7 +23,7 @@ allowBuilds:
   "supa-store@https://codeload.github.com/RoJaebl/supa-store/tar.gz/<커밋>": true
 ```
 
-커밋을 바꿀 때는 두 자리의 `<커밋>` 을 함께 바꾼다. npm 판이 나오면 `"supa-store": "^0.5.0"` 으로 바꾸고 `allowBuilds` 줄은 지운다.
+커밋을 바꿀 때는 두 자리의 `<커밋>` 을 함께 바꾼다. npm 판이 나오면 `"supa-store": "^0.6.0"` 으로 바꾸고 `allowBuilds` 줄은 지운다.
 
 ## 시작 절차
 
@@ -75,9 +75,55 @@ createStore("api.todos", () =>
 createStore("event.saved", () => createEvent<{ id: string }>());
 ```
 
+## 세 공간
+
+**최신 값이 필요하면 클로저 안에서 `ctx` 로 읽는다.** 정의 안의 코드는 세 공간 가운데 하나에서 돈다.
+
+- **짓는 공간** — 정의 함수의 본문. store 를 처음 꺼낼 때 한 번 돌아 인스턴스된 값을 짓는다. 여기서 읽은 값은 다시 지을 때까지 그대로이므로, 이 자리에서는 event 를 잇기만 한다(`ctx("event.x").on(ctx.key, …)`).
+- **동작 · 콜백** — 바꾸기 함수 · `onSuccess` · event 를 받는 함수. 불릴 때 돌고, 그 안의 `ctx` 는 부를 때마다 그 순간을 읽는다.
+- **계산 공간** — `createDerived` 의 계산 함수와 자원 `select`. 그 안에서 `ctx(key)` 로 읽은 store, `ctx(key).getData(args)` 로 읽은 자원 칸, 바꾸기 상태가 바뀌면 라이브러리가 다시 부른다. 어느 store 의 `ctx` 로 읽었는지는 가리지 않는다 — 계산 중에 다른 store 의 함수가 자기 `ctx` 로 읽은 것도 입력이다.
+
+## 파생 store
+
+다른 store 를 읽어 값을 짓는 store 는 `createDerived` 로 정의한다. 계산 함수는 계산 공간에서 돈다.
+
+```ts
+import { createDerived } from "supa-store/query";
+
+createStore("state.cart.total", (_set, _get, ctx) =>
+  createDerived(() => ctx("state.cart").items.reduce((sum, item) => sum + item.price * ctx("state.rate").value, 0)),
+);
+
+// 자원 칸을 읽는다 — 받는 동안에는 앞 결과(prev)를 잇는다
+createStore("state.todo.title", (_set, _get, ctx) =>
+  createDerived((prev?: string) => ctx("api.todo").getData({ id: ctx("state.todo.pick").id })?.title ?? prev ?? ""),
+);
+```
+
+```tsx
+const total = useStore("state.cart.total"); // 값 그대로
+getStore("state.cart.total").getState().get(); // React 밖
+```
+
+- 읽은 것이 바뀌면 다시 계산하고, 결과가 `Object.is` 로 앞과 같으면 구독자를 깨우지 않는다.
+- 구독자가 없으면 따라가지 않는다. 꺼낼 때 읽은 것을 견주어 바뀌었으면 그 자리에서 다시 짓는다.
+- 자원 칸을 읽으면 구독자가 있는 동안 그 칸을 보는 것으로 친다 — 비어 있으면 받고, `refetchInterval` · `release` 가 화면이 볼 때처럼 돈다.
+- 다른 정의의 계산 공간에서 `ctx(파생 key)` 로 읽으면 값을 주고 따라간다. 파생이 파생을 읽을 수 있다.
+
+## 닫힌 key
+
+`_` 로 시작하는 key 는 `useStore` 로 꺼내지 못한다(형 검사가 막는다). store 끼리 `ctx` 로, React 밖에서 `getStore` 로 읽는다. 원본 자원을 닫아 두고 파생만 화면에 여는 데 쓴다.
+
+```ts
+createStore("_api.raw", () => createResource(() => ({ query: fetchRaw })));
+createStore("state.view", (_s, _g, ctx) => createDerived(() => shape(ctx("_api.raw").getData())));
+```
+
 ## 자원 더 쓰기
 
 아래 예는 이 자원을 쓴다. 자원 정의의 둘째 인자에는 `auto` · `select` · `placeholderData` · `refetchInterval` 을 적는다. 뒤의 셋은 화면 옵션에도 같은 이름으로 있다.
+
+다시 받은 응답이 앞 값과 내용이 같으면 자원은 앞 객체를 그대로 둔다(보통 객체와 배열만 깊이 견준다). 같은 응답을 다시 받아도 그것을 읽는 화면과 파생이 깨지 않는다.
 
 ```ts
 createStore("api.file.dirLevel", () =>
