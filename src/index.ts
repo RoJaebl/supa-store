@@ -21,6 +21,8 @@ export interface StateTypes {}
 // 생성 파일이 없으면 key 가 never 다 — 검사가 조용히 꺼지지 않고 모든 호출이 실패한다
 export type StateKey = keyof StateTypes & string;
 export type StateOf<K> = K extends StateKey ? StateTypes[K] : unknown;
+/** 화면이 꺼낼 수 있는 key — `_` 로 시작하는 key 는 store 끼리(ctx · getStore)만 읽는다 */
+export type PublicKey = Exclude<StateKey, `_${string}`>;
 
 /** 한 store 상태의 칸 이름 */
 export type Names<K> = keyof StateOf<K> & string;

@@ -8,23 +8,24 @@ import {
   type Names,
   type Picked,
   type PickOptions,
+  type PublicKey,
   type StateKey,
   type StateOf,
 } from "./index.js";
 import type { ResourceUse, ResourceUseOptions, ResourceUseResult } from "./query.js";
 import type { StreamUse, StreamUseOptions, StreamUseResult } from "./stream/index.js";
 
-type UseKeys = { [K in StateKey]: StateOf<K> extends { [USE]: (...a: any[]) => any } ? K : never }[StateKey];
+type UseKeys = { [K in PublicKey]: StateOf<K> extends { [USE]: (...a: any[]) => any } ? K : never }[PublicKey];
 type UseFn<K> = Extract<StateOf<K>[typeof USE & keyof StateOf<K>], (...a: any[]) => any>;
 // 자원은 옵션의 꼴(하나 · 목록)에 따라 돌려주는 타입이 갈린다 — Parameters · ReturnType 은 제네릭 서명을 제약으로만 읽으므로 따로 받는다
 type UseOf<K> = StateOf<K>[typeof USE & keyof StateOf<K>];
-type ResourceKeys = { [K in StateKey]: StateOf<K> extends { [USE]: ResourceUse<any, any, any, any> } ? K : never }[StateKey];
+type ResourceKeys = { [K in PublicKey]: StateOf<K> extends { [USE]: ResourceUse<any, any, any, any> } ? K : never }[PublicKey];
 // 둘째 자리는 화면이 받는 data — 자원 select 를 거친 S 다. 넷째는 select 전 D
 type ResourceTypes<K> = UseOf<K> extends ResourceUse<infer A, infer S, infer R, infer D> ? [A, S, R, D] : never;
 // 연결은 [DISPOSE] 로 자원과 가른다 — [USE] 만 보면 연결도 자원 서명에 맞는다
 type StreamKeys = {
-  [K in StateKey]: StateOf<K> extends { [USE]: StreamUse<any, any>; [DISPOSE](): void } ? K : never;
-}[StateKey];
+  [K in PublicKey]: StateOf<K> extends { [USE]: StreamUse<any, any>; [DISPOSE](): void } ? K : never;
+}[PublicKey];
 type StreamTypes<K> = UseOf<K> extends StreamUse<infer V, infer Cmd> ? [V, Cmd] : never;
 type Opts = { pick?: readonly string[]; omit?: readonly string[] };
 
@@ -42,9 +43,9 @@ export function useStore<
   O extends ResourceUseOptions<ResourceTypes<K>[0], ResourceTypes<K>[1], ResourceTypes<K>[2], ResourceTypes<K>[3]>,
 >(key: K, options?: O): ResourceUseResult<ResourceTypes<K>[1], ResourceTypes<K>[2], O>;
 export function useStore<K extends UseKeys>(key: K, ...args: Parameters<UseFn<K>>): ReturnType<UseFn<K>>;
-export function useStore<K extends StateKey>(key: K): StateOf<K>;
+export function useStore<K extends PublicKey>(key: K): StateOf<K>;
 // [USE] 가 있는 상태는 꺼내기를 [USE] 에 맡긴다 — 이 갈래로 새면 목록의 pick 검사가 빠진다
-export function useStore<K extends Exclude<StateKey, UseKeys>, N extends Names<K>, O extends PickOptions<K, N>>(
+export function useStore<K extends Exclude<PublicKey, UseKeys>, N extends Names<K>, O extends PickOptions<K, N>>(
   key: K,
   options: O,
 ): Picked<K, O>;
