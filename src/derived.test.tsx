@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
-import { beforeEach, expect, expectTypeOf, it } from "vitest";
+import { beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { createStore, getStore, overrideStore, resetStores, type Derived } from "./index.js";
-import { createDerived } from "./query.js";
+import { createDerived, createResource, type Resource } from "./query.js";
 import { useStore } from "./react.js";
 
 declare module "./index.js" {
@@ -12,6 +12,10 @@ declare module "./index.js" {
     "state.d.twice": Derived<number>;
     "state.d.positive": Derived<boolean>;
     "state.d.history": Derived<number[]>;
+    "api.d.item": Resource<{ id: number }, { id: number; name: string }, object>;
+    "state.d.pick": { id: number; setId: (id: number) => void };
+    "state.d.label": Derived<string>;
+    "state.d.itemOne": Derived<{ id: number; name: string } | undefined>;
   }
 }
 
@@ -99,4 +103,62 @@ it("compute 는 앞 결과를 prev 로 받는다", () => {
   expect(derived("state.d.history").get()).toEqual([1]);
   a().inc();
   expect(derived("state.d.history").get()).toEqual([1, 2]);
+});
+
+// ── 자원 칸을 계산 공간에서 읽는다 ─────────────────────
+
+let queries = 0;
+createStore("api.d.item", () =>
+  createResource(() => ({ query: async (a: { id: number }) => (queries++, { id: a.id, name: `n${a.id}` }) }), { release: 100 }),
+);
+createStore("state.d.pick", (set) => ({ id: 1, setId: (id: number) => set({ id }) }));
+createStore("state.d.label", (_s, _g, ctx) =>
+  createDerived((prev: string | undefined) => ctx("api.d.item").getData({ id: ctx("state.d.pick").id })?.name ?? prev ?? "-"),
+);
+createStore("state.d.itemOne", (_s, _g, ctx) => createDerived(() => ctx("api.d.item").getData({ id: 1 })));
+const label = () => getStore("state.d.label").getState();
+const settle = () => act(async () => {});
+
+it("구독하면 자원을 받고, 받으면 다시 계산한다", async () => {
+  queries = 0;
+  const stop = label().subscribe(() => {});
+  expect(label().get()).toBe("-");
+  await settle();
+  expect(label().get()).toBe("n1");
+  expect(queries).toBe(1);
+  stop();
+});
+
+it("args 가 바뀌면 앞 칸을 놓고 prev 로 잇는다", async () => {
+  vi.useFakeTimers();
+  const stop = label().subscribe(() => {});
+  await vi.runAllTimersAsync();
+  expect(label().get()).toBe("n1");
+  getStore("state.d.pick").getState().setId(2);
+  expect(label().get()).toBe("n1");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(label().get()).toBe("n2");
+  await vi.advanceTimersByTimeAsync(100);
+  expect(getStore("api.d.item").getState().getData({ id: 1 })).toBeUndefined();
+  stop();
+  vi.useRealTimers();
+});
+
+it("구독자가 없으면 자원을 받지 않는다", async () => {
+  queries = 0;
+  expect(label().get()).toBe("-");
+  await settle();
+  expect(queries).toBe(0);
+});
+
+it("다시 받은 응답이 같으면 깨우지 않는다", async () => {
+  let calls = 0;
+  const one = getStore("state.d.itemOne").getState();
+  const stop = one.subscribe(() => calls++);
+  await settle();
+  expect(one.get()?.name).toBe("n1");
+  calls = 0;
+  await act(() => getStore("api.d.item").getState().invalidate({ id: 1 }));
+  expect(calls).toBe(0);
+  stop();
 });

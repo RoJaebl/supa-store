@@ -4,6 +4,7 @@ import { USE } from "./index.js";
 import { createRefetcher, type RefetchInterval } from "./refetch.js";
 import { createMutation, type MutationFn, type MutationHooks, message } from "./mutation.js";
 import { IDLE, makeResourceHook, noop, plain, QUERY_FIELDS } from "./resourceHook.js";
+import { noteRead, type Channel } from "./track.js";
 
 export type { MutationFn, MutationHooks, MutationSnapshot } from "./mutation.js";
 export type { RefetchInterval };
@@ -318,8 +319,35 @@ export function createResource<A = void, D = never, R extends object = object, S
     return request;
   };
 
+  /**
+   * 칸마다 하나인 채널 — 계산 공간(파생 · select)이 getData 로 읽으면 적힌다. 파생이 이것을 구독하는 동안은 화면이 칸을 볼 때와 같다:
+   * 비어 있으면 받고(auto), 주기 받기를 걸고, 놓기 타이머를 멈춘다. 칸이 놓여도 채널은 남는다 — 다시 보면 칸이 새로 선다
+   */
+  const channels = new Map<string, Channel>();
+  const channelOf = (args: A | undefined): Channel => {
+    const id = idOf(args);
+    let channel = channels.get(id);
+    if (!channel)
+      channels.set(
+        id,
+        (channel = {
+          subscribe,
+          snapshot: () => cells.get(id)?.view.data,
+          watch() {
+            const stop = refetcher.watch(args as A, undefined);
+            const cell = cellOf(args);
+            if (auto && cell.view.status !== "ready" && !cell.request) load(args).catch(noop);
+            return stop;
+          },
+        }),
+      );
+    return channel;
+  };
   // 목록은 Array.isArray 로 가른다 — 생성기가 args 자체가 배열인 자원을 막는다
-  const getOne = (args: A | undefined) => cells.get(idOf(args))?.view.data;
+  const getOne = (args: A | undefined) => {
+    noteRead(channelOf(args));
+    return cells.get(idOf(args))?.view.data;
+  };
   const setOne = (updater: unknown, args: A | undefined) => {
     const cell = cellOf(args);
     const data =
