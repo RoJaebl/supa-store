@@ -64,7 +64,8 @@ export function supaStore() {
       let timer;
       const again = () => {
         clearTimeout(timer);
-        timer = setTimeout(() => worker.run(), 200);
+        // 그사이 서버가 닫혔으면 worker 가 없다 — 닫힌 서버에는 쓸 일이 없다
+        timer = setTimeout(() => worker?.run(), 200);
         timer.unref();
       };
       for (const event of ["add", "unlink", "change"]) {
