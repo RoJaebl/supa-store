@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
@@ -174,4 +175,15 @@ test('targets 에 vite 가 없으면 아무것도 쓰지 않는다', async () =>
   write("src/a.state.ts", def("a", "{ n: 0 }"));
   await start();
   assert.equal(existsSync(join(root, GEN)), false);
+});
+
+test("정의를 고친 직후 서버를 닫아도 남은 타이머가 예외를 내지 않는다", async () => {
+  write("src/a.state.ts", def("a", "{ n: 0 }"));
+  const plugin = supaStore();
+  plugin.configResolved({ command: "serve", logger: { error() {} }, root });
+  const watcher = new EventEmitter();
+  plugin.configureServer({ watcher });
+  watcher.emit("change", join(root, "src/a.state.ts"));
+  await plugin.closeBundle();
+  await new Promise((r) => setTimeout(r, 300)); // 디바운스가 지난다 — 던지면 이 시험 안의 uncaughtException 이다
 });
