@@ -1,7 +1,8 @@
 // 자원 훅 — 정의 파일과 함께 서버 쪽에서도 평가되므로 "use client" 를 두지 않고 React 를 이름공간으로 가져온다
 import * as React from "react";
 import type { MutationView, PlaceholderData, Prev, Status } from "./query.js";
-import { type MutationChannel, type MutationFn, type MutationSnapshot, message, track } from "./mutation.js";
+import { type MutationChannel, type MutationFn, type MutationSnapshot, message } from "./mutation.js";
+import { track, type Channel } from "./track.js";
 import { type RefetchInterval, valueOf } from "./refetch.js";
 
 export { message };
@@ -38,7 +39,7 @@ export const subscribeNone = () => noop;
 const IDLE_MUTATION: MutationSnapshot<Fn> = { inflight: [], optimistic: [], pending: false, error: null, data: undefined };
 const idleSnapshot = () => IDLE_MUTATION;
 
-const plain = (x: unknown): x is object => {
+export const plain = (x: unknown): x is object => {
   if (typeof x !== "object" || x === null) return false;
   const proto = Object.getPrototypeOf(x);
   return proto === Object.prototype || proto === null;
@@ -64,7 +65,7 @@ type Item = {
   data: unknown;
   filled: { with: unknown } | undefined;
   /** 자원 select 가 읽은 바꾸기 칸과 그때의 상태 — 모두 그대로여야 앞 결과를 쓴다 */
-  reads: Array<[MutationChannel, MutationSnapshot<Fn>]>;
+  reads: Array<[Channel, unknown]>;
 };
 type Last = {
   core: object;
@@ -203,9 +204,9 @@ export function makeResourceHook<A, D>(core: ResourceCore<A, D>): (options?: obj
     );
     const items = React.useSyncExternalStore(subscribeAll, snapshot, snapshot);
     // 적힌 칸을 앞과 견주어 빠진 것만 풀고 새 것만 건다. 렌더와 이 효과 사이에 칸이 바뀌었으면 한 번 알린다
-    const reading = React.useRef(new Map<MutationChannel, () => void>());
+    const reading = React.useRef(new Map<Channel, () => void>());
     React.useEffect(() => {
-      const want = new Map<MutationChannel, MutationSnapshot<Fn>>();
+      const want = new Map<Channel, unknown>();
       last.current?.byId.forEach((item) => item.reads.forEach(([c, s]) => want.set(c, s)));
       const map = reading.current;
       map.forEach((stop, c) => want.has(c) || (stop(), map.delete(c)));

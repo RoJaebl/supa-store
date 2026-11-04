@@ -10,6 +10,7 @@ declare module "./index.js" {
     "state.test.use": { [USE]: (x: number) => number };
     "state.test.count": { n: number; add: () => void };
     "state.test.pair": { a: number; b: number; setA: (a: number) => void };
+    "_state.test.hidden": { n: number };
   }
 }
 
@@ -18,9 +19,16 @@ createStore("state.test.pair", (set) => ({ a: 1, b: 2, setA: (a: number) => set(
 
 createStore("state.test.pair2", (set) => ({ a: 1, b: 2, setA: (a: number) => set({ a }) }));
 createStore("state.test.use", () => ({ [USE]: (x: number) => x * 2 }));
+createStore("_state.test.hidden", () => ({ n: 1 }));
 const pair = () => getStore("state.test.pair");
 
 beforeEach(() => resetStores());
+
+it("_ 로 시작하는 key 는 useStore 로 꺼내지 못하고 getStore 로는 읽는다", () => {
+  // @ts-expect-error 닫힌 key
+  renderHook(() => useStore("_state.test.hidden"));
+  expect(getStore("_state.test.hidden").getState().n).toBe(1);
+});
 
 it("useStore: 인자 없이 꺼내면 상태 전부", () => {
   const { result } = renderHook(() => useStore("state.test.count"));

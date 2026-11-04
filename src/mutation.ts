@@ -1,4 +1,5 @@
 // 바꾸기 하나의 상태 — 자원이 쥐고, 어디서 부르든 같은 칸을 거친다. React 를 가져오지 않는다
+import { noteRead, type Channel } from "./track.js";
 type Fn = (...args: any[]) => any;
 
 /** 바꾸기 하나의 상태 — 바뀔 때마다 새 객체다 */
@@ -25,31 +26,12 @@ export interface MutationHooks<F extends Fn> {
   /** 같은 id 의 바꾸기를 한 줄에 세운다 */
   scope?: { id: string };
 }
-/** 구독 단위 — 화면 훅과 읽기 기록이 쓴다 */
-export interface MutationChannel {
-  subscribe(listener: () => void): () => void;
+/** 구독 단위 — 화면 훅과 계산 공간(`track`)이 쓴다 */
+export interface MutationChannel extends Channel {
   snapshot(): MutationSnapshot<Fn>;
 }
 
 export const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
-/** 지금 도는 track 이 모으는 칸 — track 바깥이면 null 이라 읽어도 적지 않는다 */
-let recording: Set<MutationChannel> | null = null;
-/** 상태 칸을 읽었다고 적는다 — track 이 도는 동안에만 */
-export function noteRead(channel: MutationChannel): void {
-  recording?.add(channel);
-}
-/** run 이 도는 동안 읽힌 바꾸기 칸을 모은다. 겹쳐 부르면 안쪽 것만 모은다 */
-export function track<T>(run: () => T): { value: T; reads: MutationChannel[] } {
-  const outer = recording;
-  const mine = new Set<MutationChannel>();
-  recording = mine;
-  try {
-    return { value: run(), reads: [...mine] };
-  } finally {
-    recording = outer;
-  }
-}
 
 /** scope.id → 그 줄 마지막 호출이 끝나면 풀리는 약속 — 던지지 않는다 */
 const scopes = new Map<string, Promise<void>>();

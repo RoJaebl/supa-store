@@ -1,4 +1,6 @@
 import { resetScopes } from "./mutation.js";
+import { DERIVED, noteRead, type Channel } from "./track.js";
+export { DERIVED };
 
 /** 상태에 이 표식으로 함수를 두면 useStore 가 꺼내기를 그 함수에 맡긴다 — 그 함수는 훅이다 */
 export const USE: unique symbol = Symbol.for("supa-store.use") as never;
@@ -21,6 +23,8 @@ export interface StateTypes {}
 // 생성 파일이 없으면 key 가 never 다 — 검사가 조용히 꺼지지 않고 모든 호출이 실패한다
 export type StateKey = keyof StateTypes & string;
 export type StateOf<K> = K extends StateKey ? StateTypes[K] : unknown;
+/** 화면이 꺼낼 수 있는 key — `_` 로 시작하는 key 는 store 끼리(ctx · getStore)만 읽는다 */
+export type PublicKey = Exclude<StateKey, `_${string}`>;
 
 /** 한 store 상태의 칸 이름 */
 export type Names<K> = keyof StateOf<K> & string;
@@ -35,11 +39,23 @@ export type Picked<K, O> = O extends { pick: readonly (infer N)[] }
     ? Omit<StateOf<K>, N & keyof StateOf<K>>
     : StateOf<K>;
 
-/** creator 의 셋째 인자 — 다른 store 의 부르는 순간의 값을 꺼낸다. 인자 없이 부르면 자기 자신. select 안에서 바꾸기 상태를 읽으면 그 칸을 따라간다 */
+/** 파생 store 의 상태 — createDerived(supa-store/query)가 짓는다. useStore · ctx 로 꺼내면 값 T 를 준다 */
+export interface Derived<T> {
+  /** 지금 값. 구독자가 없으면 그 자리에서 계산한다(읽은 것이 그대로면 앞 결과) */
+  get(): T;
+  subscribe(listener: () => void): () => void;
+  [USE](): T;
+  [DISPOSE](): void;
+  [DERIVED]: Channel;
+}
+/** ctx 로 읽었을 때의 값 — 파생이면 그 값, 아니면 상태 그대로 */
+export type ReadOf<S> = S extends Derived<infer T> ? T : S;
+
+/** creator 의 셋째 인자 — 다른 store 의 부르는 순간의 값을 꺼낸다. 인자 없이 부르면 자기 자신. 계산 공간(select · createDerived) 안에서 읽으면 그 store 를 따라간다 */
 export interface Ctx<Self extends StateKey = StateKey> {
   /** 인자 없이 부르면 자기 상태를 준다. 짓는 동안에는 쓸 수 없고, 짓기 기록에도 적지 않는다 */
   (): StateOf<Self>;
-  <K extends StateKey>(key: K): StateOf<K>;
+  <K extends StateKey>(key: K): ReadOf<StateOf<K>>;
   <K extends StateKey, N extends Names<K>, O extends PickOptions<K, N>>(key: K, options: O): Picked<K, O>;
   /** 지금 짓고 있는 store 의 key — event 에 「누가」를 남길 때 쓴다 */
   readonly key: Self;
@@ -57,6 +73,8 @@ interface Entry {
   deps: Set<string>;
   listeners: Set<() => void>;
   api: StoreApi<any>;
+  /** 계산 공간이 이 store 를 읽었을 때 적는 채널 — 상태 객체가 바뀌면 달라진다 */
+  channel: Channel;
   build(): void;
   /** 지어져 있으면 앞 상태의 [DISPOSE] 를 부른다. 던져도 삼킨다 — 다시 짓기를 막지 않는다 */
   dispose(): void;
@@ -116,7 +134,16 @@ function makeEntry(key: string, definition: Creator): Entry {
       }
       // 짓는 동안 꺼낸 key 만 기록한다. 동작 안에서 부를 때 꺼낸 것은 기댐이 아니다
       if (building[building.length - 1] === key) entry.deps.add(other);
-      return pickFrom(ensure(entryOf(other)).api.getState(), options);
+      const target = ensure(entryOf(other));
+      // 계산 공간(track) 안이면 읽었다고 적는다 — 어느 store 의 ctx 로 읽었는지는 가리지 않는다
+      noteRead(target.channel);
+      const state = target.api.getState();
+      // 파생은 상태가 아니라 값을 준다 — 그 값의 채널도 적어 파생이 파생을 따라간다
+      if (state && typeof state === "object" && DERIVED in state) {
+        noteRead((state as Derived<unknown>)[DERIVED]);
+        return (state as Derived<unknown>).get();
+      }
+      return pickFrom(state, options);
     },
     { key },
   ) as Ctx;
@@ -135,6 +162,13 @@ function makeEntry(key: string, definition: Creator): Entry {
         listeners.add(listener);
         return () => void listeners.delete(listener);
       },
+    },
+    channel: {
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => void listeners.delete(listener);
+      },
+      snapshot: () => (ensure(entry), state),
     },
     dispose() {
       if (!entry.built) return;

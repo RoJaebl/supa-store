@@ -3,10 +3,12 @@
 import { USE } from "./index.js";
 import { createRefetcher, type RefetchInterval } from "./refetch.js";
 import { createMutation, type MutationFn, type MutationHooks, message } from "./mutation.js";
-import { IDLE, makeResourceHook, noop, QUERY_FIELDS } from "./resourceHook.js";
+import { IDLE, makeResourceHook, noop, plain, QUERY_FIELDS } from "./resourceHook.js";
+import { isTracking, noteRead, type Channel } from "./track.js";
 
 export type { MutationFn, MutationHooks, MutationSnapshot } from "./mutation.js";
 export type { RefetchInterval };
+export { createDerived } from "./derived.js";
 
 type Fn = (...args: any[]) => any;
 
@@ -162,6 +164,21 @@ export const keepPreviousData = ((...a: any[]) => {
   return list ? prev.find((p) => JSON.stringify(p.args ?? null) === id)?.data : prev[0]?.data;
 }) as KeepPrevious;
 
+/**
+ * 내용이 같으면 앞 값을, 아니면 새 값을 준다 — 다시 받은 응답이 그대로면 앞 객체를 두어 그것을 읽는 쪽이 깨지 않게 한다.
+ * 둘 다 배열이거나 둘 다 보통 객체일 때만 칸마다 깊이 견준다. Date · Map · 클래스 인스턴스는 Object.is 로만 본다
+ */
+export function keepEqual<T>(prev: T | undefined, next: T): T {
+  return equal(prev, next) ? (prev as T) : next;
+}
+function equal(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal(v, b[i]));
+  if (!plain(a) || !plain(b) || Array.isArray(a) || Array.isArray(b)) return false;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => k in b && equal((a as any)[k], (b as any)[k]));
+}
+
 const RESERVED = [...QUERY_FIELDS, "fetch", "getData", "setData", "invalidate"];
 
 interface Cell<A, D> {
@@ -287,7 +304,9 @@ export function createResource<A = void, D = never, R extends object = object, S
       if (last) countIfLoose(cell);
     };
     const request: Promise<D> = new Promise<D>((resolve) => resolve(query!.call(defined, args as A))).then(
-      (data) => {
+      (fresh) => {
+        // 내용이 같으면 앞 객체를 둔다 — 같은 응답을 다시 받아도 읽는 쪽(화면 · 파생)이 깨지 않는다
+        const data = keepEqual(cell.view.data, fresh);
         end(true, { data, status: "ready", error: null });
         return data;
       },
@@ -300,8 +319,36 @@ export function createResource<A = void, D = never, R extends object = object, S
     return request;
   };
 
+  /**
+   * 칸마다 하나인 채널 — 계산 공간(파생 · select)이 getData 로 읽으면 적힌다. 파생이 이것을 구독하는 동안은 화면이 칸을 볼 때와 같다:
+   * 비어 있으면 받고(auto), 주기 받기를 걸고, 놓기 타이머를 멈춘다. 칸이 놓여도 채널은 남는다 — 다시 보면 칸이 새로 선다
+   */
+  const channels = new Map<string, Channel>();
+  const channelOf = (args: A | undefined): Channel => {
+    const id = idOf(args);
+    let channel = channels.get(id);
+    if (!channel)
+      channels.set(
+        id,
+        (channel = {
+          subscribe,
+          snapshot: () => cells.get(id)?.view.data,
+          watch() {
+            const stop = refetcher.watch(args as A, undefined);
+            const cell = cellOf(args);
+            if (auto && cell.view.status !== "ready" && !cell.request) load(args).catch(noop);
+            return stop;
+          },
+        }),
+      );
+    return channel;
+  };
   // 목록은 Array.isArray 로 가른다 — 생성기가 args 자체가 배열인 자원을 막는다
-  const getOne = (args: A | undefined) => cells.get(idOf(args))?.view.data;
+  const getOne = (args: A | undefined) => {
+    // 계산 공간 밖(바꾸기 · 콜백)에서 읽으면 채널을 짓지 않는다 — args 마다 쌓이지 않게
+    if (isTracking()) noteRead(channelOf(args));
+    return cells.get(idOf(args))?.view.data;
+  };
   const setOne = (updater: unknown, args: A | undefined) => {
     const cell = cellOf(args);
     const data =
