@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createStore, overrideStore, resetStores } from "./index.js";
+import { createStore, overrideStore, resetStores, type Store } from "./index.js";
 import { createResource } from "./query.js";
 import { useStore } from "./react.js";
 
@@ -17,13 +17,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-let n = 0;
-function define(creator: () => object): string {
-  const key = `api.refetch.r${++n}`;
-  createStore(key, creator);
-  return key;
-}
-const view = (key: string, options?: object): any => (useStore as any)(key, options);
+const define = (creator: () => object): Store<any> => createStore(creator);
+const view = (key: Store<any>, options?: object): any => (useStore as any)(key, options);
 const tick = (ms: number) => act(async () => void (await vi.advanceTimersByTimeAsync(ms)));
 const flush = () => tick(0);
 const setHidden = (value: boolean) =>
@@ -219,7 +214,7 @@ it("주기: 자원을 다시 지으면 앞 타이머가 멈추고 새 자원에 
   expect(old.at).toHaveLength(2);
   const at: number[] = [];
   await act(async () =>
-    overrideStore(old.key as never, () =>
+    overrideStore(old.key, () =>
       createResource(() => ({ query: async () => void at.push(Date.now()) }), { refetchInterval: 1_000 }),
     ),
   );

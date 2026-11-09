@@ -4,7 +4,7 @@ import { DISPOSE, USE, type Derived } from "./index.js";
 import { DERIVED, track, type Channel } from "./track.js";
 
 /**
- * 다른 store 를 ctx 로 읽어 값을 짓는 상태 — `createStore(key, (_s, _g, ctx) => createDerived((prev) => …))`.
+ * 다른 store 를 ctx 로 읽어 값을 짓는 상태 — `const x = createStore((_s, _g, ctx) => createDerived((prev) => …))`.
  *
  * compute 는 계산 공간에서 돈다: 그 안에서 ctx 로 읽은 store(다른 store 의 함수가 자기 ctx 로 읽은 것까지)가 바뀌면
  * 다시 돈다. 구독자가 없으면 따라가지 않고, 꺼낼 때 읽은 것을 견주어 바뀌었으면 그 자리에서 다시 짓는다.

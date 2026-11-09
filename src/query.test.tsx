@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
-import { createStore, disposeStores, getStore, overrideStore, resetStores } from "./index.js";
+import { createStore, disposeStores, getStore, overrideStore, resetStores, type Store } from "./index.js";
 import { createEvent, createResource, keepEqual, type Cache, type MutationFn } from "./query.js";
 import { useStore } from "./react.js";
 import { track } from "./track.js";
@@ -8,15 +8,10 @@ import { track } from "./track.js";
 beforeEach(() => resetStores());
 afterEach(() => void vi.useRealTimers());
 
-// 시험마다 새 key 를 쓴다. 꺼내는 쪽 타입은 아래 타입 시험이 따로 본다
-let n = 0;
-function define(creator: () => object): string {
-  const key = `api.test.r${++n}`;
-  createStore(key, creator);
-  return key;
-}
-const view = (key: string, options?: object): any => (useStore as any)(key, options);
-const state = (key: string): any => getStore(key as never).getState();
+// 시험마다 새 store 를 쓴다. 꺼내는 쪽 타입은 아래 타입 시험이 따로 본다
+const define = (creator: () => object): Store<any> => createStore(creator);
+const view = (key: Store<any>, options?: object): any => (useStore as any)(key, options);
+const state = (key: Store<any>): any => getStore(key).getState();
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -63,14 +58,10 @@ const typedResource = () =>
       return value;
     },
   }));
-declare module "./index.js" {
-  interface StateTypes {
-    "api.types.typed": ReturnType<typeof typedResource>;
-  }
-}
+const typed = createStore(typedResource);
 it("타입: useStore 로 꺼낸 바꾸기의 data 는 any 가 아니다", () => {
   // 부르지 않는다 — 훅 바깥이라 타입만 본다
-  const read = () => useStore("api.types.typed");
+  const read = () => useStore(typed);
   type View = ReturnType<typeof read>;
   expectTypeOf<View["add"]["data"]>().not.toBeAny();
   expectTypeOf<View["add"]["data"]>().toEqualTypeOf<number | undefined>();
@@ -143,12 +134,12 @@ it("조회: 같은 칸을 보는 두 화면이 요청 하나를 나눠 쓴다", 
   expect(one.result.current).toMatchObject({ data: 7, status: "ready", error: null, isFetching: false });
   expect(two.result.current.data).toBe(7);
 });
-it("조회: 자원을 다시 지으면(overrideStore·재등록) 화면이 새 자원으로 다시 받는다", async () => {
+it("조회: 자원을 다시 지으면(overrideStore) 화면이 새 자원으로 다시 받는다", async () => {
   const key = define(() => createResource(() => ({ query: async () => "old" })));
   const { result } = renderHook(() => view(key));
   await flush();
   expect(result.current).toMatchObject({ data: "old", status: "ready" });
-  await act(async () => overrideStore(key as never, () => createResource(() => ({ query: async () => "new" }))));
+  await act(async () => overrideStore(key, () => createResource(() => ({ query: async () => "new" }))));
   await flush();
   expect(result.current).toMatchObject({ data: "new", status: "ready" });
 });
@@ -1044,11 +1035,12 @@ it("보통 객체와 배열만 깊이 견준다", () => {
 });
 
 it("자원 select 가 ctx 로 읽은 store 가 바뀌면 select 만 다시 돈다", async () => {
-  const fkey = `state.test.filter${++n}`;
-  createStore(fkey, (set: any) => ({ word: "a", setWord: (word: string) => set({ word }) }));
+  const fkey = createStore<{ word: string; setWord: (word: string) => void }>((set) => ({
+    word: "a",
+    setWord: (word: string) => set({ word }),
+  }));
   const query = vi.fn(async () => ["a1", "b1"]);
-  const key = `api.test.r${++n}`;
-  createStore(key, (_s: any, _g: any, ctx: any) =>
+  const key = createStore((_s, _g, ctx) =>
     createResource(() => ({ query }), { select: (d: string[]) => d.filter((s) => s.startsWith(ctx(fkey).word)) }),
   );
   const { result } = renderHook(() => view(key, { pick: ["data"] }));
@@ -1060,10 +1052,8 @@ it("자원 select 가 ctx 로 읽은 store 가 바뀌면 select 만 다시 돈�
 });
 
 it("다른 store 의 함수 안 ctx 도 적힌다", () => {
-  const a = `state.test.a${++n}`;
-  const b = `state.test.b${++n}`;
-  createStore(b, () => ({ name: "x" }));
-  createStore(a, (_s: any, _g: any, ctx: any) => ({ label: () => ctx(b).name }));
+  const b = createStore(() => ({ name: "x" }));
+  const a = createStore<{ label: () => string }>((_s, _g, ctx) => ({ label: () => ctx(b).name }));
   const run = track(() => state(a).label());
   expect(run.value).toBe("x");
   // getStore 는 적지 않는다 — state.a 의 함수 안 ctx 가 읽은 b 하나가 적힌다

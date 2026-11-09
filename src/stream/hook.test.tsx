@@ -6,7 +6,7 @@ import http from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { afterEach, expect, expectTypeOf, it, vi } from "vitest";
 import { WebSocket as Ws } from "ws";
-import { createStore, disposeStores, getStore, overrideStore, resetStores, type DISPOSE } from "../index.js";
+import { createStore, disposeStores, getStore, overrideStore, resetStores, type DISPOSE, type Store } from "../index.js";
 import type { MutationView } from "../query.js";
 import { useStore } from "../react.js";
 import { createStreamServer, type StreamServer } from "../server/core.js";
@@ -56,18 +56,14 @@ async function serve(stream: StreamServer<any, any, any>) {
   return { url: `ws://127.0.0.1:${port}${PATH}`, port, sockets, kill: () => sockets.forEach((s) => s.destroy()) };
 }
 
-let n = 0;
 /** 연결 store 를 등록한다 — 다시 잇기 첫 간격을 줄인다 */
-function define(o: object): string {
-  const key = `api.stream.s${++n}`;
-  createStore(key, () => createStream({ [TIMING]: GAP, open: "always", ...o } as never));
-  return key;
-}
-const view = (key: string, options?: object): any => (useStore as any)(key, options);
-const state = (key: string): any => getStore(key as never).getState();
+const define = (o: object): Store<any> =>
+  createStore(() => createStream({ [TIMING]: GAP, open: "always", ...o } as never));
+const view = (key: Store<any>, options?: object): any => (useStore as any)(key, options);
+const state = (key: Store<any>): any => getStore(key).getState();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 그린 결과를 모두 남긴다 — 다시 잇기가 빨라 지나간 상태를 waitFor 가 놓치지 않게 */
-function rendered(key: string, options?: object) {
+function rendered(key: Store<any>, options?: object) {
   const seen: any[] = [];
   const hook = renderHook(() => {
     const v = view(key, options);
@@ -97,30 +93,26 @@ const reduce = (v: string[], c: string) => [...v, c];
 
 type Cmd = { add(v: string): string; kill(id: number): void };
 const typed = () => createStream<string[], string, Cmd>({ url: "ws://x", reduce, commands: { add: {}, kill: { timeout: 5 } } });
-declare module "../index.js" {
-  interface StateTypes {
-    "api.types.stream": ReturnType<typeof typed>;
-  }
-}
+const typedStream = createStore(typed);
 it("타입: 고른 칸과 명령의 MutationView · retry, store 끼리의 명령 함수", () => {
   expectTypeOf<ReturnType<typeof typed>>().toEqualTypeOf<Stream<string[], Cmd>>();
   expectTypeOf<ReturnType<typeof typed>[typeof DISPOSE]>().toEqualTypeOf<() => void>();
   expectTypeOf<ReturnType<typeof typed>["add"]>().toEqualTypeOf<(v: string) => Promise<string>>();
   // 부르지 않는다 — 훅 바깥이라 타입만 본다
-  const picked = () => useStore("api.types.stream", { pick: ["data", "status", "add"] });
+  const picked = () => useStore(typedStream, { pick: ["data", "status", "add"] });
   type P = ReturnType<typeof picked>;
   expectTypeOf<keyof P>().toEqualTypeOf<"data" | "status" | "add">();
   expectTypeOf<P["data"]>().toEqualTypeOf<string[] | undefined>();
   expectTypeOf<P["add"]>().toEqualTypeOf<StreamCommandView<Cmd["add"]>>();
   expectTypeOf<P["add"]>().toMatchTypeOf<MutationView<Cmd["add"]>>();
   expectTypeOf<P["add"]["retry"]>().toEqualTypeOf<() => Promise<string>>();
-  const all = () => useStore("api.types.stream");
+  const all = () => useStore(typedStream);
   expectTypeOf<ReturnType<typeof all>["isFetching"]>().toEqualTypeOf<boolean>();
   expectTypeOf<ReturnType<typeof all>["kill"]["mutateAsync"]>().toEqualTypeOf<(id: number) => Promise<void>>();
-  const omitted = () => useStore("api.types.stream", { omit: ["kill", "error"] });
+  const omitted = () => useStore(typedStream, { omit: ["kill", "error"] });
   expectTypeOf<keyof ReturnType<typeof omitted>>().toEqualTypeOf<"data" | "status" | "isFetching" | "add">();
   // @ts-expect-error 없는 칸은 고르지 못한다
-  () => useStore("api.types.stream", { pick: ["nope"] });
+  () => useStore(typedStream, { pick: ["nope"] });
   // @ts-expect-error 명령마다 옵션을 적어야 이름이 런타임에 남는다
   () => createStream<string[], string, Cmd>({ url: "ws://x", commands: { add: {} } });
 });
@@ -254,14 +246,13 @@ it("stream: 쥔 실패는 그 명령 칸의 뒤이은 성공(mutate · mutateAsy
   expect(ran).toBe(5);
 });
 
-it("stream: store 끼리는 ctx(key).open(...) 으로 부르고 실패하면 던진다", async () => {
+it("stream: store 끼리는 ctx(handle).open(...) 으로 부르고 실패하면 던진다", async () => {
   const stream = adder();
   const s = await serve(stream);
   const key = define({ url: s.url, reduce, commands: { add: {}, bad: {} } });
-  const user = `api.stream.user${++n}`;
-  createStore(user, (_set, _get, ctx) => ({
-    add: (v: string) => (ctx as any)(key).add(v),
-    bad: () => (ctx as any)(key).bad(),
+  const user = createStore((_set, _get, ctx) => ({
+    add: (v: string) => ctx(key).add(v),
+    bad: () => ctx(key).bad(),
   }));
   state(key); // 연다
   await act(() => sleep(GAP * 5));
@@ -281,7 +272,7 @@ it("stream: overrideStore · resetStores 로 다시 지으면 앞 연결이 닫�
   act(() => {
     for (let i = 0; i < 5; i++) resetStores();
     for (let i = 0; i < 5; i++)
-      overrideStore(key as never, () =>
+      overrideStore(key, () =>
         createStream({ [TIMING]: GAP, open: "always", url: s.url, reduce, commands: { add: {} } } as never),
       );
   });
@@ -313,10 +304,8 @@ it("stream: window 가 없으면 열지 않고, open: \"always\" 면 연다", as
   let hellos = 0;
   const stream = createStreamServer<number>({ authorize: () => void hellos++, snapshot: () => 0, commands: { x: () => 1 } });
   const s = await serve(stream);
-  const browser = `api.stream.b${++n}`;
-  const always = `api.stream.a${++n}`;
-  createStore(browser, () => createStream({ [TIMING]: GAP, url: s.url, commands: { x: {} } } as never));
-  createStore(always, () => createStream({ [TIMING]: GAP, url: s.url, open: "always" } as never));
+  const browser = createStore(() => createStream({ [TIMING]: GAP, url: s.url, commands: { x: {} } } as never));
+  const always = createStore(() => createStream({ [TIMING]: GAP, url: s.url, open: "always" } as never));
   vi.stubGlobal("window", undefined);
   state(browser);
   state(always);

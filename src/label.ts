@@ -6,7 +6,7 @@ type Frame = { path: string; line: string };
 function parseLocation(loc: string): Frame | null {
   const m = /^(.*):(\d+):\d+$/.exec(loc.trim());
   if (!m) return null;
-  const path = m[1]
+  const path = m[1]!
     .replace(/\\/g, "/")
     .replace(/\?.*$/, "")
     .replace(/^https?:\/\/[^/]+\//, "")
@@ -15,14 +15,14 @@ function parseLocation(loc: string): Frame | null {
     .replace(/^\.\//, "")
     .replace(/^file:\/\/\/(?=[A-Za-z]:)/, "")
     .replace(/^file:\/\//, "");
-  return { path, line: m[2] };
+  return { path, line: m[2]! };
 }
 
 /** 한 줄에서 위치를 뽑는다. V8(`at fn (위치)` · `at 위치`)과 Firefox(`fn@위치`)를 읽는다. */
 function parseFrame(text: string): Frame | null {
   const t = text.trim();
   const v8 = /^at (?:.*? \()?(.*?)\)?$/.exec(t);
-  if (v8) return parseLocation(v8[1]);
+  if (v8) return parseLocation(v8[1]!);
   const at = t.indexOf("@");
   return at < 0 ? null : parseLocation(t.slice(at + 1));
 }

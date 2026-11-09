@@ -1,19 +1,14 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, expect, expectTypeOf, it, vi } from "vitest";
-import { createStore, getStore, resetStores } from "./index.js";
+import { createStore, getStore, resetStores, type Ctx, type Store } from "./index.js";
 import { createResource, keepPreviousData, type Prev, type QueryView } from "./query.js";
 import { useStore } from "./react.js";
 
 beforeEach(() => resetStores());
 
-let n = 0;
-function define(creator: () => object): string {
-  const key = `api.hook.r${++n}`;
-  createStore(key, creator);
-  return key;
-}
-const view = (key: string, options?: object): any => (useStore as any)(key, options);
-const state = (key: string): any => getStore(key as never).getState();
+const define = (creator: () => object): Store<any> => createStore(creator);
+const view = (key: Store<any>, options?: object): any => (useStore as any)(key, options);
+const state = (key: Store<any>): any => getStore(key).getState();
 const flush = () => act(async () => {});
 const noop = () => {};
 
@@ -43,49 +38,45 @@ const selectResource = () =>
   createResource(() => ({ query: async (a: { id: number }) => ({ title: `t${a.id}` }) }), {
     select: (d, a) => `${a.id}:${d.title}`,
   });
-declare module "./index.js" {
-  interface StateTypes {
-    "api.types.list": ReturnType<typeof listResource>;
-    "api.types.select": ReturnType<typeof selectResource>;
-  }
-}
+const typesList = createStore(listResource);
+const typesSelect = createStore(selectResource);
 it("타입: 목록 꼴은 고른 조회 칸의 배열을, 하나 꼴은 고른 칸을 준다", () => {
   // 부르지 않는다 — 훅 바깥이라 타입만 본다
-  const list = () => useStore("api.types.list", { args: ids(1), pick: ["data", "status"] });
+  const list = () => useStore(typesList, { args: ids(1), pick: ["data", "status"] });
   expectTypeOf<ReturnType<typeof list>>().toEqualTypeOf<Array<Pick<QueryView<number>, "data" | "status">>>();
-  const listAll = () => useStore("api.types.list", { args: ids(1) });
+  const listAll = () => useStore(typesList, { args: ids(1) });
   expectTypeOf<ReturnType<typeof listAll>>().toEqualTypeOf<QueryView<number>[]>();
-  const all = () => useStore("api.types.list");
+  const all = () => useStore(typesList);
   type View = ReturnType<typeof all>;
   expectTypeOf<View["data"]>().toEqualTypeOf<number | undefined>();
   expectTypeOf<View["isPlaceholderData"]>().toEqualTypeOf<boolean>();
   expectTypeOf<View["isFetching"]>().toEqualTypeOf<boolean>();
-  const fetching = () => useStore("api.types.list", { args: ids(1), pick: ["isFetching"] });
+  const fetching = () => useStore(typesList, { args: ids(1), pick: ["isFetching"] });
   expectTypeOf<ReturnType<typeof fetching>>().toEqualTypeOf<Array<{ isFetching: boolean }>>();
-  const oneFetching = () => useStore("api.types.list", { args: { id: 1 }, pick: ["isFetching"] });
+  const oneFetching = () => useStore(typesList, { args: { id: 1 }, pick: ["isFetching"] });
   expectTypeOf<ReturnType<typeof oneFetching>>().toEqualTypeOf<{ isFetching: boolean }>();
   expectTypeOf<View["save"]["mutateAsync"]>().returns.resolves.toEqualTypeOf<number>();
-  const one = () => useStore("api.types.list", { args: { id: 1 }, pick: ["data", "save"] });
+  const one = () => useStore(typesList, { args: { id: 1 }, pick: ["data", "save"] });
   expectTypeOf<ReturnType<typeof one>>().toEqualTypeOf<Pick<View, "data" | "save">>();
   // @ts-expect-error 목록의 pick 에는 바꾸기 이름을 적지 못한다
-  void (() => useStore("api.types.list", { args: ids(1), pick: ["save"] }));
+  void (() => useStore(typesList, { args: ids(1), pick: ["save"] }));
 });
 
 it("타입: 자원 select 의 결과가 화면 data 로, 화면 select 의 결과가 그 위로, getData 는 서버 모양 그대로", () => {
-  const one = () => useStore("api.types.select", { args: { id: 1 } });
+  const one = () => useStore(typesSelect, { args: { id: 1 } });
   expectTypeOf<ReturnType<typeof one>["data"]>().toEqualTypeOf<string | undefined>();
-  const screen = () => useStore("api.types.select", { args: { id: 1 }, select: (s, a) => s.length + a.id });
+  const screen = () => useStore(typesSelect, { args: { id: 1 }, select: (s, a) => s.length + a.id });
   expectTypeOf<ReturnType<typeof screen>["data"]>().toEqualTypeOf<number | undefined>();
-  const list = () => useStore("api.types.select", { args: ids(1), pick: ["data"], select: (s) => s.length > 0 });
+  const list = () => useStore(typesSelect, { args: ids(1), pick: ["data"], select: (s) => s.length > 0 });
   expectTypeOf<ReturnType<typeof list>>().toEqualTypeOf<Array<{ data: boolean | undefined }>>();
-  const filled = () => useStore("api.types.select", { args: { id: 1 }, placeholderData: keepPreviousData });
+  const filled = () => useStore(typesSelect, { args: { id: 1 }, placeholderData: keepPreviousData });
   expectTypeOf<ReturnType<typeof filled>["data"]>().toEqualTypeOf<string | undefined>();
   // 화면의 자리 채우기는 select 전 모양 D 를 짓는다
-  void (() => useStore("api.types.select", { args: ids(1), placeholderData: (a) => ({ title: `p${a.id}` }) }));
+  void (() => useStore(typesSelect, { args: ids(1), placeholderData: (a) => ({ title: `p${a.id}` }) }));
   void (() =>
-    useStore("api.types.select", { args: { id: 1 }, placeholderData: keepPreviousData((a, p) => p.args.id === a.id) }));
+    useStore(typesSelect, { args: { id: 1 }, placeholderData: keepPreviousData((a, p) => p.args.id === a.id) }));
   // @ts-expect-error 자리를 채우는 값은 select 전 모양이어야 한다
-  void (() => useStore("api.types.select", { args: { id: 1 }, placeholderData: "x" }));
+  void (() => useStore(typesSelect, { args: { id: 1 }, placeholderData: "x" }));
   const got = () => selectResource().getData({ id: 1 });
   expectTypeOf<ReturnType<typeof got>>().toEqualTypeOf<{ title: string } | undefined>();
 });
@@ -229,7 +220,7 @@ const posts = (select?: (d: Post) => unknown) => {
   );
   return key;
 };
-const counted = (key: string, options?: () => object) => {
+const counted = (key: Store<any>, options?: () => object) => {
   let renders = 0;
   const hook = renderHook(() => {
     renders++;
@@ -559,24 +550,20 @@ it("목록: 목록에 새로 든 args 는 다른 화면이 받는 중인 요청�
 type Accent = { accent: string };
 /** 받기는 get key, 바꾸기는 patch key — get 의 select 가 patch 의 inflight 를 겹으로 얹는다 */
 function overlay(options: { onSuccess?: "setData" } = {}) {
-  const tag = ++n;
-  const getKey = `api.layer.get${tag}`;
-  const patchKey = `api.layer.patch${tag}`;
   const save = controlled<Accent>();
   const fetch = vi.fn(async (): Promise<Accent> => ({ accent: "blue" }));
   const built = vi.fn();
   const select = vi.fn((s: Accent, inflight: [Partial<Accent>][]) => inflight.reduce((acc, [p]) => ({ ...acc, ...p }), s));
-  createStore(patchKey, (_set, _get, ctx) => {
+  const patchKey: Store<any> = createStore((_set, _get, ctx) => {
     built();
     return createResource(() => ({ patch: (p: Partial<Accent>) => save.fn(p) }), {
-      onSuccess:
-        options.onSuccess && ({ patch: (next: Accent) => (ctx(getKey as never) as any).setData(next) } as never),
+      onSuccess: options.onSuccess && ({ patch: (next: Accent) => ctx(getKey).setData(next) } as never),
     });
   });
-  createStore(getKey, (_set, _get, ctx) => {
+  const getKey: Store<any> = createStore((_set, _get, ctx) => {
     built();
     return createResource(() => ({ query: fetch }), {
-      select: (s: Accent) => select(s, (ctx(patchKey as never) as any).patch.inflight),
+      select: (s: Accent) => select(s, ctx(patchKey).patch.inflight),
     });
   });
   return { getKey, patchKey, save, fetch, built, select };
@@ -624,11 +611,10 @@ it("실패하면 겹이 빠지고 원래 값으로 돌아가며 캐시는 바뀌
 it("select 가 patch 만 읽으면 patchIcons 가 바뀌어도 다시 돌지 않는다", async () => {
   const icons = controlled<number>();
   const select = vi.fn((s: Accent) => s);
-  const key = `api.layer.self${++n}`;
-  createStore(key, (_set, _get, ctx) =>
+  const key: Store<any> = createStore((_set, _get, ctx) =>
     createResource(
       () => ({ query: async (): Promise<Accent> => ({ accent: "blue" }), patch: async () => 1, patchIcons: () => icons.fn() }),
-      { select: (s: Accent) => (void (ctx(ctx.key as never) as any).patch.inflight, select(s)) },
+      { select: (s: Accent) => (void ctx(key).patch.inflight, select(s)) },
     ),
   );
   renderHook(() => view(key, { pick: ["data"] }));
@@ -654,17 +640,17 @@ it("바꾸기가 날아가는 중에 처음 붙은 화면도 첫 렌더부터 �
   expect(seen[0]).toEqual({ accent: "red" });
 });
 it("두 store 의 select 가 서로를 읽어도 끝없이 다시 돌지 않는다", async () => {
-  const tag = ++n;
-  const [a, b] = [`api.layer.a${tag}`, `api.layer.b${tag}`];
   const bumps = controlled<number>();
-  const pair = (self: string, other: string) =>
-    createStore(self, (_set, _get, ctx) =>
+  // 짓는 것은 처음 꺼낼 때라 creator 가 아직 만들지 않은 짝을 가리켜도 된다
+  const both: Store<any>[] = [];
+  const pair = (other: number) =>
+    createStore((_set, _get, ctx) =>
       createResource(() => ({ query: async () => 0, bump: () => bumps.fn() }), {
-        select: (s: number) => s + (ctx(other as never) as any).bump.inflight.length,
+        select: (s: number) => s + ctx(both[other]!).bump.inflight.length,
       }),
     );
-  pair(a, b);
-  pair(b, a);
+  both.push(pair(1), pair(0));
+  const [a, b] = both as [Store<any>, Store<any>];
   let renders = 0;
   const { result } = renderHook(() => {
     renders++;
@@ -682,8 +668,7 @@ it("두 store 의 select 가 서로를 읽어도 끝없이 다시 돌지 않는�
 });
 it("자원 select 에서 ctx() 로 자기 바꾸기의 inflight 를 읽어 겹을 얹는다", async () => {
   const save = controlled<Accent>();
-  const key = `api.layer.own${++n}`;
-  createStore(key, (_set, _get, ctx) =>
+  const key = createStore((_set, _get, ctx) =>
     createResource(() => ({ query: async (): Promise<Accent> => ({ accent: "blue" }), patch: (p: Partial<Accent>) => save.fn(p) }), {
       select: (s: Accent) => (ctx() as any).patch.inflight.reduce((acc: Accent, [p]: [Partial<Accent>]) => ({ ...acc, ...p }), s),
     }),
@@ -696,9 +681,8 @@ it("자원 select 에서 ctx() 로 자기 바꾸기의 inflight 를 읽어 겹�
   await act(async () => save.calls[0]!.reject(new Error("no")));
   expect(result.current.data).toEqual({ accent: "blue" });
 });
-it("타입: ctx() 는 자기 key 의 상태 타입이다", () => {
-  type K = keyof import("./index.js").StateTypes & string;
-  const ctx = null as unknown as import("./index.js").Ctx<K>;
-  const check = () => expectTypeOf(ctx()).toEqualTypeOf<import("./index.js").StateOf<K>>();
+it("타입: ctx() 는 자기 store 의 상태 타입이다", () => {
+  const ctx = null as unknown as Ctx<{ n: number }>;
+  const check = () => expectTypeOf(ctx()).toEqualTypeOf<{ n: number }>();
   expect(check).toBeTypeOf("function");
 });
