@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
-import { createStore, disposeStores, DISPOSE, getStore, resetStores } from "../index.js";
+import { createStore, disposeStores, getStore, resetStores } from "../index.js";
 import { TIMING, type ClientView } from "../stream/client.js";
 import { TEXT } from "../stream/protocol.js";
 import { createJsonRpc, type JsonRpcOptions } from "./client.js";
@@ -454,8 +454,8 @@ describe("close", () => {
 
 describe("store 로 꺼낸다", () => {
   it("resetStores 는 앞 통로를 닫고 새 통로를 연다. disposeStores 는 닫기만 한다", () => {
-    createStore("rpc.test", () => createJsonRpc({ connect }));
-    const s = getStore("rpc.test" as never) as unknown as { getState(): { [DISPOSE](): void } };
+    const rpcStore = createStore(() => createJsonRpc({ connect }));
+    const s = getStore(rpcStore);
     s.getState();
     expect(fakes).toHaveLength(1);
     resetStores();

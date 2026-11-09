@@ -1,2 +1,2 @@
-/** Next 설정을 감싸 `next` 가 켜져 있으면 설정을 읽을 때 생성 파일을 쓴다. dev 서버에서는 정의 파일을 감시한다 */
-export declare function withStore<T>(nextConfig: T): (phase: string) => T;
+/** 개발 모드에서 정의 파일(`createStore` 를 가져오는 파일)이 HMR 갱신을 받지 않게 해, 고치면 페이지를 통째로 다시 읽는다. 함수형 설정도 받는다 */
+export declare function withStore<T>(nextConfig: T): (phase: string, ctx?: unknown) => T extends (...args: never[]) => infer R ? R : T;

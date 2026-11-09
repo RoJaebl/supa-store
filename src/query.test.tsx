@@ -1,22 +1,17 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
-import { createStore, disposeStores, getStore, overrideStore, resetStores } from "./index.js";
-import { createEvent, createResource, keepEqual, type Cache, type MutationFn } from "./query.js";
+import { createStore, currentBuild, DISPOSE, disposeStores, getStore, overrideStore, resetStores, type Store } from "./index.js";
+import { createEvent, createResource, keepEqual, type Cache, type Event, type MutationFn, type Resource } from "./query.js";
 import { useStore } from "./react.js";
 import { track } from "./track.js";
 
 beforeEach(() => resetStores());
 afterEach(() => void vi.useRealTimers());
 
-// 시험마다 새 key 를 쓴다. 꺼내는 쪽 타입은 아래 타입 시험이 따로 본다
-let n = 0;
-function define(creator: () => object): string {
-  const key = `api.test.r${++n}`;
-  createStore(key, creator);
-  return key;
-}
-const view = (key: string, options?: object): any => (useStore as any)(key, options);
-const state = (key: string): any => getStore(key as never).getState();
+// 시험마다 새 store 를 쓴다. 꺼내는 쪽 타입은 아래 타입 시험이 따로 본다
+const define = (creator: () => object): Store<any> => createStore(creator);
+const view = (key: Store<any>, options?: object): any => (useStore as any)(key, options);
+const state = (key: Store<any>): any => getStore(key).getState();
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -63,14 +58,10 @@ const typedResource = () =>
       return value;
     },
   }));
-declare module "./index.js" {
-  interface StateTypes {
-    "api.types.typed": ReturnType<typeof typedResource>;
-  }
-}
+const typed = createStore(typedResource);
 it("타입: useStore 로 꺼낸 바꾸기의 data 는 any 가 아니다", () => {
   // 부르지 않는다 — 훅 바깥이라 타입만 본다
-  const read = () => useStore("api.types.typed");
+  const read = () => useStore(typed);
   type View = ReturnType<typeof read>;
   expectTypeOf<View["add"]["data"]>().not.toBeAny();
   expectTypeOf<View["add"]["data"]>().toEqualTypeOf<number | undefined>();
@@ -81,52 +72,186 @@ it("타입: useStore 로 꺼낸 바꾸기의 data 는 any 가 아니다", () => 
 
 // ── event ─────────────────────────────────────────────
 
+const ev = createStore(() => createEvent<number>());
+
 it("event: emit 은 on 한 반응을 부른다", () => {
-  const event = createEvent<{ kind: string }>();
   const seen: string[] = [];
-  event.on("api.a", (p) => seen.push(`a:${p.kind}`));
-  event.on("api.b", (p) => seen.push(`b:${p.kind}`));
-  event.emit({ kind: "saved" });
-  expect(seen).toEqual(["a:saved", "b:saved"]);
-});
-it("event: 같은 who 가 다시 on 하면 갈아 끼운다", () => {
-  const event = createEvent<number>();
-  const first = vi.fn();
-  const second = vi.fn();
-  event.on("api.a", first);
-  event.on("api.a", second);
+  const event = getStore(ev).getState();
+  event.on((n) => seen.push(`a:${n}`));
+  event.on((n) => seen.push(`b:${n}`));
   event.emit(1);
-  expect(first).not.toHaveBeenCalled();
-  expect(second).toHaveBeenCalledTimes(1);
+  expect(seen).toEqual(["a:1", "b:1"]);
 });
 it("event: 풀기 함수는 그 반응을 뗀다", () => {
-  const event = createEvent<number>();
   const fn = vi.fn();
-  event.on("api.a", fn)();
+  const event = getStore(ev).getState();
+  event.on(fn)();
   event.emit(1);
   expect(fn).not.toHaveBeenCalled();
 });
-it("event: 같은 who 가 on 과 exempt 를 함께 적으면 던진다 (두 순서 모두)", () => {
-  const a = createEvent<number>();
-  a.on("api.a", () => {});
-  expect(() => a.exempt("api.a", "까닭")).toThrow(/api\.a/);
-  const b = createEvent<number>();
-  b.exempt("api.a", "까닭");
-  expect(() => b.on("api.a", () => {})).toThrow(/api\.a/);
+it("짓는 동안 건 on 은 overrideStore · resetStores · disposeStores 뒤에도 하나만 돈다", () => {
+  const seen: number[] = [];
+  const r = createStore<{}>((_s, _g, ctx) => (ctx(ev).on((n) => seen.push(n)), {}));
+  getStore(r).getState();
+  overrideStore(r, (_s, _g, ctx) => (ctx(ev).on((n) => seen.push(n * 10)), {}));
+  getStore(ev).getState().emit(1);
+  expect(seen).toEqual([10]);
+  resetStores();
+  getStore(r).getState();
+  disposeStores();
+  getStore(r).getState();
+  getStore(ev).getState().emit(2);
+  expect(seen).toEqual([10, 2]);
 });
-it("event: record() 는 on·exempt 를 정렬해 준다", () => {
-  const event = createEvent<number>();
-  event.on("api.z", () => {});
-  event.on("api.b", () => {});
-  event.exempt("api.y", "둘째");
-  event.exempt("api.c", "첫째");
-  expect(event.record()).toEqual({
-    on: ["api.b", "api.z"],
-    exempt: [
-      { who: "api.c", why: "첫째" },
-      { who: "api.y", why: "둘째" },
-    ],
+it("같은 store 가 짓는 동안 on 을 둘 걸면 둘 다 돈다", () => {
+  const seen: string[] = [];
+  const r = createStore<{}>((_s, _g, ctx) => {
+    ctx(ev).on(() => seen.push("a"));
+    ctx(ev).on(() => seen.push("b"));
+    return {};
   });
+  getStore(r).getState();
+  getStore(ev).getState().emit(0);
+  expect(seen).toEqual(["a", "b"]);
+});
+it("[DISPOSE] 가 던져도 짓는 동안 건 듣기는 떨어진다", () => {
+  const seen: number[] = [];
+  const r = createStore<{ [DISPOSE]: () => void }>((_s, _g, ctx) => (
+    ctx(ev).on((n) => seen.push(n)),
+    {
+      [DISPOSE]: () => {
+        throw new Error("x");
+      },
+    }
+  ));
+  const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+  getStore(r).getState();
+  disposeStores();
+  spy.mockRestore();
+  getStore(ev).getState().emit(1);
+  expect(seen).toEqual([]);
+});
+it("맡은 정리 함수 하나가 던져도 나머지는 돌고 dispose 는 던지지 않는다", () => {
+  const seen: string[] = [];
+  const r = createStore<{}>((_s, _g, ctx) => {
+    currentBuild()!.adopt(() => {
+      throw new Error("off");
+    });
+    ctx(ev).on(() => seen.push("after"));
+    return {};
+  });
+  const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+  getStore(r).getState();
+  expect(() => disposeStores()).not.toThrow();
+  expect(spy).toHaveBeenCalled();
+  spy.mockRestore();
+  getStore(ev).getState().emit(0);
+  expect(seen).toEqual([]);
+});
+it("짓다가 던져도 그 동안 건 듣기는 남지 않는다", () => {
+  const seen: number[] = [];
+  const r = createStore<{}>((_s, _g, ctx) => {
+    ctx(ev).on((n) => seen.push(n));
+    throw new Error("짓기 실패");
+  });
+  expect(() => getStore(r).getState()).toThrow("짓기 실패");
+  getStore(ev).getState().emit(1);
+  expect(seen).toEqual([]);
+});
+it("짓는 공간 밖의 on 은 둘 다 돌고, 풀기 함수로만 떨어진다", () => {
+  const seen: string[] = [];
+  const event = getStore(ev).getState();
+  const offA = event.on(() => seen.push("a"));
+  event.on(() => seen.push("b"));
+  event.emit(0);
+  offA();
+  event.emit(0);
+  expect(seen).toEqual(["a", "b", "b"]);
+  expect(event.record().on).toEqual([]);
+});
+it("짓는 공간 밖의 exempt 는 던진다", () =>
+  expect(() => getStore(ev).getState().exempt("까닭")).toThrow("exempt 는 store 를 짓는 동안에만 부른다"));
+it("같은 store 가 on 과 exempt 를 함께 적으면 던진다(두 순서 모두)", () => {
+  const a = createStore<{}>((_s, _g, ctx) => (ctx(ev).on(() => {}), ctx(ev).exempt("까닭"), {}));
+  expect(() => getStore(a).getState()).toThrow(/이미 on/);
+  const b = createStore<{}>((_s, _g, ctx) => (ctx(ev).exempt("까닭"), ctx(ev).on(() => {}), {}));
+  expect(() => getStore(b).getState()).toThrow(/이미 exempt/);
+});
+it("record 의 who 는 부른 자리의 이름이다", () => {
+  const r = createStore<{}>((_s, _g, ctx) => (ctx(ev).on(() => {}), {}));
+  getStore(r).getState();
+  expect(getStore(ev).getState().record().on).toEqual([expect.stringMatching(/query\.test\.tsx:\d+$/)]);
+});
+// 한 도우미 함수 안에서 지은 store 들은 부른 자리의 이름이 같다 — 이름이 아니라 store 로 가린다
+// 시험마다 새 event 를 쓴다 — 앞 시험의 store 가 resetStores 로 다시 지어지며 ev 에 다시 걸기 때문이다
+const freshEvent = () => createStore(() => createEvent<number>());
+const sameLine = (event: Store<Event<number>>, fn: (event: Event<number>) => void) =>
+  createStore<{}>((_s, _g, ctx) => (fn(ctx(event)), {}));
+it("이름이 같은 두 store 가 하나는 exempt, 하나는 on 해도 던지지 않는다", () => {
+  const local = freshEvent();
+  const quiet = sameLine(local, (event) => event.exempt("까닭"));
+  const loud = sameLine(local, (event) => void event.on(() => {}));
+  expect(() => (getStore(quiet).getState(), getStore(loud).getState())).not.toThrow();
+  const record = getStore(local).getState().record();
+  expect(record.exempt).toHaveLength(1);
+  expect(record.on).toHaveLength(1);
+});
+it("이름이 같은 두 store 의 exempt 는 하나를 버려도 다른 하나가 남는다", () => {
+  const local = freshEvent();
+  const one = sameLine(local, (event) => event.exempt("하나"));
+  const two = sameLine(local, (event) => event.exempt("둘"));
+  getStore(one).getState();
+  getStore(two).getState();
+  expect(getStore(local).getState().record().exempt.map((e) => e.why).sort()).toEqual(["둘", "하나"]);
+  overrideStore(one, () => ({}));
+  expect(getStore(local).getState().record().exempt.map((e) => e.why)).toEqual(["둘"]);
+});
+it("이름이 같은 두 store 의 on 은 record 에 따로 선다", () => {
+  const local = freshEvent();
+  const one = sameLine(local, (event) => void event.on(() => {}));
+  const two = sameLine(local, (event) => void event.on(() => {}));
+  getStore(one).getState();
+  getStore(two).getState();
+  const { on } = getStore(local).getState().record();
+  expect(on).toHaveLength(2);
+  expect(on[0]).toBe(on[1]);
+});
+it("짓는 중에 ctx 로 지은 store 가 건 on 은 그 store 의 것이다", () => {
+  const local = freshEvent();
+  let outerLabel = "";
+  let innerLabel = "";
+  const inner = createStore<{}>((_s, _g, ctx) => {
+    innerLabel = currentBuild()!.label;
+    ctx(local).on(() => {});
+    return {};
+  });
+  const outer = createStore<{}>((_s, _g, ctx) => {
+    outerLabel = currentBuild()!.label;
+    ctx(inner);
+    return {};
+  });
+  getStore(outer).getState();
+  expect(innerLabel).not.toBe(outerLabel);
+  expect(getStore(local).getState().record().on).toEqual([innerLabel]);
+});
+it("exempt 는 그 store 를 버리면 지워지고 다시 지으면 다시 선다", () => {
+  const local = freshEvent();
+  const r = createStore<{}>((_s, _g, ctx) => (ctx(local).exempt("까닭"), {}));
+  getStore(r).getState();
+  expect(getStore(local).getState().record().exempt).toHaveLength(1);
+  disposeStores();
+  expect(getStore(local).getState().record().exempt).toEqual([]);
+  getStore(r).getState();
+  expect(getStore(local).getState().record().exempt).toHaveLength(1);
+  overrideStore(r, () => ({}));
+  expect(getStore(local).getState().record().exempt).toEqual([]);
+});
+it("record() 는 exempt 도 부른 자리의 이름으로 준다", () => {
+  const r = createStore<{}>((_s, _g, ctx) => (ctx(ev).exempt("첫째"), {}));
+  getStore(r).getState();
+  expect(getStore(ev).getState().record().exempt).toEqual([
+    { who: expect.stringMatching(/query\.test\.tsx:\d+$/), why: "첫째" },
+  ]);
 });
 
 // ── 조회 ──────────────────────────────────────────────
@@ -143,12 +268,12 @@ it("조회: 같은 칸을 보는 두 화면이 요청 하나를 나눠 쓴다", 
   expect(one.result.current).toMatchObject({ data: 7, status: "ready", error: null, isFetching: false });
   expect(two.result.current.data).toBe(7);
 });
-it("조회: 자원을 다시 지으면(overrideStore·재등록) 화면이 새 자원으로 다시 받는다", async () => {
+it("조회: 자원을 다시 지으면(overrideStore) 화면이 새 자원으로 다시 받는다", async () => {
   const key = define(() => createResource(() => ({ query: async () => "old" })));
   const { result } = renderHook(() => view(key));
   await flush();
   expect(result.current).toMatchObject({ data: "old", status: "ready" });
-  await act(async () => overrideStore(key as never, () => createResource(() => ({ query: async () => "new" }))));
+  await act(async () => overrideStore(key, () => createResource(() => ({ query: async () => "new" }))));
   await flush();
   expect(result.current).toMatchObject({ data: "new", status: "ready" });
 });
@@ -1044,11 +1169,12 @@ it("보통 객체와 배열만 깊이 견준다", () => {
 });
 
 it("자원 select 가 ctx 로 읽은 store 가 바뀌면 select 만 다시 돈다", async () => {
-  const fkey = `state.test.filter${++n}`;
-  createStore(fkey, (set: any) => ({ word: "a", setWord: (word: string) => set({ word }) }));
+  const fkey = createStore<{ word: string; setWord: (word: string) => void }>((set) => ({
+    word: "a",
+    setWord: (word: string) => set({ word }),
+  }));
   const query = vi.fn(async () => ["a1", "b1"]);
-  const key = `api.test.r${++n}`;
-  createStore(key, (_s: any, _g: any, ctx: any) =>
+  const key = createStore<Resource<void, string[], { query: typeof query }>>((_s, _g, ctx) =>
     createResource(() => ({ query }), { select: (d: string[]) => d.filter((s) => s.startsWith(ctx(fkey).word)) }),
   );
   const { result } = renderHook(() => view(key, { pick: ["data"] }));
@@ -1060,10 +1186,8 @@ it("자원 select 가 ctx 로 읽은 store 가 바뀌면 select 만 다시 돈�
 });
 
 it("다른 store 의 함수 안 ctx 도 적힌다", () => {
-  const a = `state.test.a${++n}`;
-  const b = `state.test.b${++n}`;
-  createStore(b, () => ({ name: "x" }));
-  createStore(a, (_s: any, _g: any, ctx: any) => ({ label: () => ctx(b).name }));
+  const b = createStore(() => ({ name: "x" }));
+  const a = createStore<{ label: () => string }>((_s, _g, ctx) => ({ label: () => ctx(b).name }));
   const run = track(() => state(a).label());
   expect(run.value).toBe("x");
   // getStore 는 적지 않는다 — state.a 의 함수 안 ctx 가 읽은 b 하나가 적힌다
