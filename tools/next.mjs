@@ -1,43 +1,25 @@
-// withStore — Next 가 설정을 읽을 때 생성 파일을 쓰고, dev 서버에서는 정의 파일을 감시해 다시 쓴다
-import { watch } from "node:fs";
-import { createRequire } from "node:module";
+// withStore — 개발 모드에서 정의 파일이 HMR 갱신을 받지 않게 한다(spec §3.6).
+// 정의를 고치면(또는 그것이 기대는 모듈을 고치면) webpack 이 받지 않는 모듈에서 멈추고 전체를 다시 읽는다
+import { fileURLToPath } from "node:url";
 
-const require = createRequire(import.meta.url);
-const { loadConfig, generate, requireTypeScript } = require("./codegen.cjs");
-
-// Next 는 설정을 여러 번 읽으므로 감시는 프로세스에 한 번만 건다
-const WATCHING = Symbol.for("supa-store/watching");
+const LOADER = fileURLToPath(new URL("./decline-loader.cjs", import.meta.url));
 
 export function withStore(nextConfig) {
   return (phase) => {
-    const ts = requireTypeScript(process.cwd());
-    const config = loadConfig(ts, process.cwd());
-    if (!config.enabled("next")) return nextConfig;
-    generate(ts, config);
-    if (phase === "phase-development-server" && !globalThis[WATCHING]) {
-      const src = `${config.root}/src`;
-      let timer;
-      const regenerate = () => {
-        try {
-          generate(ts, config);
-        } catch (error) {
-          console.error(error.message); // dev 서버를 죽이지 않는다 — 고치면 다음 변경에 다시 쓴다
-        }
-      };
-      try {
-        watch(src, { recursive: true }, (_event, file) => {
-          if (!file || !config.match(`${src}/${file}`)) return;
-          clearTimeout(timer);
-          timer = setTimeout(regenerate, 200);
-          timer.unref();
-        })
-          .on("error", (error) => console.error(`store-gen: 감시가 멈췄다 — ${error.message}`))
-          .unref();
-        globalThis[WATCHING] = true; // 감시가 선 뒤에만 표시한다 — 실패하면 다음에 설정을 읽을 때 다시 건다
-      } catch (error) {
-        console.error(`store-gen: 정의 파일을 감시하지 못했다 — ${error.message}`);
-      }
-    }
-    return nextConfig;
+    // 함수형 설정은 0.6 처럼 그대로 돌려준다 — 감싸려면 호출 결과(Promise 포함)를 풀어야 한다
+    if (phase !== "phase-development-server" || typeof nextConfig === "function") return nextConfig;
+    return {
+      ...nextConfig,
+      webpack(config, options) {
+        const base = nextConfig?.webpack ? nextConfig.webpack(config, options) : config;
+        if (!options.dev || options.isServer) return base;
+        base.module ??= {};
+        base.module.rules = [
+          ...(base.module.rules ?? []),
+          { test: /\.[cm]?[jt]sx?$/, exclude: /[\\/]node_modules[\\/]/, loader: LOADER },
+        ];
+        return base;
+      },
+    };
   };
 }
