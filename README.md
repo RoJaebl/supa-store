@@ -124,7 +124,7 @@ export const a: Store<{ n: number }> = createStore.ofContext((ctx) => ({ n: ctx(
 export const b: Store<{ n: number }> = createStore.ofContext((ctx) => ({ n: ctx(a).n }));
 ```
 
-- **`ofContext` 의 `ctx()`(자기 자신 읽기)는 `unknown` 이다.** 자기 타입을 creator 의 인자에 넣으면 추론이 다시 깨지기 때문이다. 자기 자신은 자기 핸들로 `ctx(todo)` 처럼 읽는다.
+- **`ofContext` 의 `ctx()`(자기 자신 읽기)는 `unknown` 이다.** 자기 타입을 creator 의 인자에 넣으면 추론이 다시 깨지기 때문이다. 콜백(`onSuccess` 같은 것) 안에서는 자기 핸들로 `ctx(todo)` 처럼 읽으면 된다. **자원의 `select` 처럼 돌려주는 값이 자기 자신을 읽는 자리는 자기 핸들로도 안 된다** — 상태 타입이 자기에게 기대는 순환이 되어 추론이 깨진다. 그런 store 는 `ofContext` 가 아니라 타입을 적는 꼴(`createStore<Resource<…>>((_set, _get, ctx) => …)`)로 정의한다. 아래 「바꾸기」의 `appearance` 가 그 예다.
 - `ofContext` 는 `createStore((_set, _get, ctx) => creator(ctx))` 와 같다. 다시 짓기 · 짓는 동안 건 듣기 · `overrideStore` · `useStore` 의 pick · omit · 이름이 모두 `createStore` 로 지은 store 와 같다. `overrideStore` 의 creator 는 `ofContext` 로 지은 store 에도 세 인자 꼴(`(set, get, ctx) => …`)이다.
 - 0.7.0 에서 쓰던 `createStore((_s: unknown, _g: unknown, ctx: Ctx) => …)` 꼴도 그대로 추론된다. 고칠 필요는 없다.
 - 타입 인자로 적을 때 자원 · 스트림 · 파생은 `Resource<A, D, R>`(`supa-store/query`) · `Stream<V, Cmd>`(`supa-store/stream`) · `Derived<T>`(`supa-store`) 다. `R` 은 자원에 정의한 객체의 타입이다(바꾸기 함수 칸만 본다). `ctx` 만 쓰면 `ofContext` 가 이것을 대신 추론한다.
@@ -253,7 +253,8 @@ type AppearanceApi = {
   patch(p: AppearancePatch): Promise<Appearance>;
   patchIcons(p: IconPatch): Promise<Appearance>;
 };
-export const appearance = createStore.ofContext((ctx) =>
+// onSuccess · select 에서 ctx() 로 자기 자신을 읽으므로 ofContext 가 아니라 타입을 적는 꼴이다
+export const appearance = createStore<Resource<void, Appearance, AppearanceApi>>((_set, _get, ctx) =>
   createResource(() => ({
     query: fetchAppearance,
     async patch(p: AppearancePatch) { return readAppearance(await http.patch("/api/appearance", p)); },
@@ -301,6 +302,7 @@ export const getSettings = createStore.ofContext((ctx) => {
 **서버가 받은 차례대로 처리하지 않을 수 있으면** `onAllSettled` 로 마지막에 한 번 다시 받거나 `scope` 로 줄을 세운다. `onAllSettled: { [name]: () => … }` 는 그 바꾸기의 `inflight` 가 빌 때마다 한 번 돈다(호출이 하나여도, 마지막 호출이 실패해도). 적지 않으면 돌지 않는다. 돌려준 Promise 가 끝날 때까지 성공한 호출이 `optimistic` 에 남으므로(실패한 호출은 바로 빠진다) 다시 받은 값이 오기 전에 옛 캐시가 그려지지 않는다. 확인하는 동안 `pending` 은 `false` 다. 확인 중에 새 호출이 성공해 `setData` 하면 그보다 먼저 떠난 확인 응답은 캐시를 덮지 못한다. `invalidate()` 의 다시 받기가 실패하면 그 실패는 받은 칸의 `error` 에 남고, 함수가 직접 던지면 `console.error` 로 남긴다.
 
 ```ts
+// 위 appearance 처럼 타입을 적어 정의한 store 안 — ctx() 가 자기 타입을 알아야 한다
 createResource(() => ({ query: fetchAppearance, async patch(p: AppearancePatch) { /* … */ } }), {
   onSuccess: { patch: (next) => ctx().setData(next) },
   onAllSettled: { patch: () => ctx().invalidate() },

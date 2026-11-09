@@ -34,7 +34,10 @@ it("파생이 기댄 store 를 따라 다시 계산한다", () => {
 
 it("ctx() 는 unknown 이다", () => {
   createStore.ofContext((ctx) => {
-    expectTypeOf(ctx).returns.toBeUnknown;
+    const self = ctx();
+    expectTypeOf(self).toBeUnknown();
+    // @ts-expect-error unknown 이라 칸을 읽지 못한다 — 자기 자신은 자기 핸들로 읽는다
+    void (() => self.patch);
     return {};
   });
   const self = createStore.ofContext((ctx) => ({ read: () => ctx() }));
