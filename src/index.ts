@@ -55,8 +55,6 @@ export interface Ctx<Self = unknown> {
   (): Self;
   <T>(store: Store<T>): ReadOf<T>;
   <T, N extends Names<T>, O extends PickOptions<T, N>>(store: Store<T>, options: O): Picked<T, O>;
-  /** 지금 짓고 있는 store 의 이름 — event 에 「누가」를 남길 때 쓴다 */
-  readonly key: string;
 }
 
 /** store 를 짓는 함수 — 핸들을 받는 API 가 모두 이 꼴을 받는다 */
@@ -114,6 +112,17 @@ function entryOf(store: Store<unknown>): Entry {
   return entry;
 }
 
+/** 맡은 정리 함수를 모두 부르고 비운다. 하나가 던져도 나머지를 부르고 밖으로 새지 않는다 */
+function runOffs(entry: Entry): void {
+  for (const off of entry.offs.splice(0)) {
+    try {
+      off();
+    } catch (error) {
+      console.error(`맡은 정리 함수가 던졌다: ${entry.label}`, error);
+    }
+  }
+}
+
 function ensure(entry: Entry): Entry {
   if (!entry.built) entry.build();
   return entry;
@@ -132,7 +141,7 @@ function makeEntry(label: string, definition: Creator): Entry {
     state = Object.assign({}, state, next);
     listeners.forEach((l) => l());
   };
-  const ctx = Object.assign(
+  const ctx = (
     (...args: [other?: Store<unknown>, options?: PickFromOptions]) => {
       const [other, options] = args;
       if (other === undefined) {
@@ -152,8 +161,7 @@ function makeEntry(label: string, definition: Creator): Entry {
         return (state as Derived<unknown>).get();
       }
       return pickFrom(state, options);
-    },
-    { key: label },
+    }
   ) as Ctx;
 
   const entry: Entry = {
@@ -187,7 +195,7 @@ function makeEntry(label: string, definition: Creator): Entry {
       } catch (error) {
         console.error(`[DISPOSE] 가 던졌다: ${label}`, error);
       }
-      entry.offs.splice(0).forEach((off) => off());
+      runOffs(entry);
     },
     build() {
       if (building.includes(entry)) throw new Error(`순환한다: ${[...building, entry].map((e) => e.label).join(" → ")}`);
@@ -196,6 +204,9 @@ function makeEntry(label: string, definition: Creator): Entry {
         entry.deps.clear();
         state = initial = (entry.override ?? entry.definition)(setState, get, ctx);
         entry.built = true;
+      } catch (error) {
+        runOffs(entry);
+        throw error;
       } finally {
         building.pop();
       }

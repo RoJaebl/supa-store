@@ -1,6 +1,6 @@
 // 정의 도우미 — 정의 파일은 서버 쪽에서도 평가되므로 "use client" 를 두지 않는다. 훅은 [USE] 안에서만 부른다
 // 훅은 resourceHook.ts 에 살고, 이 파일은 React 를 가져오지 않는다
-import { USE } from "./index.js";
+import { currentBuild, USE } from "./index.js";
 import { createRefetcher, type RefetchInterval } from "./refetch.js";
 import { createMutation, type MutationFn, type MutationHooks, message } from "./mutation.js";
 import { IDLE, makeResourceHook, noop, plain, QUERY_FIELDS } from "./resourceHook.js";
@@ -17,31 +17,42 @@ type Fn = (...args: any[]) => any;
 export interface Event<P> {
   /** 반응하는 store 들을 부른다 */
   emit(payload: P): void;
-  /** who(store key)가 반응한다. 같은 who 가 다시 걸면 앞 것을 갈아 끼운다. 풀기 함수를 돌려준다 */
-  on(who: string, fn: (payload: P) => void): () => void;
-  /** who 는 일부러 반응하지 않는다 — 실행에는 영향이 없고 결정이라는 기록만 남긴다 */
-  exempt(who: string, why: string): void;
-  /** 출력 스냅숏이 읽는다. 둘 다 who 로 정렬한다 */
+  /** 반응한다. 짓는 동안 걸면 지금 짓는 store 가 누구이고 그 store 를 버릴 때 떨어진다. 풀기 함수를 돌려준다 */
+  on(fn: (payload: P) => void): () => void;
+  /** 지금 짓는 store 는 일부러 반응하지 않는다 — 실행에는 영향이 없고 결정이라는 기록만 남긴다. 짓는 동안에만 부른다 */
+  exempt(why: string): void;
+  /** 출력 스냅숏이 읽는다. 둘 다 who(부른 자리의 이름)로 정렬한다 */
   record(): { on: string[]; exempt: Array<{ who: string; why: string }> };
 }
 
 /** 자원 사이를 잇는 event. const x = createStore(() => createEvent<P>()) 로 둔다 */
 export function createEvent<P>(): Event<P> {
-  const handlers = new Map<string, (payload: P) => void>();
+  const handlers: { who: string | null; fn: (payload: P) => void }[] = [];
   const exempts = new Map<string, string>();
+  const hasOn = (who: string) => handlers.some((h) => h.who === who);
   return {
-    emit: (payload) => [...handlers.values()].forEach((fn) => fn(payload)),
-    on(who, fn) {
-      if (exempts.has(who)) throw new Error(`${who} 는 이미 exempt 했다 — on 과 함께 적을 수 없다`);
-      handlers.set(who, fn);
-      return () => void (handlers.get(who) === fn && handlers.delete(who));
+    emit: (payload) => [...handlers].forEach((h) => h.fn(payload)),
+    on(fn) {
+      const build = currentBuild();
+      if (build && exempts.has(build.label)) throw new Error(`${build.label} 는 이미 exempt 했다 — on 과 함께 적을 수 없다`);
+      const handler = { who: build?.label ?? null, fn };
+      handlers.push(handler);
+      const off = () => {
+        const at = handlers.indexOf(handler);
+        if (at >= 0) handlers.splice(at, 1);
+      };
+      build?.adopt(off);
+      return off;
     },
-    exempt(who, why) {
-      if (handlers.has(who)) throw new Error(`${who} 는 이미 on 했다 — exempt 와 함께 적을 수 없다`);
-      exempts.set(who, why);
+    exempt(why) {
+      const build = currentBuild();
+      if (!build) throw new Error("exempt 는 store 를 짓는 동안에만 부른다");
+      if (hasOn(build.label)) throw new Error(`${build.label} 는 이미 on 했다 — exempt 와 함께 적을 수 없다`);
+      exempts.set(build.label, why);
+      build.adopt(() => void exempts.delete(build.label));
     },
     record: () => ({
-      on: [...handlers.keys()].sort(),
+      on: [...new Set(handlers.flatMap((h) => (h.who === null ? [] : [h.who])))].sort(),
       exempt: [...exempts.keys()].sort().map((who) => ({ who, why: exempts.get(who)! })),
     }),
   };

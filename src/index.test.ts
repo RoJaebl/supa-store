@@ -83,10 +83,9 @@ const lazyBuilt = createStore(() => {
   return { n: 0 };
 });
 const source = createStore(() => ({ n: 1, m: 2 }));
-const reader = createStore<{ read: () => number; picked: () => object; own: string }>((_set, _get, ctx) => ({
+const reader = createStore<{ read: () => number; picked: () => object }>((_set, _get, ctx) => ({
   read: () => ctx(source).n,
   picked: () => ctx(source, { pick: ["n"] }),
-  own: ctx.key,
 }));
 const first = createStore<{ n: number }>((_set, _get, ctx) => ({ n: ctx(second).n + 1 }));
 const second = createStore(() => ({ n: 1 }));
@@ -116,9 +115,6 @@ it("ctx(handle) 는 부르는 순간의 값을 준다", () => {
 });
 it("ctx(handle, { pick }) 는 고른 칸만 준다", () => {
   expect(Object.keys(getStore(reader).getState().picked())).toEqual(["n"]);
-});
-it("ctx.key 는 짓고 있는 store 의 이름이다", () => {
-  expect(getStore(reader).getState().own).toMatch(/index\.test\.ts:\d+$/);
 });
 it("등록 순서와 상관없이 짓는 순간 다른 store 를 꺼낸다", () => {
   expect(() => getStore(first).getState()).not.toThrow();
