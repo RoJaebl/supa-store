@@ -47,12 +47,12 @@ test("묶음을 템플릿에 설치해 번들러 장치만 걸고 개발 서버�
     );
     writeFileSync(
       file("src/App.tsx"),
-      `import { useStore } from "supa-store/react";\nimport { count } from "./count";\nexport default function App() {\n  const { n } = useStore(count, { pick: ["n"] });\n  return <p id="n">n={n}</p>;\n}\n`,
+      `import { useStore } from "supa-store/react";\nimport { count } from "./count";\nimport { title } from "./todo";\nexport default function App() {\n  const { n } = useStore(count, { pick: ["n"] });\n  const { read } = useStore(title, { pick: ["read"] });\n  const t: string | undefined = read();\n  return <p id="n" title={t}>n={n}</p>;\n}\n`,
     );
     // 자원과 event 도 핸들로 — 그 타입이 node_modules 의 supa-store 를 가리키고, 짓는 동안 on 을 건다
     writeFileSync(
       file("src/todo.ts"),
-      `import { createStore, type Store } from "supa-store";\nimport { createEvent, createResource } from "supa-store/query";\nexport const todo = createStore(() => createResource(() => ({ query: async () => ({ title: "t" }) })));\nexport const saved = createStore(() => createEvent<number>());\nexport const log: Store<{ last: number }> = createStore((set, _get, ctx) => {\n  ctx(saved).on((n) => set({ last: n }));\n  return { last: 0 };\n});\n`,
+      `import { createStore, type Store } from "supa-store";\nimport { createEvent, createResource } from "supa-store/query";\nexport const todo = createStore(() => createResource(() => ({ query: async () => ({ title: "t" }) })));\nexport const saved = createStore(() => createEvent<number>());\nexport const log: Store<{ last: number }> = createStore((set, _get, ctx) => {\n  ctx(saved).on((n) => set({ last: n }));\n  return { last: 0 };\n});\n// ctx 만 쓰는 정의 — 타입 인자 없이 추론된다\nexport const title = createStore.ofContext((ctx) => ({ read: () => ctx(todo).getData()?.title }));\n`,
     );
 
     // 5. 개발 서버 — 첫 화면이 상태를 그린다

@@ -88,31 +88,47 @@ export const saved = createStore(() => createEvent<{ id: string }>());
 
 ### 타입 인자를 적어야 하는 꼴
 
-**creator 가 인자를 하나라도 받으면 상태 타입이 추론되지 않는다.** 쓰지 않는 `_set` 하나만 적어도 같다. TypeScript 가 매개변수의 타입을 정하려고 상태 타입을 먼저 굳히는데, 그 자리에서 `never` 로 굳어 컴파일 오류가 난다. 그때는 `createStore<Shape>(…)` 로 타입 인자를 적거나, 변수에 `Store<Shape>` 를 적는다.
+**creator 가 받는 인자에 따라 세 꼴로 나뉜다.** `createStore` 의 creator 가 인자를 하나라도 받으면(쓰지 않는 `_set` 하나라도) 상태 타입이 추론되지 않는다. TypeScript 가 매개변수의 타입을 정하려고 상태 타입을 먼저 굳히는데, 그 자리에서 `never` 로 굳어 컴파일 오류가 난다.
+
+| creator 가 쓰는 인자 | 이렇게 정의한다 | 타입은 |
+|---|---|---|
+| 없다 | `createStore(() => …)` | 돌려주는 값에서 추론된다 |
+| `ctx` 만 | `createStore.ofContext((ctx) => …)` | 돌려주는 값에서 추론된다 |
+| `set` · `get`(과 `ctx`) | `createStore((set): Shape => …)` 또는 `createStore<Shape>((set) => …)` | 적어 준 `Shape` 다 |
 
 ```ts
-import { createStore, type Derived, type Store } from "supa-store";
+import { createStore, type Store } from "supa-store";
 import { createDerived, createEvent, createResource } from "supa-store/query";
 
-// 인자 없는 creator — 반환 타입에서 추론된다
+// 인자 없는 creator
 export const todos = createStore(() => createResource(() => ({ query: fetchTodos })));
 export const saved = createStore(() => createEvent<{ id: string }>());
 
-// set · get · ctx 를 받는 creator — 적는다
-export const count = createStore<{ n: number; inc: () => void }>((set) => ({ n: 1, inc: () => set((s) => ({ n: s.n + 1 })) }));
-export const total = createStore<Derived<number>>((_set, _get, ctx) => createDerived(() => ctx(count).n * 2));
-export const last: Store<{ id: string }> = createStore((set, _get, ctx) => {
+// ctx 만 쓰는 creator — 자원 · 파생 · 다른 store 를 잇는 동작
+export const todo = createStore.ofContext((ctx) => {
+  ctx(saved).on(({ id }) => void id); // id: string
+  return createResource(() => ({ query: fetchTodo }));
+});
+export const total = createStore.ofContext((ctx) => createDerived(() => ctx(count).n * 2)); // Store<Derived<number>>
+
+// set · get 을 쓰는 creator — 모양을 적는다(반환 타입이나 타입 인자)
+type Count = { n: number; inc: () => void };
+export const count = createStore((set): Count => ({ n: 1, inc: () => set((s) => ({ n: s.n + 1 })) }));
+export const last = createStore<{ id: string }>((set, _get, ctx) => {
   ctx(saved).on(({ id }) => set({ id }));
   return { id: "" };
 });
 
 // 서로를 가리키는 두 store 는 변수에 적어야 한다 — 적지 않으면 「자기 초기화에서 참조된다」 순환 추론에 걸린다
-export const a: Store<{ n: number }> = createStore((_s, _g, ctx) => ({ n: ctx(b).n }));
-export const b: Store<{ n: number }> = createStore((_s, _g, ctx) => ({ n: ctx(a).n }));
+export const a: Store<{ n: number }> = createStore.ofContext((ctx) => ({ n: ctx(b).n }));
+export const b: Store<{ n: number }> = createStore.ofContext((ctx) => ({ n: ctx(a).n }));
 ```
 
-- 자원 · 스트림 · 파생도 같다. 인자를 받으면 `Resource<A, D, R>`(`supa-store/query`) · `Stream<V, Cmd>`(`supa-store/stream`) · `Derived<T>`(`supa-store`) 를 적는다. `R` 은 자원에 정의한 객체의 타입이다(바꾸기 함수 칸만 본다).
-- **오류 문구에 `never` 가 보이면 타입 인자를 적는다.** 인자를 받는 creator 에 타입 인자를 빠뜨리면 상태가 `never` 로 굳어, creator 가 돌려주는 객체가 `never` 에 맞지 않는다는 오류가 난다(`Type '{ … }' is not assignable to type 'never'`). 상태가 정말 비어 있으면 `createStore<{}>(…)` 로 적는다.
+- **`ofContext` 의 `ctx()`(자기 자신 읽기)는 `unknown` 이다.** 자기 타입을 creator 의 인자에 넣으면 추론이 다시 깨지기 때문이다. 자기 자신은 자기 핸들로 `ctx(todo)` 처럼 읽는다.
+- `ofContext` 는 `createStore((_set, _get, ctx) => creator(ctx))` 와 같다. 다시 짓기 · 짓는 동안 건 듣기 · `overrideStore` · `useStore` 의 pick · omit · 이름이 모두 `createStore` 로 지은 store 와 같다. `overrideStore` 의 creator 는 `ofContext` 로 지은 store 에도 세 인자 꼴(`(set, get, ctx) => …`)이다.
+- 0.7.0 에서 쓰던 `createStore((_s: unknown, _g: unknown, ctx: Ctx) => …)` 꼴도 그대로 추론된다. 고칠 필요는 없다.
+- 타입 인자로 적을 때 자원 · 스트림 · 파생은 `Resource<A, D, R>`(`supa-store/query`) · `Stream<V, Cmd>`(`supa-store/stream`) · `Derived<T>`(`supa-store`) 다. `R` 은 자원에 정의한 객체의 타입이다(바꾸기 함수 칸만 본다). `ctx` 만 쓰면 `ofContext` 가 이것을 대신 추론한다.
+- **오류 문구에 `never` 가 보이면 타입 인자를 적거나, `ctx` 만 쓰면 `ofContext` 로 바꾼다.** 인자를 받는 creator 에 타입 인자를 빠뜨리면 상태가 `never` 로 굳어, creator 가 돌려주는 객체가 `never` 에 맞지 않는다는 오류가 난다(`Type '{ … }' is not assignable to type 'never'`). 상태가 정말 비어 있으면 `createStore<{}>(…)` 로 적는다.
 
 ## 세 공간
 
@@ -131,15 +147,15 @@ export const b: Store<{ n: number }> = createStore((_s, _g, ctx) => ({ n: ctx(a)
 다른 store 를 읽어 값을 짓는 store 는 `createDerived` 로 정의한다. 계산 함수는 계산 공간에서 돈다.
 
 ```ts
-import { createStore, type Derived } from "supa-store";
+import { createStore } from "supa-store";
 import { createDerived } from "supa-store/query";
 
-export const cartTotal = createStore<Derived<number>>((_set, _get, ctx) =>
+export const cartTotal = createStore.ofContext((ctx) =>
   createDerived(() => ctx(cart).items.reduce((sum, item) => sum + item.price * ctx(rate).value, 0)),
 );
 
 // 자원 칸을 읽는다 — 받는 동안에는 앞 결과(prev)를 잇는다
-export const todoTitle = createStore<Derived<string>>((_set, _get, ctx) =>
+export const todoTitle = createStore.ofContext((ctx) =>
   createDerived((prev?: string) => ctx(todo).getData({ id: ctx(todoPick).id })?.title ?? prev ?? ""),
 );
 ```
@@ -161,12 +177,12 @@ getStore(cartTotal).getState().get(); // React 밖
 ```ts
 // todo.ts — raw 는 export 하지 않는다
 const raw = createStore(() => createResource(() => ({ query: fetchRaw })));
-export const view = createStore<Derived<View>>((_s, _g, ctx) => createDerived(() => shape(ctx(raw).getData())));
+export const view = createStore.ofContext((ctx) => createDerived(() => shape(ctx(raw).getData())));
 ```
 
 ## 정의를 둘 때 지킬 것
 
-- **모듈 최상단에서만 `createStore` 를 부른다.** 부를 때마다 새 store 가 생긴다. 함수나 컴포넌트 안에서 부르면 부를 때마다 store 가 늘어난다. 라이브러리는 이것을 막지 않는다.
+- **모듈 최상단에서만 `createStore` 와 `createStore.ofContext` 를 부른다.** 부를 때마다 새 store 가 생긴다. 함수나 컴포넌트 안에서 부르면 부를 때마다 store 가 늘어난다. 라이브러리는 이것을 막지 않는다.
 - **모듈 최상단에서 store 를 꺼내지 않는다.** 최상단의 `getStore(x).getState()` 는 import 순환 안에서 아직 평가되지 않은 핸들을 만날 수 있다. 정의 파일끼리 서로 import 하는 것은 괜찮다. creator 는 처음 꺼낼 때 돌고, 그때는 두 모듈이 모두 평가를 마쳤다.
 - **creator 안에서 다른 store 는 `ctx` 로 읽는다.** `getStore(x)` 로 읽으면 기댐이 적히지 않아 `x` 를 `overrideStore` 해도 다시 지어지지 않고, 파생은 다시 계산하지 않아 오류 없이 낡은 값을 낸다.
 - **시험에서 정의를 바꾸려면 모듈을 다시 읽지 말고 `overrideStore(handle, creator)` 를 쓴다.** `vi.resetModules()` 뒤에 정의 파일을 다시 import 하면 새 store 가 따로 생기고, 옛 store 와 그것이 event 에 건 듣기가 남는다. 덮어쓴 정의는 `resetStores()` 가 지운다.
@@ -237,7 +253,7 @@ type AppearanceApi = {
   patch(p: AppearancePatch): Promise<Appearance>;
   patchIcons(p: IconPatch): Promise<Appearance>;
 };
-export const appearance = createStore<Resource<void, Appearance, AppearanceApi>>((_set, _get, ctx) =>
+export const appearance = createStore.ofContext((ctx) =>
   createResource(() => ({
     query: fetchAppearance,
     async patch(p: AppearancePatch) { return readAppearance(await http.patch("/api/appearance", p)); },
@@ -258,7 +274,7 @@ export const appearance = createStore<Resource<void, Appearance, AppearanceApi>>
 // 받기와 바꾸기가 다른 store 에 있을 때 — 바꾸기가 event 를 내고, 받는 쪽이 겹을 얹고 값을 채운다
 export const settingsPatched = createStore(() => createEvent<{ settings: Settings }>());
 
-export const patchSettings = createStore<Resource<void, never, { patch(p: SettingsPatch): Promise<Settings> }>>((_set, _get, ctx) =>
+export const patchSettings = createStore.ofContext((ctx) =>
   createResource(() => ({
     async patch(p: SettingsPatch) { return readSettings(await http.patch("/api/settings", p)); },
   }), {
@@ -267,7 +283,7 @@ export const patchSettings = createStore<Resource<void, never, { patch(p: Settin
   }),
 );
 
-export const getSettings = createStore<Resource<void, Settings, object>>((_set, _get, ctx) => {
+export const getSettings = createStore.ofContext((ctx) => {
   const settings = createResource(() => ({ query: fetchSettings }), {
     select: (s) => ctx(patchSettings).patch.optimistic.reduce((acc, [p]) => acc.with(p), s),
   });
@@ -395,7 +411,7 @@ createResource((cache: Cache<{ sessionId: string }, Page[]>) => ({
 }));
 
 // 다른 자원이 바뀌면 낡게 한다 — event 를 듣는다
-export const graph = createStore<Resource<void, Graph, object>>((_set, _get, ctx) => {
+export const graph = createStore.ofContext((ctx) => {
   const resource = createResource(() => ({ query: fetchGraph }));
   ctx(repoChanged).on(() => void resource.invalidate()); // 다시 지으면 앞 듣기는 떨어진다
   return resource;
@@ -611,8 +627,8 @@ export const lsp = createStore(() =>
 store 로 꺼낸 것은 다른 store 가 `ctx` 로 부른다. 화면에서는 쓰지 않는다.
 
 ```ts
-export const complete = createStore<{ run: (p: CompletionParams) => Promise<CompletionList> }>((_set, _get, ctx) => ({
-  run: (p) => ctx(lsp).complete(p),
+export const complete = createStore.ofContext((ctx) => ({
+  run: (p: CompletionParams): Promise<CompletionList> => ctx(lsp).complete(p),
 }));
 ```
 
@@ -659,6 +675,10 @@ export default withStore({});
 - `createStore` 를 다시 내보내는 지역 감싸개(`export { createStore } from "supa-store"`)를 거쳐 가져온 파일
 - 동적 `import("supa-store")`
 - `import def, * as s from "supa-store"` 처럼 기본 가져오기와 이름 공간 가져오기를 한 줄에 적은 꼴
+
+## 0.7.0 에서 옮길 때
+
+깨지는 것은 없다. `createStore.ofContext` 가 더해졌다. `ctx` 만 쓰려고 `createStore<Resource<…>>((_set, _get, ctx) => …)` 처럼 타입 인자를 적었거나 `(_s: unknown, _g: unknown, ctx: Ctx) =>` 로 적은 정의는 `createStore.ofContext((ctx) => …)` 로 바꾸면 타입을 지울 수 있다. 바꾸지 않아도 그대로 돈다.
 
 ## 0.6 에서 옮길 때
 
