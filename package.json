@@ -1,14 +1,13 @@
 {
   "name": "supa-store",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/RoJaebl/supa-store.git" },
   "packageManager": "pnpm@11.18.0",
   "type": "module",
   "engines": { "node": ">=20" },
   "types": "./dist/index.d.ts",
-  "bin": { "store-gen": "./tools/cli.mjs" },
-  "files": ["dist", "plugin", "tools/*.cjs", "tools/*.mjs", "tools/*.d.mts", "!tools/*.test.mjs"],
+  "files": ["dist", "tools/*.cjs", "tools/*.mjs", "tools/*.d.mts", "!tools/*.test.mjs"],
   "exports": {
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
     "./react": { "types": "./dist/react.d.ts", "default": "./dist/react.js" },
@@ -18,10 +17,8 @@
     "./server": { "types": "./dist/server/index.d.ts", "default": "./dist/server/index.js" },
     "./server/node": { "types": "./dist/server/node.d.ts", "default": "./dist/server/node.js" },
     "./server/web": { "types": "./dist/server/web.d.ts", "default": "./dist/server/web.js" },
-    "./config": { "types": "./dist/config.d.ts", "default": "./dist/config.js" },
     "./vite": { "types": "./tools/vite.d.mts", "default": "./tools/vite.mjs" },
-    "./next": { "types": "./tools/next.d.mts", "default": "./tools/next.mjs" },
-    "./plugin": "./tools/plugin.cjs"
+    "./next": { "types": "./tools/next.d.mts", "default": "./tools/next.mjs" }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.server.json",
@@ -31,7 +28,7 @@
     "prepublishOnly": "pnpm test && pnpm test:pack",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.test.json"
   },
-  "peerDependencies": { "next": ">=14", "react": ">=18", "typescript": ">=5.4", "vite": ">=6", "ws": ">=8" },
+  "peerDependencies": { "next": ">=14", "react": ">=18", "vite": ">=6", "ws": ">=8" },
   "peerDependenciesMeta": { "next": { "optional": true }, "react": { "optional": true }, "vite": { "optional": true }, "ws": { "optional": true } },
   "devDependencies": {
     "@testing-library/dom": "^10.4.2",
