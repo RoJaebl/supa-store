@@ -249,6 +249,18 @@ export function createStore<S extends object = never>(creator: CreatorOf<S>): St
   return entry.handle as Store<S>;
 }
 
+export namespace createStore {
+  /**
+   * `ctx` 만 쓰는 정의 — set · get 을 받지 않으므로 상태 타입이 돌려주는 값에서 추론된다.
+   * 동작은 `createStore((_set, _get, ctx) => creator(ctx))` 와 같다. `ctx()` 는 자기 타입을 모르므로 `unknown` 이다 —
+   * 자기 자신은 자기 핸들로 읽는다. 모듈 최상단에서만 부른다
+   */
+  export function ofContext<S extends object>(creator: (ctx: Ctx) => S): Store<S> {
+    // 이 파일 안에서 createStore 를 부르므로 이름은 이 프레임까지 건너뛰고 ofContext 를 부른 자리를 읽는다
+    return createStore<S>((_set, _get, ctx) => creator(ctx as Ctx));
+  }
+}
+
 /** 처음 등록한 정의 대신 이것으로 짓는다. 그 store 에 기대던 store 도 다시 짓는다. 시험의 가짜는 일부 칸만 돌려줘도 된다 */
 export function overrideStore<S>(
   store: Store<S>,

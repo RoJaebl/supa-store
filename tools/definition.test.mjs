@@ -16,3 +16,8 @@ test("그 밖은 정의가 아니다", () => {
   assert.equal(isDefinition(`import * as r from "supa-store/react";`), false);
   assert.equal(isDefinition(`// createStore 는 supa-store 에서\nexport const x = 1`), false);
 });
+
+test("createStore.ofContext 만 쓰는 파일도 정의다", () => {
+  assert.equal(isDefinition(`import { createStore } from "supa-store";\nexport const x = createStore.ofContext((ctx) => ({}));`), true);
+  assert.equal(isDefinition(`import { createStore as cs } from "supa-store";\nexport const x = cs.ofContext((ctx) => ({}));`), true);
+});
