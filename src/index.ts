@@ -284,8 +284,11 @@ export function registeredStores(): Store<unknown>[] {
   return entries.map((entry) => entry.handle);
 }
 
-/** @internal — 지금 짓고 있는 store. adopt 로 맡긴 함수는 그 store 를 dispose 할 때 [DISPOSE] 뒤에 돈다(query.ts 의 event 가 쓴다) */
-export function currentBuild(): { label: string; adopt(off: () => void): void } | undefined {
+/**
+ * @internal — 지금 짓고 있는 store. adopt 로 맡긴 함수는 그 store 를 dispose 할 때 [DISPOSE] 뒤에 돈다(query.ts 의 event 가 쓴다).
+ * store 를 가리는 것은 handle 이다 — label 은 한 도우미 함수 안에서 지은 store 끼리 겹치므로 문구와 기록에만 쓴다
+ */
+export function currentBuild(): { label: string; handle: Store<unknown>; adopt(off: () => void): void } | undefined {
   const entry = building[building.length - 1];
-  return entry && { label: entry.label, adopt: (off) => void entry.offs.push(off) };
+  return entry && { label: entry.label, handle: entry.handle, adopt: (off) => void entry.offs.push(off) };
 }

@@ -21,21 +21,22 @@ export interface Event<P> {
   on(fn: (payload: P) => void): () => void;
   /** 지금 짓는 store 는 일부러 반응하지 않는다 — 실행에는 영향이 없고 결정이라는 기록만 남긴다. 짓는 동안에만 부른다 */
   exempt(why: string): void;
-  /** 출력 스냅숏이 읽는다. 둘 다 who(부른 자리의 이름)로 정렬한다 */
+  /** 출력 스냅숏이 읽는다. 둘 다 who(부른 자리의 이름)로 정렬한다. 이름이 같아도 store 가 다르면 따로 선다 */
   record(): { on: string[]; exempt: Array<{ who: string; why: string }> };
 }
 
 /** 자원 사이를 잇는 event. const x = createStore(() => createEvent<P>()) 로 둔다 */
 export function createEvent<P>(): Event<P> {
-  const handlers: { who: string | null; fn: (payload: P) => void }[] = [];
-  const exempts = new Map<string, string>();
-  const hasOn = (who: string) => handlers.some((h) => h.who === who);
+  // store 는 handle 로 가린다 — 이름(부른 자리)은 한 도우미 함수 안에서 지은 store 끼리 겹친다
+  const handlers: { owner: object | null; who: string | null; fn: (payload: P) => void }[] = [];
+  const exempts = new Map<object, { who: string; why: string }>();
+  const hasOn = (owner: object) => handlers.some((h) => h.owner === owner);
   return {
     emit: (payload) => [...handlers].forEach((h) => h.fn(payload)),
     on(fn) {
       const build = currentBuild();
-      if (build && exempts.has(build.label)) throw new Error(`${build.label} 는 이미 exempt 했다 — on 과 함께 적을 수 없다`);
-      const handler = { who: build?.label ?? null, fn };
+      if (build && exempts.has(build.handle)) throw new Error(`${build.label} 는 이미 exempt 했다 — on 과 함께 적을 수 없다`);
+      const handler = { owner: build?.handle ?? null, who: build?.label ?? null, fn };
       handlers.push(handler);
       const off = () => {
         const at = handlers.indexOf(handler);
@@ -47,13 +48,14 @@ export function createEvent<P>(): Event<P> {
     exempt(why) {
       const build = currentBuild();
       if (!build) throw new Error("exempt 는 store 를 짓는 동안에만 부른다");
-      if (hasOn(build.label)) throw new Error(`${build.label} 는 이미 on 했다 — exempt 와 함께 적을 수 없다`);
-      exempts.set(build.label, why);
-      build.adopt(() => void exempts.delete(build.label));
+      if (hasOn(build.handle)) throw new Error(`${build.label} 는 이미 on 했다 — exempt 와 함께 적을 수 없다`);
+      exempts.set(build.handle, { who: build.label, why });
+      build.adopt(() => void exempts.delete(build.handle));
     },
     record: () => ({
-      on: [...new Set(handlers.flatMap((h) => (h.who === null ? [] : [h.who])))].sort(),
-      exempt: [...exempts.keys()].sort().map((who) => ({ who, why: exempts.get(who)! })),
+      // 같은 store 가 둘 건 on 은 하나로 센다
+      on: [...new Map(handlers.flatMap((h) => (h.owner === null ? [] : [[h.owner, h.who!] as const]))).values()].sort(),
+      exempt: [...exempts.values()].sort((a, b) => (a.who < b.who ? -1 : a.who > b.who ? 1 : 0)),
     }),
   };
 }

@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { createStore, currentBuild, DISPOSE, disposeStores, getStore, overrideStore, resetStores, type Store } from "./index.js";
-import { createEvent, createResource, keepEqual, type Cache, type MutationFn, type Resource } from "./query.js";
+import { createEvent, createResource, keepEqual, type Cache, type Event, type MutationFn, type Resource } from "./query.js";
 import { useStore } from "./react.js";
 import { track } from "./track.js";
 
@@ -181,6 +181,70 @@ it("record 의 who 는 부른 자리의 이름이다", () => {
   const r = createStore<{}>((_s, _g, ctx) => (ctx(ev).on(() => {}), {}));
   getStore(r).getState();
   expect(getStore(ev).getState().record().on).toEqual([expect.stringMatching(/query\.test\.tsx:\d+$/)]);
+});
+// 한 도우미 함수 안에서 지은 store 들은 부른 자리의 이름이 같다 — 이름이 아니라 store 로 가린다
+// 시험마다 새 event 를 쓴다 — 앞 시험의 store 가 resetStores 로 다시 지어지며 ev 에 다시 걸기 때문이다
+const freshEvent = () => createStore(() => createEvent<number>());
+const sameLine = (event: Store<Event<number>>, fn: (event: Event<number>) => void) =>
+  createStore<{}>((_s, _g, ctx) => (fn(ctx(event)), {}));
+it("이름이 같은 두 store 가 하나는 exempt, 하나는 on 해도 던지지 않는다", () => {
+  const local = freshEvent();
+  const quiet = sameLine(local, (event) => event.exempt("까닭"));
+  const loud = sameLine(local, (event) => void event.on(() => {}));
+  expect(() => (getStore(quiet).getState(), getStore(loud).getState())).not.toThrow();
+  const record = getStore(local).getState().record();
+  expect(record.exempt).toHaveLength(1);
+  expect(record.on).toHaveLength(1);
+});
+it("이름이 같은 두 store 의 exempt 는 하나를 버려도 다른 하나가 남는다", () => {
+  const local = freshEvent();
+  const one = sameLine(local, (event) => event.exempt("하나"));
+  const two = sameLine(local, (event) => event.exempt("둘"));
+  getStore(one).getState();
+  getStore(two).getState();
+  expect(getStore(local).getState().record().exempt.map((e) => e.why).sort()).toEqual(["둘", "하나"]);
+  overrideStore(one, () => ({}));
+  expect(getStore(local).getState().record().exempt.map((e) => e.why)).toEqual(["둘"]);
+});
+it("이름이 같은 두 store 의 on 은 record 에 따로 선다", () => {
+  const local = freshEvent();
+  const one = sameLine(local, (event) => void event.on(() => {}));
+  const two = sameLine(local, (event) => void event.on(() => {}));
+  getStore(one).getState();
+  getStore(two).getState();
+  const { on } = getStore(local).getState().record();
+  expect(on).toHaveLength(2);
+  expect(on[0]).toBe(on[1]);
+});
+it("짓는 중에 ctx 로 지은 store 가 건 on 은 그 store 의 것이다", () => {
+  const local = freshEvent();
+  let outerLabel = "";
+  let innerLabel = "";
+  const inner = createStore<{}>((_s, _g, ctx) => {
+    innerLabel = currentBuild()!.label;
+    ctx(local).on(() => {});
+    return {};
+  });
+  const outer = createStore<{}>((_s, _g, ctx) => {
+    outerLabel = currentBuild()!.label;
+    ctx(inner);
+    return {};
+  });
+  getStore(outer).getState();
+  expect(innerLabel).not.toBe(outerLabel);
+  expect(getStore(local).getState().record().on).toEqual([innerLabel]);
+});
+it("exempt 는 그 store 를 버리면 지워지고 다시 지으면 다시 선다", () => {
+  const local = freshEvent();
+  const r = createStore<{}>((_s, _g, ctx) => (ctx(local).exempt("까닭"), {}));
+  getStore(r).getState();
+  expect(getStore(local).getState().record().exempt).toHaveLength(1);
+  disposeStores();
+  expect(getStore(local).getState().record().exempt).toEqual([]);
+  getStore(r).getState();
+  expect(getStore(local).getState().record().exempt).toHaveLength(1);
+  overrideStore(r, () => ({}));
+  expect(getStore(local).getState().record().exempt).toEqual([]);
 });
 it("record() 는 exempt 도 부른 자리의 이름으로 준다", () => {
   const r = createStore<{}>((_s, _g, ctx) => (ctx(ev).exempt("첫째"), {}));
