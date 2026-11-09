@@ -58,10 +58,15 @@ export const count = createStore((set, get, ctx) => ({ n: 1, inc: () => set((s) 
 ```
 
 - `createStore(creator)` 는 핸들 `Store<S>` 를 돌려준다. `S` 는 creator 의 반환 타입이다.
-- **핸들이 곧 0.6 의 `StoreApi<S>` 다.** `getState` · `getInitialState` · `setState` · `subscribe` 를 그대로 가진다.
-  짓는 것은 여전히 처음 꺼낼 때다(`getState` 가 짓는다).
-- 그래서 **`getStore` 를 걷는다.** `getStore("k").getState()` 는 `k.getState()` 가 된다. 0.6 문서가 약속한 「다시 지어도 같은 객체다」는
-  핸들에 그대로 선다. `overrideStore` · `resetStores` · `disposeStores` 가 다시 지어도 핸들은 같은 객체다.
+- **핸들은 store 를 가리키는 표지일 뿐이다.** 상태 타입을 나르고 store 를 가리키는 일만 한다. 읽고 쓰는 메서드를 갖지 않는다.
+- **React 밖에서 읽고 쓰는 길은 0.6 처럼 `getStore` 다.** `getStore(handle)` 이 0.6 의 `StoreApi<S>`(`getState` · `getInitialState` ·
+  `setState` · `subscribe`)를 돌려준다. `getStore("k").getState()` 는 `getStore(k).getState()` 가 된다. 짓는 것은 여전히 처음 꺼낼 때다.
+  0.6 문서가 약속한 「다시 지어도 같은 객체다」는 그대로다. `overrideStore` · `resetStores` · `disposeStores` 가 다시 지어도 `getStore(handle)`
+  은 같은 객체를 준다.
+- **핸들을 `StoreApi` 로 두지 않은 까닭.** creator 안에서 다른 store 를 `ctx` 가 아닌 길로 읽으면 기댐(`deps`)도 계산 공간의 읽기도 적히지
+  않는다. 그러면 `overrideStore` 뒤에 다시 지어지지 않고, 파생이 다시 계산하지 않아 오류 없이 낡은 값을 낸다. 우회하는 자리가 언제나
+  `getStore(…)` 호출이면 소비자의 lint 가 함수 이름으로 「creator 안에서 `getStore` 를 부르지 않는다」를 잡을 수 있다. 핸들이 `StoreApi` 이면
+  우회가 `x.getState()` 라는 평범한 메서드 호출이 되어, 타입을 읽지 않는 lint 로는 잡지 못한다(사용자가 이 꼴을 골랐다. §4 견준 길).
 - `set` · `get` 의 타입은 creator 의 반환 타입에서 온다. creator 안에서 `set` 의 타입이 자기 반환 타입에 기대는 순환은 TypeScript 가 추론으로
   풀지 못할 수 있다. 그때는 `createStore<Shape>(…)` 처럼 타입 인자를 적는다. 어느 꼴이 추론되고 어느 꼴이 적어야 하는지는 만드는 이가
   시험으로 확인하고 README 에 적는다.
@@ -74,6 +79,7 @@ export const count = createStore((set, get, ctx) => ({ n: 1, inc: () => set((s) 
 | 화면에서 꺼내기 | `useStore(key, …)` | `useStore(handle, …)`. 갈래(`USE` 가 있으면 맡기고, 없으면 `pick` · `omit`)와 반환 타입 규칙은 그대로고, 타입을 key 대신 핸들의 상태 타입에서 끌어낸다 |
 | store 끼리 읽기 | `ctx(key, { pick \| omit })` | `ctx(handle, { pick \| omit })`. 짓는 동안 기댐을 적는 것, 계산 공간에서 `noteRead`, 파생이면 `.get()` 을 주는 것이 그대로다 |
 | 자기 자신 | `ctx()` | 그대로 |
+| React 밖에서 읽고 쓰기 | `getStore(key)` | `getStore(handle)`. 돌려주는 `StoreApi` 는 그대로 |
 | 정의 갈아 끼우기 | `overrideStore(key, creator)` | `overrideStore(handle, creator)` |
 | 등록된 것 전부 | `registeredKeys(): string[]` | `registeredStores(): Store<unknown>[]` — 등록한 차례대로 |
 | 짓는 store 의 이름 | `ctx.key` | 걷는다(§3.4) |
@@ -93,7 +99,12 @@ export const count = createStore((set, get, ctx) => ({ n: 1, inc: () => set((s) 
 - `deps` 는 key 대신 entry 를 담는다. `rebuild` 가 기댐을 거슬러 올라가는 방식은 그대로다.
 - 순환 검사(`building` 사슬)도 entry 로 잇는다. 오류 문구의 사슬은 §3.5 의 이름으로 찍는다.
 - **0.6 의 개발 모드 재등록 갈래를 걷는다.** `createStore` 는 언제나 새 entry 를 만든다. 같은 store 가 두 번 등록되는 일은 그 모듈이 다시
-  돌 때뿐이고, 그것은 §3.6 이 페이지 다시 읽기로 막는다.
+  돌 때뿐이다. 개발 서버에서는 §3.6 이 페이지 다시 읽기로 그것을 막는다.
+- **시험이 모듈을 다시 읽는 경우는 막지 않는다.** `vi.resetModules()` 뒤에 정의 파일을 다시 import 하면 새 entry 가 따로 생기고, 옛 entry 와
+  그것이 event 에 건 듣기가 남는다. 0.6 에서는 같은 key 의 재등록이 정의를 갈아 끼워 이 꼴이 통했다. editor 시험 셋이 여기에 기댄다
+  (`history.action.test.ts` 등). 0.7 은 이 경우를 감지하지 않는다. 감지하려면 옛 모듈과 새 모듈을 잇는 신원이 필요하고, 그것은 §4 갈래 1이
+  뺀 장치다. README 에 「시험에서 정의를 바꾸려면 모듈을 다시 읽지 말고 `overrideStore` 를 쓴다」를 적고, 그 시험들을 옮기는 일은 소비자의
+  이관이 맡는다(설계자의 판단).
 - 0.6 의 「같은 key 를 두 번 등록했다」 오류는 key 가 없으므로 사라진다.
 - **import 순환.** 정의 파일끼리 서로 import 해도 된다. creator 는 처음 꺼낼 때 돌므로, 그때는 두 모듈이 모두 평가를 마쳤다. 모듈 평가 중에
   다른 store 를 꺼내면(최상단에서 `x.getState()`) 순환 안에서 아직 평가되지 않은 핸들을 만날 수 있다. README 에 「모듈 최상단에서 store 를
@@ -185,8 +196,7 @@ event 에 건 듣기도 남는다. §2 가 실패로 친 그 상태다.
 - 버전은 **0.7.0** 이다. 1.0 전이므로 깨지는 변경을 둘째 자리에서 올린다. 0.5 · 0.6 도 그렇게 올렸다.
 - README 에 「0.6 에서 옮길 때」 절을 더한다. 0.4 · 0.1.0 절과 같은 꼴로, 아래를 옛 꼴과 새 꼴의 짝으로 적는다.
   - `createStore("k", creator)` 에서 `export const k = createStore(creator)` 로
-  - `useStore("k", …)` · `ctx("k", …)` · `overrideStore("k", …)` 에서 핸들로
-  - `getStore("k").x` 에서 `k.x` 로
+  - `useStore("k", …)` · `ctx("k", …)` · `getStore("k")` · `overrideStore("k", …)` 에서 핸들로
   - `.on(ctx.key, fn)` 에서 `.on(fn)` 으로, `.exempt(ctx.key, why)` 에서 `.exempt(why)` 로
   - `registeredKeys()` 에서 `registeredStores()` 로
   - 생성 파일 · 설정 파일 · tsserver 플러그인 항목 · `store-gen` 지우기, 번들러 장치는 남기기
@@ -197,7 +207,7 @@ event 에 건 듣기도 남는다. §2 가 실패로 친 그 상태다.
 
 `pnpm test`(빌드 · vitest · node 시험)와 `pnpm test:pack` 이 통과해야 한다. 그 밖에 아래를 시험으로 박는다.
 
-- 핸들이 다시 지어도 같은 객체이고 구독이 살아남는다(`overrideStore` · `resetStores` · `disposeStores` 뒤).
+- `getStore(handle)` 이 다시 지어도 같은 객체를 주고 구독이 살아남는다(`overrideStore` · `resetStores` · `disposeStores` 뒤).
 - `ctx(handle)` 로 기댄 store 가 기댄 store 의 `overrideStore` 뒤 다시 지어진다.
 - 짓는 동안 건 `on(fn)` 이 `overrideStore` · `resetStores` · `disposeStores` 뒤 하나만 남는다. 사건 하나에 한 번 돈다.
 - `[DISPOSE]` 가 던져도 짓는 동안 건 듣기가 떨어진다.
@@ -220,6 +230,12 @@ event 에 건 듣기도 남는다. §2 가 실패로 친 그 상태다.
 - **갈래 3: 번들러가 변환으로 신원을 넣는다.** 사람이 쓰는 꼴은 갈래 1과 같고 상태를 지킨다. 변환을 지어야 하고, 변환 없이 도는 환경에서는
   갈래 1로 떨어진다. **사람이 쓰는 API 가 갈래 1과 같으므로 나중에 라이브러리 안에서만 더할 수 있다.** 갈래 1을 고른 까닭 가운데 하나다.
 - 신원 없이 갱신을 받는 길은 견줄 대상에서 뺐다. 옛 store 가 버려지지 않아 듣기가 겹친다.
+
+**React 밖에서 읽고 쓰는 길을 어떤 모양으로 두는가.** 사용자가 `getStore(handle)` 을 골랐다.
+
+- **`getStore(handle)`(고른 것).** 핸들은 표지이고 기능은 `getStore` 가 준다. creator 안에서 `ctx` 를 우회하는 자리가 함수 이름으로 드러나
+  lint 로 막을 수 있다. 소비자의 자리마다 바뀌는 것은 인자 하나다.
+- **핸들이 곧 `StoreApi`.** API 가 `getStore` 하나만큼 작다. 대신 `ctx` 우회가 `x.getState()` 로 숨어 타입을 읽는 lint 가 있어야 막는다.
 
 **어떻게 옮기는가.** 사용자가 한 번에 옮기기를 골랐다.
 
