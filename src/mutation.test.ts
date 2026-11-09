@@ -1,0 +1,531 @@
+import { expect, it, vi } from "vitest";
+import { createMutation, resetScopes } from "./mutation.js";
+
+/** 부를 때마다 새 약속을 내주고, 시험이 차례대로 풀게 한다 */
+function controlled<T>() {
+  const calls: Array<{ args: unknown[]; resolve: (value: T) => void; reject: (e: Error) => void }> = [];
+  const fn = vi.fn(
+    (...args: any[]) => new Promise<T>((resolve, reject) => calls.push({ args, resolve, reject })),
+  ) as (...args: any[]) => Promise<T>;
+  return { fn, calls };
+}
+
+it("부르면 inflight 에 인자가 서고, 끝나면 빠진다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn);
+  const p = m.call(1, "a");
+  expect(m.call.inflight).toEqual([[1, "a"]]);
+  expect(m.call.pending).toBe(true);
+  calls[0]!.resolve(10);
+  await p;
+  expect(m.call.inflight).toEqual([]);
+  expect(m.call.data).toBe(10);
+  expect(m.call.pending).toBe(false);
+});
+
+it("같은 인자로 두 번 부르면 둘이 서고 끝난 하나만 빠진다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn);
+  const p1 = m.call(1);
+  const p2 = m.call(1);
+  expect(m.call.inflight).toEqual([[1], [1]]);
+  calls[1]!.resolve(2);
+  await p2;
+  expect(m.call.inflight).toEqual([[1]]);
+  calls[0]!.resolve(1);
+  await p1;
+  expect(m.call.inflight).toEqual([]);
+});
+
+it("onSuccess 가 inflight 에서 빼기 전에 돈다", async () => {
+  const { fn, calls } = controlled<number>();
+  let seen = -1;
+  const m = createMutation(fn, { onSuccess: () => void (seen = m.call.inflight.length) });
+  const p = m.call(1);
+  calls[0]!.resolve(1);
+  await p;
+  expect(seen).toBe(1);
+});
+
+it("실패하면 error 를 적고 onError · onSettled 를 부른 뒤 빠진다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onError = vi.fn();
+  const onSettled = vi.fn();
+  let seen = -1;
+  const m = createMutation(fn, { onError, onSettled: (...a) => ((seen = m.call.inflight.length), onSettled(...a)) });
+  const p = m.call(7);
+  const boom = new Error("boom");
+  calls[0]!.reject(boom);
+  await expect(p).rejects.toBe(boom);
+  expect(m.call.error).toBe("boom");
+  expect(onError).toHaveBeenCalledWith(boom, 7);
+  expect(onSettled).toHaveBeenCalledWith(undefined, boom, 7);
+  expect(seen).toBe(1);
+  expect(m.call.inflight).toEqual([]);
+});
+
+it("호출을 시작하면 앞 실패의 error 를 지운다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn);
+  const p1 = m.call(1);
+  calls[0]!.reject(new Error("boom"));
+  await expect(p1).rejects.toThrow("boom");
+  expect(m.call.error).toBe("boom");
+  const p2 = m.call(2);
+  expect(m.call.error).toBeNull();
+  calls[1]!.resolve(2);
+  await p2;
+});
+
+it("밀려난 응답은 data · error · 콜백을 건드리지 않고 자기 결과로 끝난다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onSuccess = vi.fn();
+  const onSettled = vi.fn();
+  const m = createMutation(fn, { onSuccess, onSettled });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  calls[1]!.resolve(10);
+  await p2;
+  calls[0]!.resolve(5);
+  await expect(p1).resolves.toBe(5);
+  expect(m.call.data).toBe(10);
+  expect(onSuccess).toHaveBeenCalledTimes(1);
+  expect(onSuccess).toHaveBeenCalledWith(10, 2);
+  expect(onSettled).toHaveBeenCalledTimes(1);
+  expect(m.call.inflight).toEqual([]);
+});
+
+it("밀려난 실패도 error 를 적지 않는다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onError = vi.fn();
+  const m = createMutation(fn, { onError });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  calls[1]!.resolve(10);
+  await p2;
+  calls[0]!.reject(new Error("late"));
+  await expect(p1).rejects.toThrow("late");
+  expect(m.call.error).toBeNull();
+  expect(onError).not.toHaveBeenCalled();
+});
+
+it("reset 은 error · data 를 지우고 앞서 떠난 호출의 결과를 받지 않는다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onSuccess = vi.fn();
+  const m = createMutation(fn, { onSuccess });
+  const first = m.call(1);
+  calls[0]!.resolve(1);
+  await first;
+  const p = m.call(2);
+  m.call.reset();
+  expect(m.call.data).toBeUndefined();
+  expect(m.call.error).toBeNull();
+  // reset 은 inflight 를 지우지 않는다 — 그 호출이 끝날 때 빠진다
+  expect(m.call.inflight).toEqual([[2]]);
+  calls[1]!.resolve(2);
+  await expect(p).resolves.toBe(2);
+  expect(m.call.data).toBeUndefined();
+  // reset 은 칸만 막는다 — 앞서 떠난 호출의 콜백은 돈다
+  expect(onSuccess).toHaveBeenCalledTimes(2);
+  expect(m.call.inflight).toEqual([]);
+});
+
+it("콜백이 던져도 inflight 에서 빠지고 호출의 결과는 그대로다", async () => {
+  const { fn, calls } = controlled<number>();
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  const oops = new Error("oops");
+  const m = createMutation(fn, {
+    onSuccess: () => {
+      throw oops;
+    },
+  });
+  const p = m.call(1);
+  calls[0]!.resolve(3);
+  await expect(p).resolves.toBe(3);
+  expect(m.call.inflight).toEqual([]);
+  expect(m.call.data).toBe(3);
+  expect(logged).toHaveBeenCalledWith(oops);
+  logged.mockRestore();
+});
+
+it("상태가 바뀔 때마다 구독자에게 알리고 snapshot 이 새 객체다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn);
+  const seen: unknown[] = [];
+  const stop = m.channel.subscribe(() => seen.push(m.channel.snapshot()));
+  const before = m.channel.snapshot();
+  const p = m.call(1);
+  expect(seen).toHaveLength(1);
+  expect(seen[0]).not.toBe(before);
+  expect(seen[0]).toEqual({ inflight: [[1]], optimistic: [[1]], pending: true, error: null, data: undefined });
+  calls[0]!.resolve(4);
+  await p;
+  expect(seen.at(-1)).toEqual({ inflight: [], optimistic: [], pending: false, error: null, data: 4 });
+  expect(new Set(seen).size).toBe(seen.length);
+  const count = seen.length;
+  m.call.reset();
+  expect(seen).toHaveLength(count + 1);
+  stop();
+  m.call.reset();
+  expect(seen).toHaveLength(count + 1);
+});
+
+it("같은 scope.id 의 바꾸기는 다른 자원이어도 차례대로 나간다", async () => {
+  const a = controlled<number>();
+  const b = controlled<number>();
+  const ma = createMutation(a.fn, { scope: { id: "s" } });
+  const mb = createMutation(b.fn, { scope: { id: "s" } });
+  const pa = ma.call(1);
+  const pb = mb.call(2);
+  await Promise.resolve();
+  expect(a.calls).toHaveLength(1);
+  expect(b.calls).toHaveLength(0);
+  a.calls[0]!.resolve(1);
+  await pa;
+  await Promise.resolve();
+  expect(b.calls).toHaveLength(1);
+  b.calls[0]!.resolve(2);
+  await pb;
+});
+
+it("줄에서 기다리는 호출의 인자도 inflight 에 있다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn, { scope: { id: "w" } });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  expect(m.call.inflight).toEqual([[1], [2]]);
+  expect(calls).toHaveLength(1);
+  calls[0]!.resolve(1);
+  await p1;
+  expect(m.call.inflight).toEqual([[2]]);
+  await Promise.resolve();
+  expect(calls).toHaveLength(2);
+  calls[1]!.resolve(2);
+  await p2;
+});
+
+it("앞 호출이 실패해도 다음 호출이 나간다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn, { scope: { id: "f" } });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  expect(calls).toHaveLength(1);
+  calls[0]!.reject(new Error("x"));
+  await expect(p1).rejects.toThrow("x");
+  await Promise.resolve();
+  expect(calls).toHaveLength(2);
+  calls[1]!.resolve(2);
+  await expect(p2).resolves.toBe(2);
+});
+
+it("scope 가 없으면 동시에 나간다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn);
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  await Promise.resolve();
+  expect(calls).toHaveLength(2);
+  calls[0]!.resolve(1);
+  calls[1]!.resolve(2);
+  await Promise.all([p1, p2]);
+});
+
+it("reset 한 뒤에도 앞서 떠난 호출의 onSuccess 는 불린다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onSuccess = vi.fn();
+  const onSettled = vi.fn();
+  const m = createMutation(fn, { onSuccess, onSettled });
+  const p = m.call(1);
+  m.call.reset();
+  calls[0]!.resolve(1);
+  await p;
+  expect(onSuccess).toHaveBeenCalledWith(1, 1);
+  expect(onSettled).toHaveBeenCalledWith(1, null, 1);
+  expect(m.call.data).toBeUndefined();
+});
+
+it("reset 한 뒤에도 앞서 떠난 호출의 onError 는 불리고 error 는 적지 않는다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onError = vi.fn();
+  const m = createMutation(fn, { onError });
+  const p = m.call(1);
+  m.call.reset();
+  calls[0]!.reject(new Error("x"));
+  await expect(p).rejects.toThrow("x");
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(m.call.error).toBeNull();
+});
+
+it("reset 한 뒤에도 scope 줄에서 기다리던 호출의 onSuccess 는 불린다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onSuccess = vi.fn();
+  const m = createMutation(fn, { onSuccess, scope: { id: "reset-wait" } });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  m.call.reset();
+  calls[0]!.resolve(1);
+  await p1;
+  await Promise.resolve();
+  calls[1]!.resolve(2);
+  await p2;
+  expect(onSuccess.mock.calls).toEqual([
+    [1, 1],
+    [2, 2],
+  ]);
+  expect(m.call.data).toBeUndefined();
+});
+
+it("reset 뒤에 보낸 호출은 data 를 적는다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn);
+  const p1 = m.call(1);
+  m.call.reset();
+  const p2 = m.call(2);
+  calls[1]!.resolve(2);
+  await p2;
+  expect(m.call.data).toBe(2);
+  calls[0]!.resolve(1);
+  await p1;
+  expect(m.call.data).toBe(2);
+});
+
+it("resetScopes 는 줄을 비운다 — 뒤 호출이 옛 호출을 기다리지 않는다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn, { scope: { id: "reset-scopes" } });
+  void m.call(1);
+  resetScopes();
+  const p = m.call(2);
+  await Promise.resolve();
+  expect(calls).toHaveLength(2);
+  calls[1]!.resolve(2);
+  await expect(p).resolves.toBe(2);
+});
+
+it("나중 호출이 성공하면 앞 호출은 그 순간 optimistic 에서 빠지고 inflight 에는 남는다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn);
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  expect(m.call.optimistic).toEqual([[1], [2]]);
+  calls[1]!.resolve(20);
+  await p2;
+  expect(m.call.optimistic).toEqual([]);
+  expect(m.call.inflight).toEqual([[1]]);
+  calls[0]!.resolve(10);
+  await expect(p1).resolves.toBe(10);
+  expect(m.call.data).toBe(20);
+});
+
+it("나중 호출의 실패는 아무것도 밀어내지 않는다 — 앞 호출의 성공이 data 를 적고 onSuccess 를 부른다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onSuccess = vi.fn();
+  const m = createMutation(fn, { onSuccess });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  calls[1]!.reject(new Error("green"));
+  await expect(p2).rejects.toThrow("green");
+  expect(m.call.error).toBe("green");
+  expect(m.call.optimistic).toEqual([[1]]);
+  calls[0]!.resolve(10);
+  await p1;
+  expect(m.call.data).toBe(10);
+  expect(m.call.error).toBeNull();
+  expect(onSuccess).toHaveBeenCalledWith(10, 1);
+  expect(m.call.optimistic).toEqual([]);
+});
+
+it("같은 인자의 두 호출에서 나중 것이 성공하면 앞 것만 밀려난다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onSuccess = vi.fn();
+  const m = createMutation(fn, { onSuccess });
+  const p1 = m.call(1);
+  const p2 = m.call(1);
+  calls[1]!.resolve(2);
+  await p2;
+  calls[0]!.resolve(1);
+  await p1;
+  expect(onSuccess).toHaveBeenCalledTimes(1);
+  expect(onSuccess).toHaveBeenCalledWith(2, 1);
+  expect(m.call.data).toBe(2);
+});
+
+it("reset 뒤에도 나중 호출의 성공은 앞 호출을 밀어낸다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onSuccess = vi.fn();
+  const m = createMutation(fn, { onSuccess });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  m.call.reset();
+  calls[1]!.resolve(20);
+  await p2;
+  expect(m.call.optimistic).toEqual([]);
+  calls[0]!.resolve(10);
+  await p1;
+  expect(onSuccess).toHaveBeenCalledTimes(1);
+  expect(m.call.data).toBeUndefined();
+});
+
+/** onAllSettled 자리에 두는 확인 — 부를 때마다 새 약속을 내주고 시험이 푼다 */
+function confirming() {
+  const done: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+  const fn = vi.fn(() => new Promise<void>((resolve, reject) => done.push({ resolve, reject })));
+  return { fn, done };
+}
+/** 확인이 시작되고 끝나는 사이의 약속 사슬을 흘려보낸다 */
+const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+
+it("onAllSettled 를 적지 않으면 마지막 호출이 끝날 때 optimistic 이 빈다", async () => {
+  const { fn, calls } = controlled<number>();
+  const m = createMutation(fn);
+  const p = m.call(1);
+  calls[0]!.resolve(1);
+  await p;
+  expect(m.call.optimistic).toEqual([]);
+});
+
+it("onAllSettled 는 inflight 가 빌 때마다 정확히 한 번 돈다 — 호출 하나여도, 마지막 호출이 실패해도", async () => {
+  const { fn, calls } = controlled<number>();
+  const onAllSettled = vi.fn();
+  const m = createMutation(fn, { onAllSettled });
+  const p1 = m.call(1);
+  calls[0]!.resolve(1);
+  await p1;
+  await tick();
+  expect(onAllSettled).toHaveBeenCalledTimes(1);
+  const p2 = m.call(2);
+  calls[1]!.reject(new Error("x"));
+  await expect(p2).rejects.toThrow("x");
+  await tick();
+  expect(onAllSettled).toHaveBeenCalledTimes(2);
+  const p3 = m.call(3);
+  const p4 = m.call(4);
+  calls[2]!.resolve(3);
+  await p3;
+  await tick();
+  expect(onAllSettled).toHaveBeenCalledTimes(2);
+  calls[3]!.resolve(4);
+  await p4;
+  await tick();
+  expect(onAllSettled).toHaveBeenCalledTimes(3);
+});
+
+it("확인이 끝나기 전에는 optimistic 이 남고 pending 은 false 다", async () => {
+  const { fn, calls } = controlled<number>();
+  const c = confirming();
+  const m = createMutation(fn, { onAllSettled: c.fn });
+  const p = m.call(1);
+  calls[0]!.resolve(1);
+  await p;
+  await tick();
+  expect(m.call.optimistic).toEqual([[1]]);
+  expect(m.call.pending).toBe(false);
+  c.done[0]!.resolve();
+  await tick();
+  expect(m.call.optimistic).toEqual([]);
+});
+
+it("실패한 호출은 확인을 기다리지 않고 바로 optimistic 에서 빠진다 — 확인은 그래도 돈다", async () => {
+  const { fn, calls } = controlled<number>();
+  const c = confirming();
+  const m = createMutation(fn, { onAllSettled: c.fn });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  calls[1]!.reject(new Error("x"));
+  await expect(p2).rejects.toThrow("x");
+  expect(m.call.optimistic).toEqual([[1]]);
+  calls[0]!.resolve(1);
+  await p1;
+  await tick();
+  expect(c.fn).toHaveBeenCalledTimes(1);
+  expect(m.call.optimistic).toEqual([[1]]);
+  c.done[0]!.resolve();
+  await tick();
+  expect(m.call.optimistic).toEqual([]);
+});
+
+it("확인을 기다리는 호출도 나중 호출이 성공하면 바로 밀려난다", async () => {
+  const { fn, calls } = controlled<number>();
+  const c = confirming();
+  const m = createMutation(fn, { onAllSettled: c.fn });
+  const p1 = m.call(1);
+  calls[0]!.resolve(1);
+  await p1;
+  await tick();
+  const p2 = m.call(2);
+  calls[1]!.resolve(2);
+  await p2;
+  expect(m.call.optimistic).toEqual([[2]]);
+});
+
+it("확인 중에 새 호출이 끝나면 확인을 한 번 더 하고, 앞 확인이 끝나도 겹은 남는다", async () => {
+  const { fn, calls } = controlled<number>();
+  const c = confirming();
+  const m = createMutation(fn, { onAllSettled: c.fn });
+  const p1 = m.call(1);
+  calls[0]!.resolve(1);
+  await p1;
+  await tick();
+  const p2 = m.call(2);
+  calls[1]!.resolve(2);
+  await p2;
+  await tick();
+  expect(c.fn).toHaveBeenCalledTimes(2);
+  c.done[0]!.resolve();
+  await tick();
+  expect(m.call.optimistic).toEqual([[2]]);
+  c.done[1]!.resolve();
+  await tick();
+  expect(m.call.optimistic).toEqual([]);
+});
+
+it("mutateAsync 는 확인을 기다리지 않는다", async () => {
+  const { fn, calls } = controlled<number>();
+  const c = confirming();
+  const m = createMutation(fn, { onAllSettled: c.fn });
+  const p = m.call(1);
+  calls[0]!.resolve(7);
+  await expect(p).resolves.toBe(7);
+  await tick();
+  expect(c.done).toHaveLength(1);
+  expect(m.call.optimistic).toEqual([[1]]);
+});
+
+it("확인이 던지거나 거부되면 콘솔에 남기고 optimistic 이 빈다", async () => {
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  for (const onAllSettled of [
+    () => {
+      throw new Error("sync");
+    },
+    () => Promise.reject(new Error("async")),
+  ]) {
+    logged.mockClear();
+    const { fn, calls } = controlled<number>();
+    const m = createMutation(fn, { onAllSettled });
+    const p = m.call(1);
+    calls[0]!.resolve(1);
+    await p;
+    await tick();
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(m.call.optimistic).toEqual([]);
+  }
+  logged.mockRestore();
+});
+
+it("scope 와 함께 적어도 차례대로 나가고 마지막에 한 번 확인한다", async () => {
+  const { fn, calls } = controlled<number>();
+  const onAllSettled = vi.fn();
+  const m = createMutation(fn, { scope: { id: "confirm" }, onAllSettled });
+  const p1 = m.call(1);
+  const p2 = m.call(2);
+  await Promise.resolve();
+  expect(calls).toHaveLength(1);
+  calls[0]!.resolve(1);
+  await p1;
+  await tick();
+  expect(calls).toHaveLength(2);
+  expect(onAllSettled).not.toHaveBeenCalled();
+  calls[1]!.resolve(2);
+  await p2;
+  await tick();
+  expect(onAllSettled).toHaveBeenCalledTimes(1);
+});

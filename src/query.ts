@@ -1,10 +1,14 @@
 // 정의 도우미 — 정의 파일은 서버 쪽에서도 평가되므로 "use client" 를 두지 않는다. 훅은 [USE] 안에서만 부른다
 // 훅은 resourceHook.ts 에 살고, 이 파일은 React 를 가져오지 않는다
-import { USE } from "./index.js";
+import { currentBuild, USE } from "./index.js";
 import { createRefetcher, type RefetchInterval } from "./refetch.js";
-import { IDLE, makeResourceHook, message, noop, QUERY_FIELDS } from "./resourceHook.js";
+import { createMutation, type MutationFn, type MutationHooks, message } from "./mutation.js";
+import { IDLE, makeResourceHook, noop, plain, QUERY_FIELDS } from "./resourceHook.js";
+import { isTracking, noteRead, type Channel } from "./track.js";
 
+export type { MutationFn, MutationHooks, MutationSnapshot } from "./mutation.js";
 export type { RefetchInterval };
+export { createDerived } from "./derived.js";
 
 type Fn = (...args: any[]) => any;
 
@@ -13,32 +17,45 @@ type Fn = (...args: any[]) => any;
 export interface Event<P> {
   /** 반응하는 store 들을 부른다 */
   emit(payload: P): void;
-  /** who(store key)가 반응한다. 같은 who 가 다시 걸면 앞 것을 갈아 끼운다. 풀기 함수를 돌려준다 */
-  on(who: string, fn: (payload: P) => void): () => void;
-  /** who 는 일부러 반응하지 않는다 — 실행에는 영향이 없고 결정이라는 기록만 남긴다 */
-  exempt(who: string, why: string): void;
-  /** 출력 스냅숏이 읽는다. 둘 다 who 로 정렬한다 */
+  /** 반응한다. 짓는 동안 걸면 지금 짓는 store 가 누구이고 그 store 를 버릴 때 떨어진다. 풀기 함수를 돌려준다 */
+  on(fn: (payload: P) => void): () => void;
+  /** 지금 짓는 store 는 일부러 반응하지 않는다 — 실행에는 영향이 없고 결정이라는 기록만 남긴다. 짓는 동안에만 부른다 */
+  exempt(why: string): void;
+  /** 출력 스냅숏이 읽는다. 둘 다 who(부른 자리의 이름)로 정렬한다. 이름이 같아도 store 가 다르면 따로 선다 */
   record(): { on: string[]; exempt: Array<{ who: string; why: string }> };
 }
 
-/** 자원 사이를 잇는 event. createStore(key, () => createEvent<P>()) 로 둔다 */
+/** 자원 사이를 잇는 event. const x = createStore(() => createEvent<P>()) 로 둔다 */
 export function createEvent<P>(): Event<P> {
-  const handlers = new Map<string, (payload: P) => void>();
-  const exempts = new Map<string, string>();
+  // store 는 handle 로 가린다 — 이름(부른 자리)은 한 도우미 함수 안에서 지은 store 끼리 겹친다
+  const handlers: { owner: object | null; who: string | null; fn: (payload: P) => void }[] = [];
+  const exempts = new Map<object, { who: string; why: string }>();
+  const hasOn = (owner: object) => handlers.some((h) => h.owner === owner);
   return {
-    emit: (payload) => [...handlers.values()].forEach((fn) => fn(payload)),
-    on(who, fn) {
-      if (exempts.has(who)) throw new Error(`${who} 는 이미 exempt 했다 — on 과 함께 적을 수 없다`);
-      handlers.set(who, fn);
-      return () => void (handlers.get(who) === fn && handlers.delete(who));
+    emit: (payload) => [...handlers].forEach((h) => h.fn(payload)),
+    on(fn) {
+      const build = currentBuild();
+      if (build && exempts.has(build.handle)) throw new Error(`${build.label} 는 이미 exempt 했다 — on 과 함께 적을 수 없다`);
+      const handler = { owner: build?.handle ?? null, who: build?.label ?? null, fn };
+      handlers.push(handler);
+      const off = () => {
+        const at = handlers.indexOf(handler);
+        if (at >= 0) handlers.splice(at, 1);
+      };
+      build?.adopt(off);
+      return off;
     },
-    exempt(who, why) {
-      if (handlers.has(who)) throw new Error(`${who} 는 이미 on 했다 — exempt 와 함께 적을 수 없다`);
-      exempts.set(who, why);
+    exempt(why) {
+      const build = currentBuild();
+      if (!build) throw new Error("exempt 는 store 를 짓는 동안에만 부른다");
+      if (hasOn(build.handle)) throw new Error(`${build.label} 는 이미 on 했다 — exempt 와 함께 적을 수 없다`);
+      exempts.set(build.handle, { who: build.label, why });
+      build.adopt(() => void exempts.delete(build.handle));
     },
     record: () => ({
-      on: [...handlers.keys()].sort(),
-      exempt: [...exempts.keys()].sort().map((who) => ({ who, why: exempts.get(who)! })),
+      // 같은 store 가 둘 건 on 은 하나로 센다
+      on: [...new Map(handlers.flatMap((h) => (h.owner === null ? [] : [[h.owner, h.who!] as const]))).values()].sort(),
+      exempt: [...exempts.values()].sort((a, b) => (a.who < b.who ? -1 : a.who > b.who ? 1 : 0)),
     }),
   };
 }
@@ -49,10 +66,14 @@ export interface Cache<A, D> {
   /** args 하나면 값 하나, 배열이면 같은 순서의 값 배열 */
   getData(args?: A): D | undefined;
   getData(args: readonly A[]): (D | undefined)[];
-  /** 응답이 실어 온 값으로 바로 고친다 — 다시 받지 않는다. 배열이면 args 마다 updater 를 부른다. undefined 면 그 칸을 비워 idle 로 */
+  /** 응답이 실어 온 값으로 바로 고친다 — 다시 받지 않는다. 배열이면 args 마다 updater 를 부른다. undefined 면 그 칸을 비워 idle 로. 낡음은 끄지 않는다 */
   setData(updater: D | undefined | ((prev: D | undefined, args: A) => D | undefined), args?: A | readonly A[]): void;
-  /** 다시 받는다 — args 를 주면 그 칸만(배열이면 그 칸들만, 빈 배열은 아무것도 안 함), 없으면 받아 둔 칸 모두. 실패는 칸의 error 에 둔다 */
-  invalidate(args?: A | readonly A[]): Promise<void>;
+  /**
+   * 무효화한다 — args 를 주면 그 칸만(배열이면 그 칸들만, 빈 배열은 아무것도 안 함), 함수면 참인 칸, 없으면 받아 둔 칸 모두.
+   * 화면이 보는 칸은 곧바로 다시 받고(이것만 기다린다), 보지 않는 칸은 값을 두고 낡음만 표시해 다시 볼 때 · fetch 할 때 받는다.
+   * 실패는 칸의 error 에 둔다
+   */
+  invalidate(args?: A | readonly A[] | ((args: A) => boolean)): Promise<void>;
   /** 받아서 칸에 넣고 값을 돌려준다 — 받는 중이면 끝을 기다려 칸의 값을, 아니고 이미 받은 칸이면 그 값을 바로 준다(체인에서 쓴다). 실패하면 던진다. 배열이면 하나라도 실패할 때 그 오류로 거절한다 */
   fetch(args?: A): Promise<D>;
   fetch(args: readonly A[]): Promise<D[]>;
@@ -75,15 +96,23 @@ export interface MutationView<F extends Fn> {
   mutate(...args: Parameters<F>): void;
   /** 결과를 돌려주고 실패하면 원래 오류를 던진다. error·data 칸도 mutate 와 같이 채운다 */
   mutateAsync(...args: Parameters<F>): Promise<Awaited<ReturnType<F>>>;
+  /** 보냈지만 아직 끝나지 않은 호출들의 인자 — 보낸 차례대로 선다 */
+  readonly inflight: readonly Parameters<F>[];
+  /** 겹에 얹을 호출들의 인자 — inflight 에서 밀려난 호출을 뺀 것 */
+  readonly optimistic: readonly Parameters<F>[];
   pending: boolean;
   error: string | null;
   data: Awaited<ReturnType<F>> | undefined;
   reset(): void;
 }
-/** 정의한 객체에서 query 를 뺀 함수 칸 — 바꾸기 */
-export type Mutations<R> = { [K in keyof R as K extends "query" ? never : R[K] extends Fn ? K : never]: R[K] };
+/** 정의한 객체에서 query 를 뺀 함수 칸 — 정의한 그대로의 바꾸기 함수 */
+type Defined<R> = { [K in keyof R as K extends "query" ? never : R[K] extends Fn ? K : never]: R[K] };
 // & Fn 으로 좁히면 겹친 서명의 마지막인 Fn 이 ReturnType 을 정해 data 가 any 가 된다 — Extract 로 좁힌다
-export type ResourceView<D, R> = QueryView<D> & { [K in keyof Mutations<R>]: MutationView<Extract<Mutations<R>[K], Fn>> };
+/** 바꾸기 — 자원이 상태 칸을 달아 감싼 함수 */
+export type Mutations<R> = { [K in keyof Defined<R>]: MutationFn<Extract<Defined<R>[K], Fn>> };
+export type ResourceView<D, R> = QueryView<D> & { [K in keyof Defined<R>]: MutationView<Extract<Defined<R>[K], Fn>> };
+/** 바꾸기 이름을 열쇠로 그 바꾸기의 콜백(또는 scope)을 적는다 — 없는 이름은 타입 오류다 */
+type ByName<R, H extends keyof MutationHooks<Fn>> = { [K in keyof Defined<R>]?: MutationHooks<Extract<Defined<R>[K], Fn>>[H] };
 type ViewName<D, R> = keyof ResourceView<D, R> & string;
 /** 이 화면이 바로 전 렌더에 보이던 args 와 그 값(select 전 D) */
 export type Prev<A, D> = { args: A; data: D };
@@ -148,6 +177,21 @@ export const keepPreviousData = ((...a: any[]) => {
   return list ? prev.find((p) => JSON.stringify(p.args ?? null) === id)?.data : prev[0]?.data;
 }) as KeepPrevious;
 
+/**
+ * 내용이 같으면 앞 값을, 아니면 새 값을 준다 — 다시 받은 응답이 그대로면 앞 객체를 두어 그것을 읽는 쪽이 깨지 않게 한다.
+ * 둘 다 배열이거나 둘 다 보통 객체일 때만 칸마다 깊이 견준다. Date · Map · 클래스 인스턴스는 Object.is 로만 본다
+ */
+export function keepEqual<T>(prev: T | undefined, next: T): T {
+  return equal(prev, next) ? (prev as T) : next;
+}
+function equal(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => equal(v, b[i]));
+  if (!plain(a) || !plain(b) || Array.isArray(a) || Array.isArray(b)) return false;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => k in b && equal((a as any)[k], (b as any)[k]));
+}
+
 const RESERVED = [...QUERY_FIELDS, "fetch", "getData", "setData", "invalidate"];
 
 interface Cell<A, D> {
@@ -155,7 +199,9 @@ interface Cell<A, D> {
   view: { data: D | undefined; status: Status; error: string | null; isFetching: boolean };
   /** 요청 차례 — 이 차례가 아닌 응답은 버린다 */
   seq: number;
-  inflight?: Promise<D>;
+  request?: Promise<D>;
+  /** 보지 않는 동안 무효화됐다 — 다시 볼 때 · fetch 할 때 받는다 */
+  stale?: boolean;
 }
 
 /**
@@ -180,17 +226,61 @@ export function createResource<A = void, D = never, R extends object = object, S
     select?: (data: D, args: A) => S;
     placeholderData?: PlaceholderData<A, D>;
     refetchInterval?: RefetchInterval<A>;
+    /** 그 args 를 보던 마지막 화면이 빠지고(화면 없이 받았으면 받기가 끝나고) 이만큼(ms) 지나면 칸을 놓는다. 생략 · false 면 쥔다 */
+    release?: number | false;
+    /** 바꾸기가 늦지 않게 성공했을 때 — 결과를 다른 곳에 넘기는 일(setData · emit)은 여기에 적는다 */
+    onSuccess?: ByName<R, "onSuccess">;
+    onError?: ByName<R, "onError">;
+    onSettled?: ByName<R, "onSettled">;
+    onAllSettled?: ByName<R, "onAllSettled">;
+    scope?: ByName<R, "scope">;
   } = {},
 ): Resource<A, D, R, S> {
   const auto = options.auto ?? true;
   const cells = new Map<string, Cell<A, D>>();
   const listeners = new Set<() => void>();
   const idOf = (args: A | undefined) => JSON.stringify(args ?? null);
+  const { release } = options;
+  // 놓기 타이머는 이 자원의 cells 만 본다 — 다시 지은 자원의 칸을 건드리지 않는다
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const letGo = (id: string) => {
+    if (typeof release !== "number") return;
+    clearTimeout(timers.get(id));
+    const timer = setTimeout(() => {
+      timers.delete(id);
+      const cell = cells.get(id);
+      if (!cell || refetcher.watching(cell.args as A)) return;
+      cells.delete(id);
+      // 진행 중 응답은 떨어진 칸에 닿으므로 버려진다 — 주기에도 알리지 않는다. 다시 보면 처음 간격부터
+      cell.seq += 1;
+      cell.request = undefined;
+      refetcher.forget(cell.args as A);
+    }, release);
+    // 서버에서 fetch 로 받은 칸의 타이머가 프로세스를 붙잡지 않게
+    (timer as { unref?: () => void }).unref?.();
+    timers.set(id, timer);
+  };
+  /** 화면도 타이머도 없는 살아 있는 칸이면 지금부터 센다 — 받기가 끝났을 때 · setData 했을 때 */
+  const countIfLoose = (cell: Cell<A, D>) => {
+    const id = idOf(cell.args);
+    if (cells.get(id) === cell && !timers.has(id) && !refetcher.watching(cell.args as A)) letGo(id);
+  };
   const refetcher = createRefetcher<A>({
     resource: options.refetchInterval,
     load: (args) => load(args),
     idOf,
-    inflight: (args) => cells.get(idOf(args))?.inflight,
+    inflight: (args) => cells.get(idOf(args))?.request,
+    // 낡은 칸을 다시 보면 받는다 — 그사이 fetch 가 받는 중이면 그것을 나눠 쓴다
+    onWatch(args) {
+      const id = idOf(args);
+      clearTimeout(timers.get(id));
+      timers.delete(id);
+      const cell = cells.get(id);
+      if (!cell?.stale) return;
+      cell.stale = false;
+      if (cell.view.status !== "idle") load(args).catch(noop);
+    },
+    onUnwatch: (args) => letGo(idOf(args)),
   });
   const cellOf = (args: A | undefined): Cell<A, D> => {
     const id = idOf(args);
@@ -210,21 +300,26 @@ export function createResource<A = void, D = never, R extends object = object, S
   /** 받는다. 진행 중인 요청이 있으면 그것을 나눠 쓰고, force 면 새로 보내 앞 요청의 응답을 버린다 */
   const load = (args: A | undefined, force = false): Promise<D> => {
     const cell = cellOf(args);
-    if (cell.inflight && !force) return cell.inflight;
+    if (cell.request && !force) return cell.request;
     const seq = ++cell.seq;
+    cell.stale = false;
     // 받은 값이 있으면 status · error 는 그대로 두고 isFetching 만 켠다
     write(cell, cell.view.data === undefined ? { status: "loading", error: null, isFetching: true } : { isFetching: true });
     // 실행자는 곧바로 돈다 — query 가 동기로 던져도 거절로 바뀐다
     // 이 칸의 마지막 요청이 끝날 때만 주기에 알린다 — setData 로 응답을 버려도 끝은 알린다
     const end = (ok: boolean, view: Partial<Cell<A, D>["view"]>) => {
-      const last = cell.inflight === request;
-      if (last) cell.inflight = undefined;
+      const last = cell.request === request;
+      if (last) cell.request = undefined;
       const next = { ...(cell.seq === seq ? view : {}), ...(last ? { isFetching: false } : {}) };
       if (Object.keys(next).length) write(cell, next);
       if (last) refetcher.settled(args as A, ok);
+      // 화면 없이 받은 칸은 받기가 끝난 때부터 센다 — 이미 세는 중이면 그대로
+      if (last) countIfLoose(cell);
     };
     const request: Promise<D> = new Promise<D>((resolve) => resolve(query!.call(defined, args as A))).then(
-      (data) => {
+      (fresh) => {
+        // 내용이 같으면 앞 객체를 둔다 — 같은 응답을 다시 받아도 읽는 쪽(화면 · 파생)이 깨지 않는다
+        const data = keepEqual(cell.view.data, fresh);
         end(true, { data, status: "ready", error: null });
         return data;
       },
@@ -233,12 +328,40 @@ export function createResource<A = void, D = never, R extends object = object, S
         throw e;
       },
     );
-    cell.inflight = request;
+    cell.request = request;
     return request;
   };
 
+  /**
+   * 칸마다 하나인 채널 — 계산 공간(파생 · select)이 getData 로 읽으면 적힌다. 파생이 이것을 구독하는 동안은 화면이 칸을 볼 때와 같다:
+   * 비어 있으면 받고(auto), 주기 받기를 걸고, 놓기 타이머를 멈춘다. 칸이 놓여도 채널은 남는다 — 다시 보면 칸이 새로 선다
+   */
+  const channels = new Map<string, Channel>();
+  const channelOf = (args: A | undefined): Channel => {
+    const id = idOf(args);
+    let channel = channels.get(id);
+    if (!channel)
+      channels.set(
+        id,
+        (channel = {
+          subscribe,
+          snapshot: () => cells.get(id)?.view.data,
+          watch() {
+            const stop = refetcher.watch(args as A, undefined);
+            const cell = cellOf(args);
+            if (auto && cell.view.status !== "ready" && !cell.request) load(args).catch(noop);
+            return stop;
+          },
+        }),
+      );
+    return channel;
+  };
   // 목록은 Array.isArray 로 가른다 — 생성기가 args 자체가 배열인 자원을 막는다
-  const getOne = (args: A | undefined) => cells.get(idOf(args))?.view.data;
+  const getOne = (args: A | undefined) => {
+    // 계산 공간 밖(바꾸기 · 콜백)에서 읽으면 채널을 짓지 않는다 — args 마다 쌓이지 않게
+    if (isTracking()) noteRead(channelOf(args));
+    return cells.get(idOf(args))?.view.data;
+  };
   const setOne = (updater: unknown, args: A | undefined) => {
     const cell = cellOf(args);
     const data =
@@ -247,19 +370,28 @@ export function createResource<A = void, D = never, R extends object = object, S
     cell.seq += 1;
     // 값을 비우면(받은 적 없는 목록으로 되돌리기) 처음으로 돌린다 — 버린 응답 탓에 loading 에 갇히지 않고 다음에 다시 받는다
     write(cell, { data, status: data === undefined ? "idle" : "ready", error: null });
+    // setData 로만 만든 칸도 놓인다
+    countIfLoose(cell);
   };
-  const reload = (cell: Cell<A, D>) => (cell.view.status === "idle" ? undefined : load(cell.args, true).catch(noop));
+  // 보는 칸만 곧바로 다시 받고, 보지 않는 칸은 낡음만 표시한다. 받는 중인 칸은 보지 않아도 다시 받는다 —
+  // 무효화 앞에 떠난 응답을 뒤 fetch · 다시 보는 화면이 받지 않게. 그래서 낡은 칸에는 앞서 떠난 요청이 없다
+  const reload = (cell: Cell<A, D>) => {
+    if (cell.view.status === "idle") return;
+    if (cell.request || refetcher.watching(cell.args as A)) return load(cell.args, true).catch(noop);
+    cell.stale = true;
+  };
   const fetchOne = (args: A | undefined) => {
     const cell = cellOf(args);
     // 받는 중이면 끝을 기다려 칸의 값을 준다 — invalidate 뒤 체인이 앞 값을 받지 않게. 그사이 setData 한 값이면 그것이다.
-    // 기다리던 요청을 다른 요청이 밀어냈으면 그것을 다시 기다리고, 그사이 칸을 비웠으면 받은 응답을 준다
+    // 기다리던 요청을 다른 요청이 밀어냈으면 그것을 다시 기다리고, 그사이 칸을 비웠거나 놓았으면 받은 응답을 준다
+    const gone = () => cells.get(idOf(args)) !== cell;
     const wait = (p: Promise<D>): Promise<D> =>
       p.then(
-        (d) => (cell.inflight ? wait(cell.inflight) : cell.view.data === undefined ? d : (cell.view.data as D)),
-        (e) => (cell.inflight ? wait(cell.inflight) : Promise.reject(e)),
+        (d) => (gone() ? d : cell.request ? wait(cell.request) : cell.view.data === undefined ? d : (cell.view.data as D)),
+        (e) => (!gone() && cell.request ? wait(cell.request) : Promise.reject(e)),
       );
-    if (cell.inflight) return wait(cell.inflight);
-    return cell.view.status === "ready" ? Promise.resolve(cell.view.data as D) : load(args);
+    if (cell.request) return wait(cell.request);
+    return cell.view.status === "ready" && !cell.stale ? Promise.resolve(cell.view.data as D) : wait(load(args));
   };
 
   const cache = {
@@ -268,8 +400,15 @@ export function createResource<A = void, D = never, R extends object = object, S
       if (Array.isArray(args)) args.forEach((a) => setOne(updater, a));
       else setOne(updater, args as A | undefined);
     },
-    async invalidate(args?: A | readonly A[]) {
-      const targets = args === undefined ? [...cells.values()] : (Array.isArray(args) ? args : [args]).map((a) => cellOf(a));
+    async invalidate(args?: A | readonly A[] | ((args: A) => boolean)) {
+      // 함수 args 는 생성기가 막으므로 함수면 조건이다. idle 칸은 reload 가 건너뛰므로 조건도 부르지 않는다
+      const targets =
+        args === undefined
+          ? [...cells.values()]
+          : typeof args === "function"
+            ? [...cells.values()].filter((c) => c.view.status !== "idle" && (args as (a: A) => boolean)(c.args as A))
+            : // 받은 적 없는 args 의 칸은 만들지 않는다
+              (Array.isArray(args) ? args : [args]).flatMap((a) => cells.get(idOf(a)) ?? []);
       await Promise.all(targets.map(reload));
     },
     fetch: (args?: A | readonly A[]) => (Array.isArray(args) ? Promise.all(args.map(fetchOne)) : fetchOne(args as A | undefined)),
@@ -277,16 +416,27 @@ export function createResource<A = void, D = never, R extends object = object, S
 
   const defined = define(cache) as Record<string, unknown>;
   const query = defined.query as ((args: A) => Promise<D>) | undefined;
-  const mutations: Record<string, Fn> = {};
+  const mutations: Record<string, ReturnType<typeof createMutation<Fn>>> = {};
+  const hooksOf = (name: string) => {
+    const { onSuccess, onError, onSettled, onAllSettled, scope } = options as Record<string, Record<string, any> | undefined>;
+    return {
+      onSuccess: onSuccess?.[name],
+      onError: onError?.[name],
+      onSettled: onSettled?.[name],
+      onAllSettled: onAllSettled?.[name],
+      scope: scope?.[name],
+    };
+  };
   for (const [name, value] of Object.entries(defined)) {
     if (name === "query" || typeof value !== "function") continue;
     if (RESERVED.includes(name)) throw new Error(`바꾸기 이름으로 쓸 수 없다: ${name}`);
-    mutations[name] = (value as Fn).bind(defined);
+    mutations[name] = createMutation((value as Fn).bind(defined), hooksOf(name));
   }
   const names = Object.keys(mutations);
+  const calls = Object.fromEntries(names.map((name) => [name, mutations[name]!.call]));
 
   const { select, placeholderData } = options;
   const { watch, rearm } = refetcher;
   const useResource = makeResourceHook({ cellOf, load, subscribe, idOf, query, auto, select, placeholderData, mutations, names, watch, rearm });
-  return Object.assign(cache, mutations, { [USE]: useResource }) as unknown as Resource<A, D, R, S>;
+  return Object.assign(cache, calls, { [USE]: useResource }) as unknown as Resource<A, D, R, S>;
 }

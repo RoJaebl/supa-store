@@ -1,3 +1,3 @@
 import type { Plugin } from "vite";
-/** `vite` 가 켜져 있으면 빌드·개발 서버 시작에서 생성 파일을 쓰고, 개발 서버에서는 정의 파일을 감시한다 */
+/** 개발 서버에서 정의 파일(또는 정의 파일이 기대는 모듈)이 바뀌면 페이지 전체를 다시 읽게 한다 */
 export declare function supaStore(): Plugin;

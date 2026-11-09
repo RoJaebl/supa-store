@@ -62,9 +62,15 @@ export function streamHandler(
         // 응답을 아직 돌려주지 않았으면 매달린 약속을 풀어 준다
         if (!started) respond(text(499));
       };
-      const body = new ReadableStream<Uint8Array>({ start: (c) => void (ctl = c), cancel: gone });
+      // 바이트로 세고 highWaterMark 0 — desiredSize 가 곧 −(아직 읽히지 않은 바이트)
+      const body = new ReadableStream<Uint8Array>(
+        { start: (c) => void (ctl = c), cancel: gone },
+        new ByteLengthQueuingStrategy({ highWaterMark: 0 }),
+      );
       const conn: Conn = {
         kind: "sse",
+        // 닫히면 0, 망가지면 null — 어느 쪽도 던지지 않는다
+        buffered: () => 0 - (ctl.desiredSize ?? 0),
         headers: headersOf(req),
         send(m: ServerMessage) {
           if (ended) return;

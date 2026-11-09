@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,8 +10,14 @@ import { supaStore } from "./vite.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 const storeIndex = resolve(here, "../src/index.ts").split("\\").join("/");
 
-const def = (key, body) => `import { createStore } from "supa-store";\ncreateStore("${key}", () => (${body}));`;
-const BAD = `import { createStore } from "supa-store";\ncreateStore("a", () => ({ n: );`;
+// 컴포넌트가 스스로 갱신을 받아 Fast Refresh 경계가 된다 — 장치가 없으면 정의 파일을 고친 갱신도 여기서 받아진다
+const FILES = {
+  "src/util.ts": `export const one = 1;`,
+  "src/a.state.ts": `import { createStore } from "supa-store";\nimport { one } from "./util";\nexport const a = createStore(() => ({ n: one }));`,
+  "src/view.ts": `import { a } from "./a.state";\nimport { one } from "./util";\nexport const v = [a, one];\nimport.meta.hot.accept();`,
+  "src/other.ts": `export const o = 1;\nimport.meta.hot.accept();`,
+  "src/main.ts": `import "./view";\nimport "./other";`,
+};
 
 let root;
 let servers;
@@ -20,129 +26,90 @@ const write = (rel, text) => {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, text);
 };
-const read = (rel) => (existsSync(join(root, rel)) ? readFileSync(join(root, rel), "utf8") : "");
-const GEN = "src/store.gen.ts";
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 조건이 맞을 때까지 50ms 간격으로 최대 5초 기다린다
-async function until(check, message) {
-  for (let i = 0; i < 100; i++) {
-    if (check(read(GEN))) return;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  assert.fail(`${message}\n${read(GEN)}`);
-}
-
-async function start(options = {}) {
-  const errors = [];
+// 서버를 띄우고 client 환경이 보내는 것을 모은다. 모든 모듈을 읽혀 모듈 그래프를 세운다
+async function start() {
   const server = await createServer({
     root,
     configFile: false,
     plugins: [supaStore()],
-    server: { middlewareMode: true },
+    resolve: { alias: { "supa-store": storeIndex } },
+    server: { middlewareMode: true, ws: false },
     logLevel: "silent",
-    customLogger: { info() {}, warn() {}, warnOnce() {}, error: (m) => errors.push(m), clearScreen() {}, hasErrorLogged: () => false, hasWarned: false },
-    ...options,
   });
   servers.push(server);
-  await new Promise((r) => setTimeout(r, 500)); // 감시자가 폴더를 훑기 전의 변경은 놓치므로 기다린다
-  return { server, errors };
+  const sent = [];
+  const hot = server.environments.client.hot;
+  const send = hot.send.bind(hot);
+  hot.send = (payload, ...rest) => {
+    sent.push(typeof payload === "string" ? { type: "custom", event: payload } : payload);
+    return send(payload, ...rest);
+  };
+  for (const rel of Object.keys(FILES)) await server.transformRequest(`/${rel}`);
+  await wait(500); // 감시자가 폴더를 훑기 전의 변경은 놓치므로 기다린다
+  return sent;
+}
+
+// 파일을 고치고 무엇이든 보낼 때까지(최대 5초) 기다린다
+async function edit(sent, rel, text) {
+  write(rel, text);
+  for (let i = 0; i < 100 && !sent.length; i++) await wait(50);
+  assert.ok(sent.length, `${rel} 을 고쳤는데 아무것도 보내지 않았다`);
+  return sent.map((p) => p.type);
 }
 
 beforeEach(() => {
   servers = [];
   root = mkdtempSync(join(tmpdir(), "store-vite-"));
   write("package.json", "{}");
-  write(
-    "tsconfig.json",
-    JSON.stringify({
-      compilerOptions: { strict: true, module: "ESNext", moduleResolution: "Bundler", target: "ES2022", skipLibCheck: true, paths: { "supa-store": [storeIndex] } },
-      include: ["src"],
-    }),
-  );
+  for (const [rel, text] of Object.entries(FILES)) write(rel, text);
 });
 afterEach(async () => {
   await Promise.all(servers.map((s) => s.close()));
   rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
-test("서버를 띄우면 생성 파일을 쓴다", async () => {
-  write("src/a.state.ts", def("a", "{ n: 0 }"));
-  await start();
-  assert.match(read(GEN), /"a":/);
+test("정의 파일을 고치면 full-reload 를 보낸다", async () => {
+  const sent = await start();
+  const types = await edit(sent, "src/a.state.ts", FILES["src/a.state.ts"] + "\n// 고쳤다");
+  assert.deepEqual(types, ["full-reload"]);
 });
 
-test("정의를 더하면 다시 쓴다", async () => {
-  write("src/a.state.ts", def("a", "{ n: 0 }"));
-  await start();
-  write("src/b.state.ts", def("b", "{ n: 0 }"));
-  await until((t) => t.includes('"b":'), "b 가 생기지 않았다");
+test("정의 파일이 import 하는 util 을 고치면 full-reload 를 보낸다", async () => {
+  const sent = await start();
+  const types = await edit(sent, "src/util.ts", `export const one = 2;`);
+  assert.deepEqual(types, ["full-reload"]);
 });
 
-test("정의를 지우면 다시 쓴다", async () => {
-  write("src/a.state.ts", def("a", "{ n: 0 }"));
-  write("src/b.state.ts", def("b", "{ n: 0 }"));
-  await start();
-  rmSync(join(root, "src/a.state.ts"));
-  await until((t) => !t.includes('"a":') && !t.includes("a.state") && t.includes('"b":'), "a 가 사라지지 않았다");
+test("정의와 무관한 컴포넌트를 고치면 full-reload 를 보내지 않는다", async () => {
+  const sent = await start();
+  const types = await edit(sent, "src/other.ts", `export const o = 2;\nimport.meta.hot.accept();`);
+  assert.deepEqual(types, ["update"]);
 });
 
-test("정의를 고치면 타입 글자가 바뀐다", async () => {
-  write("src/a.state.ts", def("a", "{ n: 0 }"));
-  await start();
-  write("src/a.state.ts", def("a", '{ s: "" }'));
-  await until((t) => t.includes("s: string"), "s: string 이 생기지 않았다");
+test("빌드에서는 아무것도 하지 않는다", async () => {
+  await build({
+    root,
+    configFile: false,
+    plugins: [supaStore()],
+    resolve: { alias: { "supa-store": storeIndex } },
+    logLevel: "silent",
+    build: { write: false, rollupOptions: { input: join(root, "src/main.ts") } },
+  });
+  assert.equal(existsSync(join(root, "src/store.gen.ts")), false);
 });
 
-test("감시 중 생성이 실패해도 서버는 살아 있고 고치면 다시 쓴다", async () => {
-  write("src/a.state.ts", def("a", "{ n: 0 }"));
-  const { errors } = await start();
-  const before = read(GEN);
-  write("src/a.state.ts", BAD);
-  for (let i = 0; i < 100 && !errors.length; i++) await new Promise((r) => setTimeout(r, 50));
-  assert.match(errors.join("\n"), /정의 파일의 문법이 깨져/);
-  assert.equal(read(GEN), before);
-  write("src/a.state.ts", def("a", '{ s: "" }'));
-  await until((t) => t.includes("s: string"), "고친 뒤 다시 쓰지 않았다");
-});
-
-test("개발 서버 시작 때 생성이 실패해도 서버는 뜨고 고치면 다시 쓴다", async () => {
-  write("src/a.state.ts", BAD);
-  const { errors } = await start();
-  assert.match(errors.join("\n"), /정의 파일의 문법이 깨져/);
-  write("src/a.state.ts", def("a", "{ n: 0 }"));
-  await until((t) => t.includes('"a":'), "고친 뒤 다시 쓰지 않았다");
-});
-
-test("감시자가 역슬래시 경로를 넘겨도 맞힌다", async (t) => {
-  if (process.platform !== "win32") return t.skip();
-  write("src/a.state.ts", def("a", "{ n: 0 }"));
-  const { server } = await start();
-  write("src/b.state.ts", def("b", "{ n: 0 }"));
-  const path = join(root, "src", "b.state.ts").replace(/\//g, "\\");
-  server.watcher.emit("add", path[0].toUpperCase() + path.slice(1));
-  await until((t) => t.includes('"b":'), "역슬래시 경로로 다시 쓰지 않았다");
-});
-
-test("Vite root 가 src 여도 뿌리를 찾는다", async () => {
-  write("src/a.state.ts", def("a", "{ n: 0 }"));
-  await start({ root: join(root, "src") });
-  assert.match(read(GEN), /"a":/);
-});
-
-test("build 가 먼저 생성하고 생성 실패는 빌드를 실패시킨다", async () => {
-  write("src/a.state.ts", def("a", "{ n: 0 }"));
-  write("src/main.ts", `import "./a.state";\nexport const x = 1;`);
-  const run = () =>
-    build({ root, configFile: false, plugins: [supaStore()], logLevel: "silent", build: { write: false, rollupOptions: { input: join(root, "src/main.ts") } } });
-  await run();
-  assert.match(read(GEN), /"a":/);
-  write("src/a.state.ts", BAD);
-  await assert.rejects(run(), /정의 파일의 문법이 깨져/);
-});
-
-test('targets 에 vite 가 없으면 아무것도 쓰지 않는다', async () => {
-  write("store.config.ts", `export default { targets: ["cli"] };`);
-  write("src/a.state.ts", def("a", "{ n: 0 }"));
-  await start();
-  assert.equal(existsSync(join(root, GEN)), false);
+test("vitest 안에서는 아무것도 하지 않는다", async () => {
+  const before = process.env.VITEST;
+  process.env.VITEST = "true";
+  let sent;
+  try {
+    sent = await start();
+  } finally {
+    if (before === undefined) delete process.env.VITEST;
+    else process.env.VITEST = before;
+  }
+  const types = await edit(sent, "src/a.state.ts", FILES["src/a.state.ts"] + "\n// 고쳤다");
+  assert.deepEqual(types, ["update"]);
 });
