@@ -36,3 +36,26 @@ test("개발 서버가 아닌 단계에서는 nextConfig 를 그대로 돌려준
   const config = { typedRoutes: true };
   assert.equal(withStore(config)("phase-production-build"), config);
 });
+
+const hasRule = (config) =>
+  config.webpack({ module: { rules: [] } }, { dev: true, isServer: false }).module.rules.length === 1;
+
+test("함수형 nextConfig 는 호출한 결과에 같은 감싸기를 건다", () => {
+  const seen = [];
+  const fn = (phase, ctx) => (seen.push([phase, ctx]), { typedRoutes: true });
+  const out = withStore(fn)(DEV, "ctx");
+  assert.deepEqual(seen, [[DEV, "ctx"]]);
+  assert.equal(out.typedRoutes, true);
+  assert.ok(hasRule(out));
+});
+
+test("비동기 함수형 nextConfig 도 풀어서 감싼다", async () => {
+  const out = await withStore(async () => ({ typedRoutes: true }))(DEV, {});
+  assert.equal(out.typedRoutes, true);
+  assert.ok(hasRule(out));
+});
+
+test("함수형 nextConfig 는 개발 서버가 아닌 단계에서 결과를 그대로 돌려준다", () => {
+  const config = { typedRoutes: true };
+  assert.equal(withStore(() => config)("phase-production-build", {}), config);
+});

@@ -4,22 +4,27 @@ import { fileURLToPath } from "node:url";
 
 const LOADER = fileURLToPath(new URL("./decline-loader.cjs", import.meta.url));
 
+function wrap(nextConfig) {
+  return {
+    ...nextConfig,
+    webpack(config, options) {
+      const base = nextConfig?.webpack ? nextConfig.webpack(config, options) : config;
+      if (!options.dev || options.isServer) return base;
+      base.module ??= {};
+      base.module.rules = [
+        ...(base.module.rules ?? []),
+        { test: /\.[cm]?[jt]sx?$/, exclude: /[\/]node_modules[\/]/, loader: LOADER },
+      ];
+      return base;
+    },
+  };
+}
+
 export function withStore(nextConfig) {
-  return (phase) => {
-    // 함수형 설정은 0.6 처럼 그대로 돌려준다 — 감싸려면 호출 결과(Promise 포함)를 풀어야 한다
-    if (phase !== "phase-development-server" || typeof nextConfig === "function") return nextConfig;
-    return {
-      ...nextConfig,
-      webpack(config, options) {
-        const base = nextConfig?.webpack ? nextConfig.webpack(config, options) : config;
-        if (!options.dev || options.isServer) return base;
-        base.module ??= {};
-        base.module.rules = [
-          ...(base.module.rules ?? []),
-          { test: /\.[cm]?[jt]sx?$/, exclude: /[\\/]node_modules[\\/]/, loader: LOADER },
-        ];
-        return base;
-      },
-    };
+  return (phase, ctx) => {
+    // 함수형 설정은 먼저 불러 결과(Promise 일 수 있다)에 같은 감싸기를 건다
+    const resolved = typeof nextConfig === "function" ? nextConfig(phase, ctx) : nextConfig;
+    if (phase !== "phase-development-server") return resolved;
+    return typeof resolved?.then === "function" ? resolved.then(wrap) : wrap(resolved);
   };
 }
