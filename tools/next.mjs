@@ -13,7 +13,7 @@ function wrap(nextConfig) {
       base.module ??= {};
       base.module.rules = [
         ...(base.module.rules ?? []),
-        { test: /\.[cm]?[jt]sx?$/, exclude: /[\/]node_modules[\/]/, loader: LOADER },
+        { test: /\.[cm]?[jt]sx?$/, exclude: /[\\/]node_modules[\\/]/, loader: LOADER },
       ];
       return base;
     },
