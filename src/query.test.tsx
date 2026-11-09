@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { createStore, currentBuild, DISPOSE, disposeStores, getStore, overrideStore, resetStores, type Store } from "./index.js";
-import { createEvent, createResource, keepEqual, type Cache, type MutationFn } from "./query.js";
+import { createEvent, createResource, keepEqual, type Cache, type MutationFn, type Resource } from "./query.js";
 import { useStore } from "./react.js";
 import { track } from "./track.js";
 
@@ -91,7 +91,7 @@ it("event: 풀기 함수는 그 반응을 뗀다", () => {
 });
 it("짓는 동안 건 on 은 overrideStore · resetStores · disposeStores 뒤에도 하나만 돈다", () => {
   const seen: number[] = [];
-  const r = createStore((_s, _g, ctx) => (ctx(ev).on((n) => seen.push(n)), {}));
+  const r = createStore<{}>((_s, _g, ctx) => (ctx(ev).on((n) => seen.push(n)), {}));
   getStore(r).getState();
   overrideStore(r, (_s, _g, ctx) => (ctx(ev).on((n) => seen.push(n * 10)), {}));
   getStore(ev).getState().emit(1);
@@ -105,7 +105,7 @@ it("짓는 동안 건 on 은 overrideStore · resetStores · disposeStores 뒤�
 });
 it("같은 store 가 짓는 동안 on 을 둘 걸면 둘 다 돈다", () => {
   const seen: string[] = [];
-  const r = createStore((_s, _g, ctx) => {
+  const r = createStore<{}>((_s, _g, ctx) => {
     ctx(ev).on(() => seen.push("a"));
     ctx(ev).on(() => seen.push("b"));
     return {};
@@ -116,7 +116,7 @@ it("같은 store 가 짓는 동안 on 을 둘 걸면 둘 다 돈다", () => {
 });
 it("[DISPOSE] 가 던져도 짓는 동안 건 듣기는 떨어진다", () => {
   const seen: number[] = [];
-  const r = createStore((_s, _g, ctx) => (
+  const r = createStore<{ [DISPOSE]: () => void }>((_s, _g, ctx) => (
     ctx(ev).on((n) => seen.push(n)),
     {
       [DISPOSE]: () => {
@@ -133,7 +133,7 @@ it("[DISPOSE] 가 던져도 짓는 동안 건 듣기는 떨어진다", () => {
 });
 it("맡은 정리 함수 하나가 던져도 나머지는 돌고 dispose 는 던지지 않는다", () => {
   const seen: string[] = [];
-  const r = createStore((_s, _g, ctx) => {
+  const r = createStore<{}>((_s, _g, ctx) => {
     currentBuild()!.adopt(() => {
       throw new Error("off");
     });
@@ -150,7 +150,7 @@ it("맡은 정리 함수 하나가 던져도 나머지는 돌고 dispose 는 던
 });
 it("짓다가 던져도 그 동안 건 듣기는 남지 않는다", () => {
   const seen: number[] = [];
-  const r = createStore((_s, _g, ctx) => {
+  const r = createStore<{}>((_s, _g, ctx) => {
     ctx(ev).on((n) => seen.push(n));
     throw new Error("짓기 실패");
   });
@@ -172,18 +172,18 @@ it("짓는 공간 밖의 on 은 둘 다 돌고, 풀기 함수로만 떨어진다
 it("짓는 공간 밖의 exempt 는 던진다", () =>
   expect(() => getStore(ev).getState().exempt("까닭")).toThrow("exempt 는 store 를 짓는 동안에만 부른다"));
 it("같은 store 가 on 과 exempt 를 함께 적으면 던진다(두 순서 모두)", () => {
-  const a = createStore((_s, _g, ctx) => (ctx(ev).on(() => {}), ctx(ev).exempt("까닭"), {}));
+  const a = createStore<{}>((_s, _g, ctx) => (ctx(ev).on(() => {}), ctx(ev).exempt("까닭"), {}));
   expect(() => getStore(a).getState()).toThrow(/이미 on/);
-  const b = createStore((_s, _g, ctx) => (ctx(ev).exempt("까닭"), ctx(ev).on(() => {}), {}));
+  const b = createStore<{}>((_s, _g, ctx) => (ctx(ev).exempt("까닭"), ctx(ev).on(() => {}), {}));
   expect(() => getStore(b).getState()).toThrow(/이미 exempt/);
 });
 it("record 의 who 는 부른 자리의 이름이다", () => {
-  const r = createStore((_s, _g, ctx) => (ctx(ev).on(() => {}), {}));
+  const r = createStore<{}>((_s, _g, ctx) => (ctx(ev).on(() => {}), {}));
   getStore(r).getState();
   expect(getStore(ev).getState().record().on).toEqual([expect.stringMatching(/query\.test\.tsx:\d+$/)]);
 });
 it("record() 는 exempt 도 부른 자리의 이름으로 준다", () => {
-  const r = createStore((_s, _g, ctx) => (ctx(ev).exempt("첫째"), {}));
+  const r = createStore<{}>((_s, _g, ctx) => (ctx(ev).exempt("첫째"), {}));
   getStore(r).getState();
   expect(getStore(ev).getState().record().exempt).toEqual([
     { who: expect.stringMatching(/query\.test\.tsx:\d+$/), why: "첫째" },
@@ -1110,7 +1110,7 @@ it("자원 select 가 ctx 로 읽은 store 가 바뀌면 select 만 다시 돈�
     setWord: (word: string) => set({ word }),
   }));
   const query = vi.fn(async () => ["a1", "b1"]);
-  const key = createStore((_s, _g, ctx) =>
+  const key = createStore<Resource<void, string[], { query: typeof query }>>((_s, _g, ctx) =>
     createResource(() => ({ query }), { select: (d: string[]) => d.filter((s) => s.startsWith(ctx(fkey).word)) }),
   );
   const { result } = renderHook(() => view(key, { pick: ["data"] }));

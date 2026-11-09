@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, expect, expectTypeOf, it, vi } from "vitest";
 import { createStore, getStore, resetStores, type Ctx, type Store } from "./index.js";
-import { createResource, keepPreviousData, type Prev, type QueryView } from "./query.js";
+import { createResource, keepPreviousData, type Prev, type QueryView, type Resource } from "./query.js";
 import { useStore } from "./react.js";
 
 beforeEach(() => resetStores());
@@ -644,7 +644,7 @@ it("두 store 의 select 가 서로를 읽어도 끝없이 다시 돌지 않는�
   // 짓는 것은 처음 꺼낼 때라 creator 가 아직 만들지 않은 짝을 가리켜도 된다
   const both: Store<any>[] = [];
   const pair = (other: number) =>
-    createStore((_set, _get, ctx) =>
+    createStore<Resource<void, number, { query: () => Promise<number>; bump: () => Promise<number> }>>((_set, _get, ctx) =>
       createResource(() => ({ query: async () => 0, bump: () => bumps.fn() }), {
         select: (s: number) => s + ctx(both[other]!).bump.inflight.length,
       }),
@@ -668,7 +668,7 @@ it("두 store 의 select 가 서로를 읽어도 끝없이 다시 돌지 않는�
 });
 it("자원 select 에서 ctx() 로 자기 바꾸기의 inflight 를 읽어 겹을 얹는다", async () => {
   const save = controlled<Accent>();
-  const key = createStore((_set, _get, ctx) =>
+  const key = createStore<Resource<void, Accent, { query: () => Promise<Accent>; patch: (p: Partial<Accent>) => Promise<Accent> }>>((_set, _get, ctx) =>
     createResource(() => ({ query: async (): Promise<Accent> => ({ accent: "blue" }), patch: (p: Partial<Accent>) => save.fn(p) }), {
       select: (s: Accent) => (ctx() as any).patch.inflight.reduce((acc: Accent, [p]: [Partial<Accent>]) => ({ ...acc, ...p }), s),
     }),

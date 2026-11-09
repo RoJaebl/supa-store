@@ -88,7 +88,7 @@ export const saved = createStore(() => createEvent<{ id: string }>());
 
 ### 타입 인자를 적어야 하는 꼴
 
-**creator 가 인자를 하나라도 받으면 상태 타입이 추론되지 않는다.** 쓰지 않는 `_set` 하나만 적어도 같다. TypeScript 가 매개변수의 타입을 정하려고 상태 타입을 먼저 `object` 로 굳히기 때문이다. 그때는 `createStore<Shape>(…)` 로 타입 인자를 적거나, 변수에 `Store<Shape>` 를 적는다.
+**creator 가 인자를 하나라도 받으면 상태 타입이 추론되지 않는다.** 쓰지 않는 `_set` 하나만 적어도 같다. TypeScript 가 매개변수의 타입을 정하려고 상태 타입을 먼저 굳히는데, 그 자리에서 `never` 로 굳어 컴파일 오류가 난다. 그때는 `createStore<Shape>(…)` 로 타입 인자를 적거나, 변수에 `Store<Shape>` 를 적는다.
 
 ```ts
 import { createStore, type Derived, type Store } from "supa-store";
@@ -112,7 +112,7 @@ export const b: Store<{ n: number }> = createStore((_s, _g, ctx) => ({ n: ctx(a)
 ```
 
 - 자원 · 스트림 · 파생도 같다. 인자를 받으면 `Resource<A, D, R>`(`supa-store/query`) · `Stream<V, Cmd>`(`supa-store/stream`) · `Derived<T>`(`supa-store`) 를 적는다. `R` 은 자원에 정의한 객체의 타입이다(바꾸기 함수 칸만 본다).
-- **잊으면 오류 없이 넘어가는 자리가 있다.** 타입 인자를 빠뜨린 핸들은 `Store<object>` 다. 그 creator 안의 `set` 은 아무 객체나 받고, `useStore(handle)` 은 `object` 를 준다. 꺼내는 쪽에서 칸을 읽으면 그제야 타입 오류가 나지만, `set` 으로 쓰기만 하는 store 는 끝까지 아무도 알려 주지 않는다.
+- **오류 문구에 `never` 가 보이면 타입 인자를 적는다.** 인자를 받는 creator 에 타입 인자를 빠뜨리면 상태가 `never` 로 굳어, creator 가 돌려주는 객체가 `never` 에 맞지 않는다는 오류가 난다(`Type '{ … }' is not assignable to type 'never'`). 상태가 정말 비어 있으면 `createStore<{}>(…)` 로 적는다.
 
 ## 세 공간
 
@@ -651,7 +651,7 @@ export default withStore({});
 
 개발 모드에서 webpack loader 하나를 더해 정의 파일이 HMR 갱신을 받지 않게 한다. 받지 않은 갱신은 webpack 이 페이지 전체 다시 읽기로 처리한다. 정의 파일이 기대는 모듈을 고친 경우도 갱신이 정의 파일에서 멈추므로 같다. 빌드에서는 아무것도 더하지 않는다.
 
-- **Turbopack 개발 서버(`next dev --turbopack`)에서는 정의 파일을 고친 뒤 직접 새로 고친다.** loader 가 걸리지 않는다.
+- **Next 16 부터 `next dev` 는 기본으로 Turbopack 을 쓴다.** Turbopack 개발 서버에는 webpack loader 가 걸리지 않는다. 이 막기를 쓰려면 `next dev --webpack` 으로 띄우고, Turbopack 으로 띄우면(Next 15 까지는 `next dev --turbopack`) 정의 파일을 고친 뒤 직접 새로 고친다.
 - Vite 도 Next 도 아니면 장치가 없다. 정의 파일을 고친 뒤 직접 새로 고친다.
 
 **정의 파일은 `supa-store` 에서 `createStore` 를 가져오는 파일로 가린다.** `import { createStore } from "supa-store"`(`as` 로 이름을 바꿔도 된다)와 `import * as s from "supa-store"` 를 알아본다. 아래 꼴은 알아보지 못해, 그 파일을 고쳐도 페이지를 다시 읽지 않는다. store 는 `supa-store` 에서 `createStore` 를 바로 가져와 정의한다.

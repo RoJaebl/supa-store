@@ -250,7 +250,7 @@ it("stream: store 끼리는 ctx(handle).open(...) 으로 부르고 실패하면 
   const stream = adder();
   const s = await serve(stream);
   const key = define({ url: s.url, reduce, commands: { add: {}, bad: {} } });
-  const user = createStore((_set, _get, ctx) => ({
+  const user = createStore<{ add: (v: string) => Promise<unknown>; bad: () => Promise<unknown> }>((_set, _get, ctx) => ({
     add: (v: string) => ctx(key).add(v),
     bad: () => ctx(key).bad(),
   }));

@@ -236,9 +236,10 @@ function rebuild(targets: Iterable<Entry>): void {
 
 /**
  * store 를 등록하고 그것을 가리키는 핸들을 돌려준다. 짓는 것은 처음 꺼낼 때다.
- * 부를 때마다 새 store 다 — 모듈 최상단에서만 부른다. set·get 의 타입은 creator 의 반환 타입에서 온다
+ * 부를 때마다 새 store 다 — 모듈 최상단에서만 부른다. set·get 의 타입은 creator 의 반환 타입에서 온다.
+ * 인자를 받는 creator 는 타입 인자를 적는다 — 빠뜨리면 상태가 never 로 굳어 컴파일 오류가 난다
  */
-export function createStore<S extends object>(creator: CreatorOf<S>): Store<S> {
+export function createStore<S extends object = never>(creator: CreatorOf<S>): Store<S> {
   // stack 은 이 모듈 안에서 만든다 — labelFromStack 이 이 파일의 프레임을 건너뛰고 부른 자리를 읽는다
   const label =
     (process.env.NODE_ENV === "production" ? null : labelFromStack(new Error().stack)) ?? `#${entries.length + 1}`;
@@ -248,8 +249,11 @@ export function createStore<S extends object>(creator: CreatorOf<S>): Store<S> {
   return entry.handle as Store<S>;
 }
 
-/** 처음 등록한 정의 대신 이것으로 짓는다. 그 store 에 기대던 store 도 다시 짓는다 */
-export function overrideStore<S>(store: Store<S>, creator: CreatorOf<S>): void {
+/** 처음 등록한 정의 대신 이것으로 짓는다. 그 store 에 기대던 store 도 다시 짓는다. 시험의 가짜는 일부 칸만 돌려줘도 된다 */
+export function overrideStore<S>(
+  store: Store<S>,
+  creator: (set: SetState<S>, get: GetState<S>, ctx: Ctx<S>) => object,
+): void {
   const entry = entryOf(store);
   entry.override = creator as Creator;
   rebuild([entry]);

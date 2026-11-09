@@ -98,7 +98,7 @@ function makeEvent() {
   return { on: (f: () => void) => void listeners.add(f), emit: () => listeners.forEach((f) => f()) };
 }
 const ev = createStore(makeEvent);
-const listener = createStore((_set, _get, ctx) => {
+const listener = createStore<{}>((_set, _get, ctx) => {
   ctx(ev).on(reaction);
   return {};
 });
@@ -243,13 +243,13 @@ it("dispose: ctx 로 읽은 store 가 다시 지어지면 읽던 store 의 [DISP
 });
 it("ctx() 는 짓기가 끝난 뒤 자기 상태를 준다", () => {
   let self: () => unknown = () => null;
-  const self_ = createStore((_set, _get, ctx) => ({ n: 1, read: () => (self = () => ctx(), ctx()) }));
+  const self_ = createStore<{ n: number; read: () => unknown }>((_set, _get, ctx) => ({ n: 1, read: () => (self = () => ctx(), ctx()) }));
   const state = getStore(self_).getState() as any;
   expect(state.read()).toBe(state);
   expect(self()).toBe(getStore(self_).getState());
 });
 it("짓는 동안 ctx() 를 부르면 정해진 문구로 실패한다", () => {
-  const early = createStore((_set, _get, ctx) => ({ n: (ctx() as any).n }));
+  const early = createStore<{ n: number }>((_set, _get, ctx) => ({ n: (ctx() as any).n }));
   expect(() => getStore(early).getState()).toThrow(/^짓는 동안에는 자기 자신을 꺼낼 수 없다: .*index\.test\.ts:\d+$/);
 });
 
@@ -284,4 +284,34 @@ it("adopt 한 함수는 dispose 때 [DISPOSE] 뒤에 돌고, [DISPOSE] 가 던�
   disposeStores();
   err.mockRestore();
   expect(order).toEqual(["dispose", "off"]);
+});
+
+// 타입 — 인자를 받는 creator 는 타입 인자를 적어야 하고, 빠뜨리면 never 로 오류가 난다
+type Shape = { n: number; inc: () => void };
+it("타입: 인자를 받는 creator 에 타입 인자를 빠뜨리면 컴파일 오류다", () => {
+  // @ts-expect-error 타입 인자를 빠뜨리면 상태가 never 로 굳는다
+  createStore((set) => ({ n: 1, inc: () => set({ n: 2 }) }));
+});
+it("타입: 인자 없는 creator · 매개변수를 적은 creator · 타입 인자 · 변수 타입은 추론된다", () => {
+  const plain = createStore(() => ({ n: 1 }));
+  const typedParams = createStore((set: (p: Partial<Shape>) => void) => ({ n: 1, inc: () => set({ n: 2 }) }));
+  const explicit = createStore<Shape>((set) => ({ n: 1, inc: () => set({ n: 2 }) }));
+  const annotated: Store<Shape> = createStore((set) => ({ n: 1, inc: () => set({ n: 2 }) }));
+  const left: Store<{ n: number }> = createStore((_s, _g, ctx) => ({ n: ctx(right).n + 1 }));
+  const right: Store<{ n: number }> = createStore((_s, _g, ctx) => ({ n: 0, peek: () => ctx(left).n }));
+  const n: number[] = [
+    getStore(plain).getState().n,
+    getStore(typedParams).getState().n,
+    getStore(explicit).getState().n,
+    getStore(annotated).getState().n,
+    getStore(right).getState().n,
+  ];
+  expect(n).toEqual([1, 1, 1, 1, 0]);
+});
+it("타입: overrideStore 의 creator 는 일부 칸만 돌려줘도 되고 set 은 store 의 상태로 적힌다", () => {
+  const big = createStore<{ n: number; ask: () => void; label: string }>((set) => ({ n: 0, ask: () => set({ n: 1 }), label: "" }));
+  overrideStore(big, (set) => ({ ask: () => set({ n: 2 }) }));
+  // @ts-expect-error set 은 여전히 store 의 상태를 본다
+  overrideStore(big, (set) => ({ ask: () => set({ nope: 1 }) }));
+  expect(getStore(big).getState()).not.toHaveProperty("label");
 });
