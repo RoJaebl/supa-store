@@ -59,3 +59,10 @@ test("함수형 nextConfig 는 개발 서버가 아닌 단계에서 결과를 �
   const config = { typedRoutes: true };
   assert.equal(withStore(() => config)("phase-production-build", {}), config);
 });
+
+test("loader 규칙의 exclude 는 두 경로 구분자의 node_modules 를 빼고 소스는 빼지 않는다", () => {
+  const [rule] = withStore({})(DEV).webpack({ module: { rules: [] } }, { dev: true, isServer: false }).module.rules;
+  assert.ok(rule.exclude.test("C:\a\node_modules\b.js"));
+  assert.ok(rule.exclude.test("/a/node_modules/b.js"));
+  assert.ok(!rule.exclude.test("/a/src/b.ts"));
+});
