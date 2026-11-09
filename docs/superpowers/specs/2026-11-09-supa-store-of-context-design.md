@@ -67,7 +67,7 @@ export const todos = createStore.ofContext((ctx) => {
 
 - **이름.** 공개 API 이름은 낱말을 줄이지 않고 쓰는 것이 흔하다(React 의 `createContext` · `useContext`, Svelte 의 `getContext`). 그래서 메서드 이름은 `ofContext` 다. creator 가 받는 인자 이름은 지금처럼 `ctx` 이고 그 타입 이름 `Ctx` 도 그대로다. 사용자가 `ofCtx` 와 `ofContext` 가운데 흔히 쓰이는 쪽으로 정하라고 했다.
 - **`createStore` 에 붙인 메서드다.** 따로 export 하는 함수로 두지 않는다. 그 까닭은 §3.5 의 정의 파일 판정이 그대로 걸리고, import 가 늘지 않으며, 편집기에서 `createStore.` 을 치면 바로 옆에 뜨기 때문이다.
-- **`ctx` 의 타입은 `Ctx` 다(`Ctx<S>` 가 아니다).** 인자 타입이 `S` 에 기대면 순환이 되살아나 추론이 깨진다. 그래서 `ctx()`(자기 자신 읽기)는 `unknown` 을 돌려준다. 자기 자신은 자기 핸들로 `ctx(todos)` 처럼 읽으면 타입이 잡힌다. 두 앱에 `ctx()` 를 쓰는 곳은 없다(2026-11-09 잼, editor 0 곳).
+- **`ctx` 의 타입은 `Ctx` 다(`Ctx<S>` 가 아니다).** 인자 타입이 `S` 에 기대면 순환이 되살아나 추론이 깨진다. 그래서 `ctx()`(자기 자신 읽기)는 `unknown` 을 돌려준다. 자기 자신은 자기 핸들로 `ctx(todos)` 처럼 읽으면 타입이 잡힌다. 두 앱에 `ctx()` 를 쓰는 곳은 없다(2026-11-09 잼, 시험 밖 editor 0 곳 · fortuna-lottery 0 곳).
 - `ctx(handle)` · `ctx(handle, { pick | omit })` 은 0.7 과 같다. 짓는 동안 기댐을 적고, 계산 공간에서 읽은 것을 적고, 파생이면 값을 준다.
 
 ### 3.2 동작
@@ -136,6 +136,10 @@ const rest = useStore(actions, { omit: ["save"] });
 
 0.7.1 이다. 더하기만 하므로 깨지는 것이 없다.
 
+### 3.9 소비자에게 따라오는 것
+
+이 문서의 몫은 아니지만, 소비자가 옮길 때 알아야 할 것이 하나 있다. 호출 모양이 `createStore(…)` 가 아니라 `createStore.ofContext(…)` 이므로, 함수 이름(`callee.name`)으로 `createStore` 호출을 알아보는 lint 규칙은 이 모양도 보도록 고쳐야 한다. editor 의 「모듈 최상단에서만 등록한다」 · 「정의 파일만 등록한다」 규칙이 여기에 든다. editor 이관 설계가 이것을 맡는다.
+
 ## 4. 견준 길
 
 **세 인자에 모두 타입을 적는다(0.7.0 그대로).** `(_s: unknown, _g: unknown, ctx: Ctx) =>` 로 쓰면 추론된다. 라이브러리를 바꾸지 않아도 된다. 대신 정의의 절반에 쓰지 않는 인자 둘과 타입 셋, `import type { Ctx }` 가 붙는다. 사용자가 불편으로 짚어 버렸다.
@@ -154,6 +158,8 @@ const rest = useStore(actions, { omit: ["save"] });
 - `ctx` 만 쓰는 자원에는 맞지 않는다. 자원은 초깃값이 따로 없다.
 - 첫 자리가 언제나 `set` 이라, `(ctx) => …` 로 잘못 쓰면 `ctx(handle)` 이 `set(handle)` 로 오류 없이 지나간다.
 - 덜어 줄 곳이 `set` 을 쓰는 9 곳뿐인데 그 9 곳은 지금 꼴로 추론된다.
+
+**`createStore` 의 타입 기본값을 `never` 대신 `unknown`(또는 `object`)으로 둔다.** 사용자가 대화에서 내놓은 길이다. `unknown` 은 `S extends object` 제약을 지키지 않아 컴파일되지 않고, `object` 로 두면 컴파일은 된다. 하지만 그러면 타입을 깜빡한 정의가 `Store<object>` 가 되어 `set` 이 아무 객체나 받고, 오류가 정의 자리가 아니라 쓰는 자리에서 난다. 0.7 최종 검토가 바로 이 함정을 막으려고 기본값을 `never` 로 바꿨다. 타입을 사용자가 함께 주는 zustand 꼴(`createStore<Shape>(…)`)은 기본값과 상관없이 이미 된다.
 
 **인자 차례를 `(ctx, set, get)` 으로 바꾼다.** `ctx` 의 타입 `Ctx<S>` 가 `S` 에 기대므로 순환이 그대로 남아 추론되지 않는다. 이미 쓴 모든 정의도 고쳐야 한다.
 
