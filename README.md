@@ -5,25 +5,17 @@
 ## 설치
 
 ```sh
-npm i supa-store
+npm i @rojaebl/supa-store
 ```
 
 `react >=18`, `vite >=6`, `next >=14` 는 쓰는 것만 있으면 된다.
 
-npm 판 대신 GitHub 의 커밋을 바로 쓸 수도 있다. 설치할 때 `prepare` 가 `dist/` 를 짓는다. pnpm 이면 그 빌드를 허락한다.
+import 경로를 `supa-store` 로 두고 싶으면 npm 별칭으로 받는다. 번들러 장치는 두 이름을 모두 정의 파일로 알아본다.
 
 ```jsonc
 // package.json
-"supa-store": "github:RoJaebl/supa-store#<커밋>"
+"supa-store": "npm:@rojaebl/supa-store@^0.7.1"
 ```
-
-```yaml
-# pnpm-workspace.yaml — pnpm 11 은 git 의존의 빌드를 받아 온 주소째로 허락받는다(이름만으로는 막는다)
-allowBuilds:
-  "supa-store@https://codeload.github.com/RoJaebl/supa-store/tar.gz/<커밋>": true
-```
-
-커밋을 바꿀 때는 두 자리의 `<커밋>` 을 함께 바꾼다. npm 판이 나오면 `"supa-store": "^0.7.0"` 으로 바꾸고 `allowBuilds` 줄은 지운다.
 
 ## 시작 절차
 
@@ -31,17 +23,17 @@ allowBuilds:
 
 ```ts
 // vite.config.ts
-import { supaStore } from "supa-store/vite";
+import { supaStore } from "@rojaebl/supa-store/vite";
 export default defineConfig({ plugins: [react(), supaStore()] });
 ```
 
 ```js
 // next.config.mjs — 객체든 (async) 함수든 그대로 감싼다
-import { withStore } from "supa-store/next";
+import { withStore } from "@rojaebl/supa-store/next";
 export default withStore({});
 ```
 
-장치는 개발 서버에서 정의 파일(`supa-store` 에서 `createStore` 를 가져오는 파일)이나 정의 파일이 거슬러 기대는 모듈이 바뀌면 페이지 전체를 다시 읽게 한다. 빌드와 vitest 에서는 아무것도 하지 않는다. **걸지 않으면 정의 파일을 고친 뒤 갱신이 Fast Refresh 로 받아져, 정의 모듈이 다시 돌며 같은 store 가 옛것과 새것 둘로 갈라질 수 있다.** 컴포넌트나 presenter 를 고칠 때는 지금처럼 Fast Refresh 가 돈다.
+장치는 개발 서버에서 정의 파일(`@rojaebl/supa-store` 에서 `createStore` 를 가져오는 파일)이나 정의 파일이 거슬러 기대는 모듈이 바뀌면 페이지 전체를 다시 읽게 한다. 빌드와 vitest 에서는 아무것도 하지 않는다. **걸지 않으면 정의 파일을 고친 뒤 갱신이 Fast Refresh 로 받아져, 정의 모듈이 다시 돌며 같은 store 가 옛것과 새것 둘로 갈라질 수 있다.** 컴포넌트나 presenter 를 고칠 때는 지금처럼 Fast Refresh 가 돈다.
 
 ## 정의와 꺼내기
 
@@ -49,7 +41,7 @@ export default withStore({});
 
 ```ts
 // src/count.ts
-import { createStore } from "supa-store";
+import { createStore } from "@rojaebl/supa-store";
 
 type Count = { n: number; inc: () => void };
 export const count = createStore<Count>((set) => ({ n: 1, inc: () => set((s) => ({ n: s.n + 1 })) }));
@@ -57,7 +49,7 @@ export const count = createStore<Count>((set) => ({ n: 1, inc: () => set((s) => 
 
 ```tsx
 // 컴포넌트 — pick 으로 고른 칸이 바뀔 때만 다시 그린다
-import { useStore } from "supa-store/react";
+import { useStore } from "@rojaebl/supa-store/react";
 import { count } from "./count";
 const { n, inc } = useStore(count, { pick: ["n", "inc"] });
 ```
@@ -65,15 +57,15 @@ const { n, inc } = useStore(count, { pick: ["n", "inc"] });
 React 밖에서는 `getStore(handle)` 로 읽고 쓴다. `getState` · `getInitialState` · `setState` · `subscribe` 를 갖고, 다시 지어도(`overrideStore` · `resetStores` · `disposeStores` 뒤) 같은 객체다. 핸들 자체는 store 를 가리키는 표지일 뿐 읽고 쓰는 메서드가 없다.
 
 ```ts
-import { getStore } from "supa-store";
+import { getStore } from "@rojaebl/supa-store";
 getStore(count).getState().inc();
 ```
 
 서버에서 받아 오는 값은 자원으로, store 사이의 알림은 event 로 정의한다.
 
 ```ts
-import { createStore } from "supa-store";
-import { createEvent, createResource } from "supa-store/query";
+import { createStore } from "@rojaebl/supa-store";
+import { createEvent, createResource } from "@rojaebl/supa-store/query";
 
 export const todos = createStore(() =>
   createResource(() => ({
@@ -97,8 +89,8 @@ export const saved = createStore(() => createEvent<{ id: string }>());
 | `set` · `get`(과 `ctx`) | `createStore((set): Shape => …)` 또는 `createStore<Shape>((set) => …)` | 적어 준 `Shape` 다 |
 
 ```ts
-import { createStore, type Store } from "supa-store";
-import { createDerived, createEvent, createResource } from "supa-store/query";
+import { createStore, type Store } from "@rojaebl/supa-store";
+import { createDerived, createEvent, createResource } from "@rojaebl/supa-store/query";
 
 // 인자 없는 creator
 export const todos = createStore(() => createResource(() => ({ query: fetchTodos })));
@@ -127,7 +119,7 @@ export const b: Store<{ n: number }> = createStore.ofContext((ctx) => ({ n: ctx(
 - **`ofContext` 의 `ctx()`(자기 자신 읽기)는 `unknown` 이다.** 자기 타입을 creator 의 인자에 넣으면 추론이 다시 깨지기 때문이다. 콜백(`onSuccess` 같은 것) 안에서는 자기 핸들로 `ctx(todo)` 처럼 읽으면 된다. **자원의 `select` 처럼 돌려주는 값이 자기 자신을 읽는 자리는 자기 핸들로도 안 된다** — 상태 타입이 자기에게 기대는 순환이 되어 추론이 깨진다. 그런 store 는 `ofContext` 가 아니라 타입을 적는 꼴(`createStore<Resource<…>>((_set, _get, ctx) => …)`)로 정의한다. 아래 「바꾸기」의 `appearance` 가 그 예다.
 - `ofContext` 는 `createStore((_set, _get, ctx) => creator(ctx))` 와 같다. 다시 짓기 · 짓는 동안 건 듣기 · `overrideStore` · `useStore` 의 pick · omit · 이름이 모두 `createStore` 로 지은 store 와 같다. `overrideStore` 의 creator 는 `ofContext` 로 지은 store 에도 세 인자 꼴(`(set, get, ctx) => …`)이다.
 - 0.7.0 에서 쓰던 `createStore((_s: unknown, _g: unknown, ctx: Ctx) => …)` 꼴도 그대로 추론된다. 고칠 필요는 없다.
-- 타입 인자로 적을 때 자원 · 스트림 · 파생은 `Resource<A, D, R>`(`supa-store/query`) · `Stream<V, Cmd>`(`supa-store/stream`) · `Derived<T>`(`supa-store`) 다. `R` 은 자원에 정의한 객체의 타입이다(바꾸기 함수 칸만 본다). `ctx` 만 쓰면 `ofContext` 가 이것을 대신 추론한다.
+- 타입 인자로 적을 때 자원 · 스트림 · 파생은 `Resource<A, D, R>`(`@rojaebl/supa-store/query`) · `Stream<V, Cmd>`(`@rojaebl/supa-store/stream`) · `Derived<T>`(`supa-store`) 다. `R` 은 자원에 정의한 객체의 타입이다(바꾸기 함수 칸만 본다). `ctx` 만 쓰면 `ofContext` 가 이것을 대신 추론한다.
 - **오류 문구에 `never` 가 보이면 타입 인자를 적거나, `ctx` 만 쓰면 `ofContext` 로 바꾼다.** 인자를 받는 creator 에 타입 인자를 빠뜨리면 상태가 `never` 로 굳어, creator 가 돌려주는 객체가 `never` 에 맞지 않는다는 오류가 난다(`Type '{ … }' is not assignable to type 'never'`). 상태가 정말 비어 있으면 `createStore<{}>(…)` 로 적는다.
 
 ## 세 공간
@@ -147,8 +139,8 @@ export const b: Store<{ n: number }> = createStore.ofContext((ctx) => ({ n: ctx(
 다른 store 를 읽어 값을 짓는 store 는 `createDerived` 로 정의한다. 계산 함수는 계산 공간에서 돈다.
 
 ```ts
-import { createStore } from "supa-store";
-import { createDerived } from "supa-store/query";
+import { createStore } from "@rojaebl/supa-store";
+import { createDerived } from "@rojaebl/supa-store/query";
 
 export const cartTotal = createStore.ofContext((ctx) =>
   createDerived(() => ctx(cart).items.reduce((sum, item) => sum + item.price * ctx(rate).value, 0)),
@@ -336,7 +328,7 @@ useStore(dirLevel, { args, refetchInterval: (a) => (a.dir === "" ? 10_000 : fals
 받은 값이 없는 동안(받는 중이거나 실패한 뒤) 보일 값을 정한다. 보이는 `data` 가 자리 채운 값이면 `isPlaceholderData` 가 `true` 다. 자리 채운 값은 그 화면에만 보인다.
 
 ```tsx
-import { keepPreviousData } from "supa-store/query";
+import { keepPreviousData } from "@rojaebl/supa-store/query";
 
 useStore(dirLevel, { args: { repo, dir }, placeholderData: [] });                        // 지어낸 값
 useStore(dirLevel, { args: { repo, dir }, placeholderData: keepPreviousData });           // 바로 전 값을 잇는다
@@ -379,7 +371,7 @@ useStore(todos, { select: (titles) => titles.length });                         
 **TanStack 과 다른 점.** supa-store 의 콜백은 밀려난 응답에서 부르지 않는다. 같은 바꾸기에서 나중에 보낸 호출이 성공했으면 앞 호출의 `onSuccess` · `onError` · `onSettled` 는 불리지 않고 `data` · `error` 도 그대로다(그 호출의 `mutateAsync` 는 자기 결과로 끝난다). 이 단위는 화면이 아니라 자원의 바꾸기 이름이어서, 어느 화면 · store 에서 불렀든 같다. `onAllSettled` 는 TanStack 에 없다 — 호출마다가 아니라 그 바꾸기의 모든 호출이 끝났을 때 한 번 돈다.
 
 ```ts
-import type { Cache } from "supa-store/query";
+import type { Cache } from "@rojaebl/supa-store/query";
 
 // 캐시를 직접 읽고 쓴다 — store 안에서는 ctx, 밖에서는 getStore
 ctx(settings).getData();
@@ -437,8 +429,8 @@ export const graph = createStore.ofContext((ctx) => {
 ## 서버와 이어진 연결(createStream)
 
 웹소켓이나 SSE 로 서버와 이어진 값을 store 상태로 꺼낸다. 서버가 처음에 `snapshot` 을 주고 이후 `change` 를 보내면 `reduce` 로 값에 얹는다.
-끊기면 다시 잇고, 빠진 바뀜은 서버의 짧은 기록에서 따라잡는다. 하위 경로 넷: `supa-store/stream`(화면) · `supa-store/server`(정의) ·
-`supa-store/server/node` · `supa-store/server/web`(진입점). 화면 쪽은 런타임 의존이 없다.
+끊기면 다시 잇고, 빠진 바뀜은 서버의 짧은 기록에서 따라잡는다. 하위 경로 넷: `@rojaebl/supa-store/stream`(화면) · `@rojaebl/supa-store/server`(정의) ·
+`@rojaebl/supa-store/server/node` · `@rojaebl/supa-store/server/web`(진입점). 화면 쪽은 런타임 의존이 없다.
 
 ### 클라이언트 정의
 
@@ -446,8 +438,8 @@ export const graph = createStore.ofContext((ctx) => {
 타입은 런타임에 남지 않으므로 이름은 `commands` 가 들고, 빠진 명령은 타입 오류다.
 
 ```ts
-import { createStore } from "supa-store";
-import { createStream } from "supa-store/stream";
+import { createStore } from "@rojaebl/supa-store";
+import { createStream } from "@rojaebl/supa-store/stream";
 
 type Change = { op: "append"; chunk: string };
 type Commands = { open(cwd: string): string; kill(id: string): void };
@@ -512,7 +504,7 @@ await open.mutateAsync("/repo"); // 실패하면 던진다
 ### 서버 정의
 
 ```ts
-import { createStreamServer } from "supa-store/server";
+import { createStreamServer } from "@rojaebl/supa-store/server";
 
 export const terminal = createStreamServer<string, Change>({
   authorize: async (ctx) => (await verify(ctx.token)) ?? ctx.reject("인증 실패"), // 신원을 돌려주거나 거절한다
@@ -546,13 +538,13 @@ Web 진입점은 응답 몸통에 쌓인 양을 잰다 — 런타임이 받는 �
 
 ```ts
 // Node http 서버 — 웹소켓과 SSE 를 같은 주소에서 받는다
-import { attachStream } from "supa-store/server/node";
+import { attachStream } from "@rojaebl/supa-store/server/node";
 const detach = attachStream(httpServer, { path: "/ws/terminal", stream: terminal });
 ```
 
 ```ts
 // Web 표준 — (req: Request) => Promise<Response>. Hono · Next 라우트 · Bun · Deno
-import { streamHandler } from "supa-store/server/web";
+import { streamHandler } from "@rojaebl/supa-store/server/web";
 export const GET = streamHandler(terminal); // SSE
 export const POST = streamHandler(terminal); // 명령 · ask · answer
 ```
@@ -575,7 +567,7 @@ export const POST = streamHandler(terminal); // 명령 · ask · answer
 ### 시험에서
 
 ```ts
-import { disposeStores } from "supa-store";
+import { disposeStores } from "@rojaebl/supa-store";
 afterEach(() => disposeStores()); // 열린 연결을 닫는다(store 는 다음에 꺼낼 때 다시 짓는다)
 ```
 
@@ -584,7 +576,7 @@ afterEach(() => disposeStores()); // 열린 연결을 닫는다(store 는 다음
 ## 프로세스와 다른 서버에 붙기(createJsonRpc)
 
 서버 앱이 띄운 프로세스(언어 서버 · MCP 서버)나 다른 서버에 JSON-RPC 2.0 으로 붙고, 상대가 보낸 알림을 값으로 쌓는다. 끊기면 다시 잇고
-`onConnect` 로 상대와 다시 맞춘다. 하위 경로는 `supa-store/rpc` 하나이고 Node 20 이상의 서버 앱 전용이다(`websocket` 은 `ws` 가 있어야 한다).
+`onConnect` 로 상대와 다시 맞춘다. 하위 경로는 `@rojaebl/supa-store/rpc` 하나이고 Node 20 이상의 서버 앱 전용이다(`websocket` 은 `ws` 가 있어야 한다).
 브라우저는 이 연결에 직접 붙지 않고 0.3 의 홉을 거친다.
 
 ### 정의
@@ -593,8 +585,8 @@ afterEach(() => disposeStores()); // 열린 연결을 닫는다(store 는 다음
 `notifications` 에 한 칸이 있어야 하고, 빠지면 타입 오류다. 요청 함수는 인자를 하나만 받는다(그것이 `params` 가 된다).
 
 ```ts
-import { createStore } from "supa-store";
-import { createJsonRpc, stdio } from "supa-store/rpc";
+import { createStore } from "@rojaebl/supa-store";
+import { createJsonRpc, stdio } from "@rojaebl/supa-store/rpc";
 
 type Note = { method: "textDocument/publishDiagnostics"; params: PublishDiagnosticsParams };
 type Cmd = {
@@ -663,7 +655,7 @@ Next 는 `next.config` 를 `withStore` 로 감싼다. 객체 설정도 (async) �
 
 ```js
 // next.config.mjs
-import { withStore } from "supa-store/next";
+import { withStore } from "@rojaebl/supa-store/next";
 export default withStore({});
 ```
 
@@ -672,11 +664,11 @@ export default withStore({});
 - **Next 16 부터 `next dev` 는 기본으로 Turbopack 을 쓴다.** Turbopack 개발 서버에는 webpack loader 가 걸리지 않는다. 이 막기를 쓰려면 `next dev --webpack` 으로 띄우고, Turbopack 으로 띄우면(Next 15 까지는 `next dev --turbopack`) 정의 파일을 고친 뒤 직접 새로 고친다.
 - Vite 도 Next 도 아니면 장치가 없다. 정의 파일을 고친 뒤 직접 새로 고친다.
 
-**정의 파일은 `supa-store` 에서 `createStore` 를 가져오는 파일로 가린다.** `import { createStore } from "supa-store"`(`as` 로 이름을 바꿔도 된다)와 `import * as s from "supa-store"` 를 알아본다. 아래 꼴은 알아보지 못해, 그 파일을 고쳐도 페이지를 다시 읽지 않는다. store 는 `supa-store` 에서 `createStore` 를 바로 가져와 정의한다.
+**정의 파일은 `@rojaebl/supa-store` 에서 `createStore` 를 가져오는 파일로 가린다.** `import { createStore } from "@rojaebl/supa-store"`(`as` 로 이름을 바꿔도 된다)와 `import * as s from "@rojaebl/supa-store"` 를 알아본다. 아래 꼴은 알아보지 못해, 그 파일을 고쳐도 페이지를 다시 읽지 않는다. store 는 `@rojaebl/supa-store` 에서 `createStore` 를 바로 가져와 정의한다.
 
-- `createStore` 를 다시 내보내는 지역 감싸개(`export { createStore } from "supa-store"`)를 거쳐 가져온 파일
-- 동적 `import("supa-store")`
-- `import def, * as s from "supa-store"` 처럼 기본 가져오기와 이름 공간 가져오기를 한 줄에 적은 꼴
+- `createStore` 를 다시 내보내는 지역 감싸개(`export { createStore } from "@rojaebl/supa-store"`)를 거쳐 가져온 파일
+- 동적 `import("@rojaebl/supa-store")`
+- `import def, * as s from "@rojaebl/supa-store"` 처럼 기본 가져오기와 이름 공간 가져오기를 한 줄에 적은 꼴
 
 ## 0.7.0 에서 옮길 때
 
