@@ -29,7 +29,7 @@ test("묶음을 템플릿에 설치해 번들러 장치만 걸고 개발 서버�
     // 0.6 의 생성기 명령은 묶음에 없다
     assert.ok(!existsSync(join(app, "node_modules/.bin/store-gen")));
     // 0.3 · 0.4 의 하위 경로가 exports 로 풀린다
-    run(`node --input-type=module -e "for (const p of [\\"stream\\", \\"server\\", \\"server/node\\", \\"server/web\\", \\"rpc\\"]) await import(\\"supa-store/\\" + p)"`, app);
+    run(`node --input-type=module -e "for (const p of [\\"stream\\", \\"server\\", \\"server/node\\", \\"server/web\\", \\"rpc\\"]) await import(\\"@rojaebl/supa-store/\\" + p)"`, app);
 
     // 3. 시작 절차 — 번들러 장치 하나
     const file = (rel) => join(app, rel);
@@ -37,22 +37,22 @@ test("묶음을 템플릿에 설치해 번들러 장치만 걸고 개발 서버�
     assert.match(cfg, /plugins: \[react\(\)\]/);
     writeFileSync(
       file("vite.config.ts"),
-      `import { supaStore } from "supa-store/vite";\n${cfg.replace("plugins: [react()]", "plugins: [react(), supaStore()]")}`,
+      `import { supaStore } from "@rojaebl/supa-store/vite";\n${cfg.replace("plugins: [react()]", "plugins: [react(), supaStore()]")}`,
     );
 
     // 4. 정의 하나와 그것을 핸들로 꺼내는 컴포넌트 — creator 가 인자를 받으므로 타입 인자를 적는다
     writeFileSync(
       file("src/count.ts"),
-      `import { createStore } from "supa-store";\nexport const count = createStore<{ n: number; inc: () => void }>((set) => ({ n: 1, inc: () => set((s) => ({ n: s.n + 1 })) }));\n`,
+      `import { createStore } from "@rojaebl/supa-store";\nexport const count = createStore<{ n: number; inc: () => void }>((set) => ({ n: 1, inc: () => set((s) => ({ n: s.n + 1 })) }));\n`,
     );
     writeFileSync(
       file("src/App.tsx"),
-      `import { useStore } from "supa-store/react";\nimport { count } from "./count";\nimport { title } from "./todo";\nexport default function App() {\n  const { n } = useStore(count, { pick: ["n"] });\n  const { read } = useStore(title, { pick: ["read"] });\n  const t: string | undefined = read();\n  return <p id="n" title={t}>n={n}</p>;\n}\n`,
+      `import { useStore } from "@rojaebl/supa-store/react";\nimport { count } from "./count";\nimport { title } from "./todo";\nexport default function App() {\n  const { n } = useStore(count, { pick: ["n"] });\n  const { read } = useStore(title, { pick: ["read"] });\n  const t: string | undefined = read();\n  return <p id="n" title={t}>n={n}</p>;\n}\n`,
     );
     // 자원과 event 도 핸들로 — 그 타입이 node_modules 의 supa-store 를 가리키고, 짓는 동안 on 을 건다
     writeFileSync(
       file("src/todo.ts"),
-      `import { createStore, type Store } from "supa-store";\nimport { createEvent, createResource } from "supa-store/query";\nexport const todo = createStore(() => createResource(() => ({ query: async () => ({ title: "t" }) })));\nexport const saved = createStore(() => createEvent<number>());\nexport const log: Store<{ last: number }> = createStore((set, _get, ctx) => {\n  ctx(saved).on((n) => set({ last: n }));\n  return { last: 0 };\n});\n// ctx 만 쓰는 정의 — 타입 인자 없이 추론된다\nexport const title = createStore.ofContext((ctx) => ({ read: () => ctx(todo).getData()?.title }));\n`,
+      `import { createStore, type Store } from "@rojaebl/supa-store";\nimport { createEvent, createResource } from "@rojaebl/supa-store/query";\nexport const todo = createStore(() => createResource(() => ({ query: async () => ({ title: "t" }) })));\nexport const saved = createStore(() => createEvent<number>());\nexport const log: Store<{ last: number }> = createStore((set, _get, ctx) => {\n  ctx(saved).on((n) => set({ last: n }));\n  return { last: 0 };\n});\n// ctx 만 쓰는 정의 — 타입 인자 없이 추론된다\nexport const title = createStore.ofContext((ctx) => ({ read: () => ctx(todo).getData()?.title }));\n`,
     );
 
     // 5. 개발 서버 — 첫 화면이 상태를 그린다
@@ -68,7 +68,7 @@ test("묶음을 템플릿에 설치해 번들러 장치만 걸고 개발 서버�
     // 브라우저 쪽 묶음에 process 가 날것으로 남아 "process is not defined" 가 나지 않는지
     const base = server.resolvedUrls.local[0];
     await fetch(`${base}src/main.tsx`);
-    const dep = await (await fetch(`${base}node_modules/.vite/deps/supa-store.js`)).text();
+    const dep = await (await fetch(`${base}node_modules/.vite/deps/@rojaebl_supa-store.js`)).text();
     assert.match(dep, /createStore/); // 빈 응답이나 404 로 헛통과하지 않게
     assert.doesNotMatch(dep.replace(/typeof process\s*!==\s*"undefined"\s*&&\s*/g, ""), /\bprocess\b/);
 
