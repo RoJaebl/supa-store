@@ -273,7 +273,7 @@ export function overrideStore<S>(
 
 /**
  * 핸들이 가리키는 store — 핸들이 아니면 `store 핸들이 아니다` 로 실패한다. 다시 지어도 같은 객체다
- * @deprecated 상태를 읽고 동작을 부르는 것은 `Store(handle)` 로 한다. `setState` · `subscribe` · `getInitialState` 가 필요한 자리에만 남긴다
+ * @deprecated `Store(handle)` · `Store.set` · `Store.subscribe` · `Store.initial` 을 쓴다
  */
 export function getStore<S>(store: Store<S>): StoreApi<S> {
   return entryOf(store).api;
@@ -288,8 +288,38 @@ export function Store<S>(store: Store<S>): ReadOf<S>;
 export function Store<S, N extends Names<S>, O extends PickOptions<S, N>>(store: Store<S>, options: O): Picked<S, O>;
 export function Store(store: Store<unknown>, options?: PickFromOptions): unknown {
   const state = entryOf(store).api.getState();
-  if (state && typeof state === "object" && DERIVED in state) return (state as Derived<unknown>).get();
+  if (isDerived(state)) return state.get();
   return pickFrom(state, options);
+}
+
+const isDerived = (state: unknown): state is Derived<unknown> =>
+  !!state && typeof state === "object" && DERIVED in state;
+
+export namespace Store {
+  /** 상태를 얕게 합친다. 함수를 넘기면 지금 상태를 받는다 — 같은 객체를 돌려주면 알리지 않는다 */
+  export function set<S>(store: Store<S>, partial: Partial<S> | ((now: S) => Partial<S>)): void {
+    entryOf(store).api.setState(partial);
+  }
+  /** 처음 지었을 때의 상태 — 다시 지으면(overrideStore · resetStores) 새로 지은 것 */
+  export function initial<S>(store: Store<S>): S {
+    return entryOf(store).api.getInitialState();
+  }
+  /**
+   * 바뀌면 부른다. 파생이면 값이 바뀔 때 부른다. 풀기 함수를 돌려준다.
+   * 파생인지 알려고 store 를 짓는다. 다시 지어도 듣기가 이어진다
+   */
+  export function subscribe<S>(store: Store<S>, listener: () => void): () => void {
+    const api = entryOf(store).api;
+    let inner = () => {};
+    const follow = () => {
+      inner();
+      const state = api.getState();
+      inner = isDerived(state) ? state.subscribe(listener) : () => {};
+    };
+    follow();
+    const off = api.subscribe(() => (follow(), listener()));
+    return () => (off(), inner());
+  }
 }
 
 /** 덮어쓴 정의를 모두 지우고, 전부 무른 뒤 지어져 있던 것을 다시 지어 알린다. 구독자는 남는다 — 시험 사이에 부른다 */

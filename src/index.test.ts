@@ -63,6 +63,22 @@ it("Store(handle, { pick }) 은 고른 칸만 주고 함수 칸은 상태에 묶
   setA(7);
   expect(Store(pair, { omit: ["setA"] })).toEqual({ a: 7, b: 2 });
 });
+it("Store.set 은 얕게 합치고 Store.initial 은 처음 상태를 준다", () => {
+  Store.set(pair, { b: 3 });
+  Store.set(pair, (now) => ({ a: now.b * 2 }));
+  expect(Store(pair)).toMatchObject({ a: 6, b: 3 });
+  expect(Store.initial(pair)).toMatchObject({ a: 1, b: 2 });
+});
+it("Store.subscribe 는 바뀌면 부르고, 다시 지어도 이어지고, 풀면 멈춘다", () => {
+  let calls = 0;
+  const off = Store.subscribe(count, () => calls++);
+  Store(count).add();
+  resetStores();
+  Store(count).add();
+  off();
+  Store(count).add();
+  expect(calls).toBe(3);
+});
 it("Store 는 핸들이 아니면 던진다", () => {
   expect(() => Store("state.test.count" as never)).toThrow("store 핸들이 아니다");
 });

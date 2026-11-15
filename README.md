@@ -62,7 +62,15 @@ Store(count).inc();
 const { n } = Store(count, { pick: ["n"] });
 ```
 
-`setState` · `subscribe` · `getInitialState` 는 `getStore(handle)` 이 준다. 다시 지어도(`overrideStore` · `resetStores` · `disposeStores` 뒤) 같은 객체다. `getStore` 는 deprecated 다 — 상태를 읽고 동작을 부르는 자리는 `Store(handle)` 로 쓴다.
+상태를 직접 쓰고 듣는 것도 같은 이름 아래 있다.
+
+```ts
+Store.set(count, { n: 0 });                  // 얕게 합친다. 함수를 넘기면 지금 상태를 받는다
+const off = Store.subscribe(count, () => {}); // 파생이면 값이 바뀔 때 부른다. 다시 지어도 이어진다
+Store.initial(count);                         // 처음 지었을 때의 상태
+```
+
+`getStore(handle)` 은 deprecated 다. 동작은 그대로다.
 
 서버에서 받아 오는 값은 자원으로, store 사이의 알림은 event 로 정의한다.
 
@@ -675,7 +683,7 @@ export default withStore({});
 
 ## 0.7.1 에서 옮길 때
 
-깨지는 것은 없다. `Store(handle)` 이 더해졌고 `getStore` 는 deprecated 가 되었다. `getStore(x).getState()` 는 `Store(x)` 로 바꾼다. 파생은 `getStore(x).getState().get()` 대신 `Store(x)` 가 값을 준다. `getStore(x).setState(…)` · `getStore(x).subscribe(…)` 는 그대로 둔다.
+깨지는 것은 없다. `Store(handle)` 이 더해졌고 `getStore` 는 deprecated 가 되었다. `getStore(x).getState()` 는 `Store(x)` 로 바꾼다. 파생은 `getStore(x).getState().get()` 대신 `Store(x)` 가 값을 준다. `getStore(x).setState(…)` 는 `Store.set(x, …)`, `getStore(x).subscribe(fn)` 은 `Store.subscribe(x, fn)`, `getStore(x).getInitialState()` 는 `Store.initial(x)` 로 바꾼다. 파생을 들을 때 쓰던 `getStore(x).getState().subscribe(fn)` 도 `Store.subscribe(x, fn)` 이다. 바꾸지 않아도 그대로 돈다.
 
 ## 0.7.0 에서 옮길 때
 

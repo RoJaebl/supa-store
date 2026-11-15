@@ -84,6 +84,21 @@ it("React 밖에서 Store(handle) 로 값을 읽는다", () => {
   expect(getStore(sumStore).getState().get().total).toBe(11);
 });
 
+it("Store.subscribe 는 파생의 값이 바뀔 때 부르고, 다시 지은 뒤에도 따라간다", () => {
+  let calls = 0;
+  const off = Store.subscribe(sumStore, () => calls++);
+  a().inc();
+  expect(calls).toBe(1);
+  overrideStore(sumStore, (_s, _g, ctx) => createDerived(() => ({ total: ctx(aStore).n * 100 })));
+  const afterRebuild = calls;
+  a().inc();
+  expect(calls).toBe(afterRebuild + 1);
+  expect(Store(sumStore).total).toBe(300);
+  off();
+  a().inc();
+  expect(calls).toBe(afterRebuild + 1);
+});
+
 it("compute 는 앞 결과를 prev 로 받는다", () => {
   expect(derived(historyStore).get()).toEqual([1]);
   a().inc();
