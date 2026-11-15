@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { createStore, currentBuild, DISPOSE, disposeStores, getStore, overrideStore, pickFrom, registeredStores, resetStores, type Store } from "./index.js";
+import { createStore, currentBuild, DISPOSE, disposeStores, getStore, overrideStore, pickFrom, registeredStores, resetStores, Store } from "./index.js";
 
 const count = createStore<{ n: number; add: () => void }>((set, get) => ({ n: 0, add: () => set({ n: get().n + 1 }) }));
 const pair = createStore<{ a: number; b: number; setA: (a: number) => void }>((set) => ({ a: 1, b: 2, setA: (a: number) => set({ a }) }));
@@ -52,6 +52,19 @@ it("registeredStores 는 등록한 차례대로 핸들을 준다", () => {
 });
 it("getStore 는 핸들이 아니면 던진다", () => {
   expect(() => getStore("state.test.count" as never)).toThrow("store 핸들이 아니다");
+});
+it("Store(handle) 은 지금 상태를 주고 동작을 부른다", () => {
+  Store(count).add();
+  expect(Store(count).n).toBe(1);
+  expect(Store(count)).toBe(getStore(count).getState());
+});
+it("Store(handle, { pick }) 은 고른 칸만 주고 함수 칸은 상태에 묶는다", () => {
+  const { setA } = Store(pair, { pick: ["setA"] });
+  setA(7);
+  expect(Store(pair, { omit: ["setA"] })).toEqual({ a: 7, b: 2 });
+});
+it("Store 는 핸들이 아니면 던진다", () => {
+  expect(() => Store("state.test.count" as never)).toThrow("store 핸들이 아니다");
 });
 it("같은 creator 로 두 번 부르면 서로 다른 store 다", () => {
   const make = () => ({ n: 0 });

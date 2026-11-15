@@ -1,6 +1,6 @@
 {
   "name": "@rojaebl/supa-store",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "license": "MIT",
   "publishConfig": { "access": "public" },
   "repository": { "type": "git", "url": "git+https://github.com/RoJaebl/supa-store.git" },

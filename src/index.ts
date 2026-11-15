@@ -271,9 +271,25 @@ export function overrideStore<S>(
   rebuild([entry]);
 }
 
-/** 핸들이 가리키는 store — 핸들이 아니면 `store 핸들이 아니다` 로 실패한다. 다시 지어도 같은 객체다 */
+/**
+ * 핸들이 가리키는 store — 핸들이 아니면 `store 핸들이 아니다` 로 실패한다. 다시 지어도 같은 객체다
+ * @deprecated 상태를 읽고 동작을 부르는 것은 `Store(handle)` 로 한다. `setState` · `subscribe` · `getInitialState` 가 필요한 자리에만 남긴다
+ */
 export function getStore<S>(store: Store<S>): StoreApi<S> {
   return entryOf(store).api;
+}
+
+/**
+ * React 밖에서 핸들이 가리키는 store 의 지금 상태를 꺼낸다 — useStore 의 훅 아닌 짝이다.
+ * 파생이면 그 값을 주고, `{ pick }` / `{ omit }` 으로 칸을 고른다. 부르는 순간의 값이고 따라가지 않는다 —
+ * creator 안에서 다른 store 는 `ctx` 로 읽는다
+ */
+export function Store<S>(store: Store<S>): ReadOf<S>;
+export function Store<S, N extends Names<S>, O extends PickOptions<S, N>>(store: Store<S>, options: O): Picked<S, O>;
+export function Store(store: Store<unknown>, options?: PickFromOptions): unknown {
+  const state = entryOf(store).api.getState();
+  if (state && typeof state === "object" && DERIVED in state) return (state as Derived<unknown>).get();
+  return pickFrom(state, options);
 }
 
 /** 덮어쓴 정의를 모두 지우고, 전부 무른 뒤 지어져 있던 것을 다시 지어 알린다. 구독자는 남는다 — 시험 사이에 부른다 */

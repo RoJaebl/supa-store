@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, expect, expectTypeOf, it, vi } from "vitest";
-import { createStore, getStore, overrideStore, resetStores, type Derived, type Store } from "./index.js";
+import { createStore, getStore, overrideStore, resetStores, Store, type Derived } from "./index.js";
 import { createDerived, createResource, type Resource } from "./query.js";
 import { useStore } from "./react.js";
 
@@ -79,7 +79,8 @@ it("useStore 로 꺼내면 값을 준다", () => {
   expect(result.current.total).toBe(12);
 });
 
-it("React 밖에서 getStore(handle).getState().get() 으로 읽는다", () => {
+it("React 밖에서 Store(handle) 로 값을 읽는다", () => {
+  expect(Store(sumStore).total).toBe(11);
   expect(getStore(sumStore).getState().get().total).toBe(11);
 });
 

@@ -54,12 +54,15 @@ import { count } from "./count";
 const { n, inc } = useStore(count, { pick: ["n", "inc"] });
 ```
 
-React 밖에서는 `getStore(handle)` 로 읽고 쓴다. `getState` · `getInitialState` · `setState` · `subscribe` 를 갖고, 다시 지어도(`overrideStore` · `resetStores` · `disposeStores` 뒤) 같은 객체다. 핸들 자체는 store 를 가리키는 표지일 뿐 읽고 쓰는 메서드가 없다.
+React 밖에서는 `Store(handle)` 로 지금 상태를 꺼내 읽고 동작을 부른다. `useStore` 처럼 `{ pick }` · `{ omit }` 으로 칸을 고르고, 파생이면 값을 준다. 부르는 순간의 값이고 따라가지 않는다. 핸들 자체는 store 를 가리키는 표지일 뿐 읽고 쓰는 메서드가 없다.
 
 ```ts
-import { getStore } from "@rojaebl/supa-store";
-getStore(count).getState().inc();
+import { Store } from "@rojaebl/supa-store";
+Store(count).inc();
+const { n } = Store(count, { pick: ["n"] });
 ```
+
+`setState` · `subscribe` · `getInitialState` 는 `getStore(handle)` 이 준다. 다시 지어도(`overrideStore` · `resetStores` · `disposeStores` 뒤) 같은 객체다. `getStore` 는 deprecated 다 — 상태를 읽고 동작을 부르는 자리는 `Store(handle)` 로 쓴다.
 
 서버에서 받아 오는 값은 자원으로, store 사이의 알림은 event 로 정의한다.
 
@@ -130,7 +133,7 @@ export const b: Store<{ n: number }> = createStore.ofContext((ctx) => ({ n: ctx(
 - **동작 · 콜백** — 바꾸기 함수 · `onSuccess` · event 를 받는 함수. 불릴 때 돌고, 그 안의 `ctx` 는 부를 때마다 그 순간을 읽는다.
 - **계산 공간** — `createDerived` 의 계산 함수와 자원 `select`. 그 안에서 `ctx(handle)` 로 읽은 store, `ctx(handle).getData(args)` 로 읽은 자원 칸, 바꾸기 상태가 바뀌면 라이브러리가 다시 부른다. 어느 store 의 `ctx` 로 읽었는지는 가리지 않는다 — 계산 중에 다른 store 의 함수가 자기 `ctx` 로 읽은 것도 입력이다.
 
-짓는 공간 밖(React 밖의 코드 같은 곳)에서 `getStore(saved).getState().on(fn)` 으로 건 듣기는 누구의 것도 아니다. 풀기 함수를 돌려주고, 라이브러리가 떼지 않는다. `exempt` 는 짓는 공간 밖에서 부르면 `exempt 는 store 를 짓는 동안에만 부른다` 로 실패한다. `on` 과 `exempt` 를 같은 store 가 같은 event 에 함께 적으면 오류다.
+짓는 공간 밖(React 밖의 코드 같은 곳)에서 `Store(saved).on(fn)` 으로 건 듣기는 누구의 것도 아니다. 풀기 함수를 돌려주고, 라이브러리가 떼지 않는다. `exempt` 는 짓는 공간 밖에서 부르면 `exempt 는 store 를 짓는 동안에만 부른다` 로 실패한다. `on` 과 `exempt` 를 같은 store 가 같은 event 에 함께 적으면 오류다.
 
 `record()`(event 의 상태에 있다)는 그 event 를 누가 듣고 누가 일부러 듣지 않는지를 `{ on: string[]; exempt: { who; why }[] }` 로 준다. 이름은 아래 「store 의 이름」 절의 꼴이다.
 
@@ -154,7 +157,7 @@ export const todoTitle = createStore.ofContext((ctx) =>
 
 ```tsx
 const total = useStore(cartTotal); // 값 그대로
-getStore(cartTotal).getState().get(); // React 밖
+Store(cartTotal); // React 밖 — 값 그대로
 ```
 
 - 읽은 것이 바뀌면 다시 계산하고, 결과가 `Object.is` 로 앞과 같으면 구독자를 깨우지 않는다.
@@ -175,8 +178,8 @@ export const view = createStore.ofContext((ctx) => createDerived(() => shape(ctx
 ## 정의를 둘 때 지킬 것
 
 - **모듈 최상단에서만 `createStore` 와 `createStore.ofContext` 를 부른다.** 부를 때마다 새 store 가 생긴다. 함수나 컴포넌트 안에서 부르면 부를 때마다 store 가 늘어난다. 라이브러리는 이것을 막지 않는다.
-- **모듈 최상단에서 store 를 꺼내지 않는다.** 최상단의 `getStore(x).getState()` 는 import 순환 안에서 아직 평가되지 않은 핸들을 만날 수 있다. 정의 파일끼리 서로 import 하는 것은 괜찮다. creator 는 처음 꺼낼 때 돌고, 그때는 두 모듈이 모두 평가를 마쳤다.
-- **creator 안에서 다른 store 는 `ctx` 로 읽는다.** `getStore(x)` 로 읽으면 기댐이 적히지 않아 `x` 를 `overrideStore` 해도 다시 지어지지 않고, 파생은 다시 계산하지 않아 오류 없이 낡은 값을 낸다.
+- **모듈 최상단에서 store 를 꺼내지 않는다.** 최상단의 `Store(x)` 는 import 순환 안에서 아직 평가되지 않은 핸들을 만날 수 있다. 정의 파일끼리 서로 import 하는 것은 괜찮다. creator 는 처음 꺼낼 때 돌고, 그때는 두 모듈이 모두 평가를 마쳤다.
+- **creator 안에서 다른 store 는 `ctx` 로 읽는다.** `Store(x)` 로 읽으면 기댐이 적히지 않아 `x` 를 `overrideStore` 해도 다시 지어지지 않고, 파생은 다시 계산하지 않아 오류 없이 낡은 값을 낸다.
 - **시험에서 정의를 바꾸려면 모듈을 다시 읽지 말고 `overrideStore(handle, creator)` 를 쓴다.** `vi.resetModules()` 뒤에 정의 파일을 다시 import 하면 새 store 가 따로 생기고, 옛 store 와 그것이 event 에 건 듣기가 남는다. 덮어쓴 정의는 `resetStores()` 가 지운다.
 
 ## store 의 이름
@@ -373,7 +376,7 @@ useStore(todos, { select: (titles) => titles.length });                         
 ```ts
 import type { Cache } from "@rojaebl/supa-store/query";
 
-// 캐시를 직접 읽고 쓴다 — store 안에서는 ctx, 밖에서는 getStore
+// 캐시를 직접 읽고 쓴다 — store 안에서는 ctx, 밖에서는 Store
 ctx(settings).getData();
 ctx(settings).setData((prev) => ({ ...prev!, theme: "dark" }));
 
@@ -469,7 +472,7 @@ await open.mutateAsync("/repo"); // 실패하면 던진다
 ```
 
 연결의 칸(`data` · `status` · `isFetching` · `error`)과 명령마다의 칸(`mutate` · `mutateAsync` · `pending` · `error` · `data` · `reset` · `retry`)이 있다.
-다른 store 에서는 `getStore(terminal).getState().open("/repo")` 처럼 명령 함수로 부르고, 실패하면 던진다.
+다른 store 에서는 `Store(terminal).open("/repo")` 처럼 명령 함수로 부르고, 실패하면 던진다.
 
 ### 연결 상태
 
@@ -669,6 +672,10 @@ export default withStore({});
 - `createStore` 를 다시 내보내는 지역 감싸개(`export { createStore } from "@rojaebl/supa-store"`)를 거쳐 가져온 파일
 - 동적 `import("@rojaebl/supa-store")`
 - `import def, * as s from "@rojaebl/supa-store"` 처럼 기본 가져오기와 이름 공간 가져오기를 한 줄에 적은 꼴
+
+## 0.7.1 에서 옮길 때
+
+깨지는 것은 없다. `Store(handle)` 이 더해졌고 `getStore` 는 deprecated 가 되었다. `getStore(x).getState()` 는 `Store(x)` 로 바꾼다. 파생은 `getStore(x).getState().get()` 대신 `Store(x)` 가 값을 준다. `getStore(x).setState(…)` · `getStore(x).subscribe(…)` 는 그대로 둔다.
 
 ## 0.7.0 에서 옮길 때
 
