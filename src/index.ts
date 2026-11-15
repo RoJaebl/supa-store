@@ -263,7 +263,7 @@ export namespace createStore {
 
 /**
  * 핸들이 가리키는 store — 핸들이 아니면 `store 핸들이 아니다` 로 실패한다. 다시 지어도 같은 객체다
- * @deprecated `Store(handle)` 과 `Store.setState` · `Store.subscribe` · `Store.getInitialState` 를 쓴다
+ * @deprecated `Store(handle)` 과 `Store.set` · `Store.subscribe` · `Store.getInitial` 을 쓴다
  */
 export function getStore<S>(store: Store<S>): StoreApi<S> {
   return entryOf(store).api;
@@ -287,11 +287,11 @@ const isDerived = (state: unknown): state is Derived<unknown> =>
 
 export namespace Store {
   /** 상태를 얕게 합친다. 함수를 넘기면 지금 상태를 받는다 — 같은 객체를 돌려주면 알리지 않는다 */
-  export function setState<S>(store: Store<S>, partial: Partial<S> | ((now: S) => Partial<S>)): void {
+  export function set<S>(store: Store<S>, partial: Partial<S> | ((now: S) => Partial<S>)): void {
     entryOf(store).api.setState(partial);
   }
-  /** 처음 지었을 때의 상태 — 다시 지으면(Store.override · Store.reset) 새로 지은 것 */
-  export function getInitialState<S>(store: Store<S>): S {
+  /** 처음 지었을 때의 상태를 돌려준다. 바꾸지 않는다 — 다시 지으면(Store.override · Store.reset) 새로 지은 것 */
+  export function getInitial<S>(store: Store<S>): S {
     return entryOf(store).api.getInitialState();
   }
   /**

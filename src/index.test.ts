@@ -63,11 +63,11 @@ it("Store(handle, { pick }) 은 고른 칸만 주고 함수 칸은 상태에 묶
   setA(7);
   expect(Store(pair, { omit: ["setA"] })).toEqual({ a: 7, b: 2 });
 });
-it("Store.setState 는 얕게 합치고 Store.getInitialState 는 처음 상태를 준다", () => {
-  Store.setState(pair, { b: 3 });
-  Store.setState(pair, (now) => ({ a: now.b * 2 }));
+it("Store.set 은 얕게 합치고 Store.getInitial 은 처음 상태를 준다", () => {
+  Store.set(pair, { b: 3 });
+  Store.set(pair, (now) => ({ a: now.b * 2 }));
   expect(Store(pair)).toMatchObject({ a: 6, b: 3 });
-  expect(Store.getInitialState(pair)).toMatchObject({ a: 1, b: 2 });
+  expect(Store.getInitial(pair)).toMatchObject({ a: 1, b: 2 });
 });
 it("Store.subscribe 는 바뀌면 부르고, 다시 지어도 이어지고, 풀면 멈춘다", () => {
   let calls = 0;

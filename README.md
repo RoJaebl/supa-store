@@ -65,9 +65,9 @@ const { n } = Store(count, { pick: ["n"] });
 상태를 직접 쓰고 듣는 것도 같은 이름 아래 있다.
 
 ```ts
-Store.setState(count, { n: 0 });            // 얕게 합친다. 함수를 넘기면 지금 상태를 받는다
+Store.set(count, { n: 0 });                  // 얕게 합친다. 함수를 넘기면 지금 상태를 받는다
 const off = Store.subscribe(count, () => {}); // 파생이면 값이 바뀔 때 부른다. 다시 지어도 이어진다
-Store.getInitialState(count);               // 처음 지었을 때의 상태
+Store.getInitial(count);                     // 처음 지었을 때의 상태
 ```
 
 `getStore(handle)` 은 deprecated 다. 동작은 그대로다.
@@ -683,7 +683,7 @@ export default withStore({});
 
 ## 0.7.1 에서 옮길 때
 
-깨지는 것은 없다. `Store(handle)` 이 더해졌고 `getStore` 는 deprecated 가 되었다. `getStore(x).getState()` 는 `Store(x)` 로 바꾼다. 파생은 `getStore(x).getState().get()` 대신 `Store(x)` 가 값을 준다. `getStore(x).setState(…)` 는 `Store.setState(x, …)`, `getStore(x).subscribe(fn)` 은 `Store.subscribe(x, fn)`, `getStore(x).getInitialState()` 는 `Store.getInitialState(x)` 로 바꾼다. 파생을 들을 때 쓰던 `getStore(x).getState().subscribe(fn)` 도 `Store.subscribe(x, fn)` 이다. `overrideStore` · `resetStores` · `disposeStores` · `registeredStores` 는 `Store.override` · `Store.reset` · `Store.dispose` · `Store.registered` 로 바꾼다. 옛 이름은 deprecated 로 남아 같은 함수를 가리킨다. 바꾸지 않아도 그대로 돈다.
+깨지는 것은 없다. `Store(handle)` 이 더해졌고 `getStore` 는 deprecated 가 되었다. `getStore(x).getState()` 는 `Store(x)` 로 바꾼다. 파생은 `getStore(x).getState().get()` 대신 `Store(x)` 가 값을 준다. `getStore(x).setState(…)` 는 `Store.set(x, …)`, `getStore(x).subscribe(fn)` 은 `Store.subscribe(x, fn)`, `getStore(x).getInitialState()` 는 `Store.getInitial(x)` 로 바꾼다. 파생을 들을 때 쓰던 `getStore(x).getState().subscribe(fn)` 도 `Store.subscribe(x, fn)` 이다. `overrideStore` · `resetStores` · `disposeStores` · `registeredStores` 는 `Store.override` · `Store.reset` · `Store.dispose` · `Store.registered` 로 바꾼다. 옛 이름은 deprecated 로 남아 같은 함수를 가리킨다. 바꾸지 않아도 그대로 돈다.
 
 ## 0.7.0 에서 옮길 때
 
