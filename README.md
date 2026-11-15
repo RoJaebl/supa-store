@@ -54,12 +54,23 @@ import { count } from "./count";
 const { n, inc } = useStore(count, { pick: ["n", "inc"] });
 ```
 
-React 밖에서는 `getStore(handle)` 로 읽고 쓴다. `getState` · `getInitialState` · `setState` · `subscribe` 를 갖고, 다시 지어도(`overrideStore` · `resetStores` · `disposeStores` 뒤) 같은 객체다. 핸들 자체는 store 를 가리키는 표지일 뿐 읽고 쓰는 메서드가 없다.
+React 밖에서는 `Store(handle)` 로 지금 상태를 꺼내 읽고 동작을 부른다. `useStore` 처럼 `{ pick }` · `{ omit }` 으로 칸을 고르고, 파생이면 값을 준다. 부르는 순간의 값이고 따라가지 않는다. 핸들 자체는 store 를 가리키는 표지일 뿐 읽고 쓰는 메서드가 없다.
 
 ```ts
-import { getStore } from "@rojaebl/supa-store";
-getStore(count).getState().inc();
+import { Store } from "@rojaebl/supa-store";
+Store(count).inc();
+const { n } = Store(count, { pick: ["n"] });
 ```
+
+상태를 직접 쓰고 듣는 것도 같은 이름 아래 있다.
+
+```ts
+Store.set(count, { n: 0 });                  // 얕게 합친다. 함수를 넘기면 지금 상태를 받는다
+const off = Store.subscribe(count, () => {}); // 파생이면 값이 바뀔 때 부른다. 다시 지어도 이어진다
+Store.getInitial(count);                     // 처음 지었을 때의 상태
+```
+
+`getStore(handle)` 은 deprecated 다. 동작은 그대로다.
 
 서버에서 받아 오는 값은 자원으로, store 사이의 알림은 event 로 정의한다.
 
@@ -117,7 +128,7 @@ export const b: Store<{ n: number }> = createStore.ofContext((ctx) => ({ n: ctx(
 ```
 
 - **`ofContext` 의 `ctx()`(자기 자신 읽기)는 `unknown` 이다.** 자기 타입을 creator 의 인자에 넣으면 추론이 다시 깨지기 때문이다. 콜백(`onSuccess` 같은 것) 안에서는 자기 핸들로 `ctx(todo)` 처럼 읽으면 된다. **자원의 `select` 처럼 돌려주는 값이 자기 자신을 읽는 자리는 자기 핸들로도 안 된다** — 상태 타입이 자기에게 기대는 순환이 되어 추론이 깨진다. 그런 store 는 `ofContext` 가 아니라 타입을 적는 꼴(`createStore<Resource<…>>((_set, _get, ctx) => …)`)로 정의한다. 아래 「바꾸기」의 `appearance` 가 그 예다.
-- `ofContext` 는 `createStore((_set, _get, ctx) => creator(ctx))` 와 같다. 다시 짓기 · 짓는 동안 건 듣기 · `overrideStore` · `useStore` 의 pick · omit · 이름이 모두 `createStore` 로 지은 store 와 같다. `overrideStore` 의 creator 는 `ofContext` 로 지은 store 에도 세 인자 꼴(`(set, get, ctx) => …`)이다.
+- `ofContext` 는 `createStore((_set, _get, ctx) => creator(ctx))` 와 같다. 다시 짓기 · 짓는 동안 건 듣기 · `Store.override` · `useStore` 의 pick · omit · 이름이 모두 `createStore` 로 지은 store 와 같다. `Store.override` 의 creator 는 `ofContext` 로 지은 store 에도 세 인자 꼴(`(set, get, ctx) => …`)이다.
 - 0.7.0 에서 쓰던 `createStore((_s: unknown, _g: unknown, ctx: Ctx) => …)` 꼴도 그대로 추론된다. 고칠 필요는 없다.
 - 타입 인자로 적을 때 자원 · 스트림 · 파생은 `Resource<A, D, R>`(`@rojaebl/supa-store/query`) · `Stream<V, Cmd>`(`@rojaebl/supa-store/stream`) · `Derived<T>`(`supa-store`) 다. `R` 은 자원에 정의한 객체의 타입이다(바꾸기 함수 칸만 본다). `ctx` 만 쓰면 `ofContext` 가 이것을 대신 추론한다.
 - **오류 문구에 `never` 가 보이면 타입 인자를 적거나, `ctx` 만 쓰면 `ofContext` 로 바꾼다.** 인자를 받는 creator 에 타입 인자를 빠뜨리면 상태가 `never` 로 굳어, creator 가 돌려주는 객체가 `never` 에 맞지 않는다는 오류가 난다(`Type '{ … }' is not assignable to type 'never'`). 상태가 정말 비어 있으면 `createStore<{}>(…)` 로 적는다.
@@ -126,11 +137,11 @@ export const b: Store<{ n: number }> = createStore.ofContext((ctx) => ({ n: ctx(
 
 **최신 값이 필요하면 클로저 안에서 `ctx` 로 읽는다.** 정의 안의 코드는 세 공간 가운데 하나에서 돈다.
 
-- **짓는 공간** — 정의 함수의 본문. store 를 처음 꺼낼 때 한 번 돌아 인스턴스된 값을 짓는다. 여기서 읽은 값은 다시 지을 때까지 그대로이므로, 이 자리에서는 event 를 잇기만 한다(`ctx(saved).on(fn)`). 여기서 건 듣기는 지금 짓는 store 의 것이 되고, 그 store 를 버릴 때(`overrideStore` · `resetStores` · `disposeStores` 의 다시 짓기) 라이브러리가 뗀다. 그래서 다시 지어도 듣기가 겹치지 않는다. 일부러 듣지 않는다는 결정은 `ctx(saved).exempt("까닭")` 으로 남긴다.
+- **짓는 공간** — 정의 함수의 본문. store 를 처음 꺼낼 때 한 번 돌아 인스턴스된 값을 짓는다. 여기서 읽은 값은 다시 지을 때까지 그대로이므로, 이 자리에서는 event 를 잇기만 한다(`ctx(saved).on(fn)`). 여기서 건 듣기는 지금 짓는 store 의 것이 되고, 그 store 를 버릴 때(`Store.override` · `Store.reset` · `Store.dispose` 의 다시 짓기) 라이브러리가 뗀다. 그래서 다시 지어도 듣기가 겹치지 않는다. 일부러 듣지 않는다는 결정은 `ctx(saved).exempt("까닭")` 으로 남긴다.
 - **동작 · 콜백** — 바꾸기 함수 · `onSuccess` · event 를 받는 함수. 불릴 때 돌고, 그 안의 `ctx` 는 부를 때마다 그 순간을 읽는다.
 - **계산 공간** — `createDerived` 의 계산 함수와 자원 `select`. 그 안에서 `ctx(handle)` 로 읽은 store, `ctx(handle).getData(args)` 로 읽은 자원 칸, 바꾸기 상태가 바뀌면 라이브러리가 다시 부른다. 어느 store 의 `ctx` 로 읽었는지는 가리지 않는다 — 계산 중에 다른 store 의 함수가 자기 `ctx` 로 읽은 것도 입력이다.
 
-짓는 공간 밖(React 밖의 코드 같은 곳)에서 `getStore(saved).getState().on(fn)` 으로 건 듣기는 누구의 것도 아니다. 풀기 함수를 돌려주고, 라이브러리가 떼지 않는다. `exempt` 는 짓는 공간 밖에서 부르면 `exempt 는 store 를 짓는 동안에만 부른다` 로 실패한다. `on` 과 `exempt` 를 같은 store 가 같은 event 에 함께 적으면 오류다.
+짓는 공간 밖(React 밖의 코드 같은 곳)에서 `Store(saved).on(fn)` 으로 건 듣기는 누구의 것도 아니다. 풀기 함수를 돌려주고, 라이브러리가 떼지 않는다. `exempt` 는 짓는 공간 밖에서 부르면 `exempt 는 store 를 짓는 동안에만 부른다` 로 실패한다. `on` 과 `exempt` 를 같은 store 가 같은 event 에 함께 적으면 오류다.
 
 `record()`(event 의 상태에 있다)는 그 event 를 누가 듣고 누가 일부러 듣지 않는지를 `{ on: string[]; exempt: { who; why }[] }` 로 준다. 이름은 아래 「store 의 이름」 절의 꼴이다.
 
@@ -154,7 +165,7 @@ export const todoTitle = createStore.ofContext((ctx) =>
 
 ```tsx
 const total = useStore(cartTotal); // 값 그대로
-getStore(cartTotal).getState().get(); // React 밖
+Store(cartTotal); // React 밖 — 값 그대로
 ```
 
 - 읽은 것이 바뀌면 다시 계산하고, 결과가 `Object.is` 로 앞과 같으면 구독자를 깨우지 않는다.
@@ -175,9 +186,9 @@ export const view = createStore.ofContext((ctx) => createDerived(() => shape(ctx
 ## 정의를 둘 때 지킬 것
 
 - **모듈 최상단에서만 `createStore` 와 `createStore.ofContext` 를 부른다.** 부를 때마다 새 store 가 생긴다. 함수나 컴포넌트 안에서 부르면 부를 때마다 store 가 늘어난다. 라이브러리는 이것을 막지 않는다.
-- **모듈 최상단에서 store 를 꺼내지 않는다.** 최상단의 `getStore(x).getState()` 는 import 순환 안에서 아직 평가되지 않은 핸들을 만날 수 있다. 정의 파일끼리 서로 import 하는 것은 괜찮다. creator 는 처음 꺼낼 때 돌고, 그때는 두 모듈이 모두 평가를 마쳤다.
-- **creator 안에서 다른 store 는 `ctx` 로 읽는다.** `getStore(x)` 로 읽으면 기댐이 적히지 않아 `x` 를 `overrideStore` 해도 다시 지어지지 않고, 파생은 다시 계산하지 않아 오류 없이 낡은 값을 낸다.
-- **시험에서 정의를 바꾸려면 모듈을 다시 읽지 말고 `overrideStore(handle, creator)` 를 쓴다.** `vi.resetModules()` 뒤에 정의 파일을 다시 import 하면 새 store 가 따로 생기고, 옛 store 와 그것이 event 에 건 듣기가 남는다. 덮어쓴 정의는 `resetStores()` 가 지운다.
+- **모듈 최상단에서 store 를 꺼내지 않는다.** 최상단의 `Store(x)` 는 import 순환 안에서 아직 평가되지 않은 핸들을 만날 수 있다. 정의 파일끼리 서로 import 하는 것은 괜찮다. creator 는 처음 꺼낼 때 돌고, 그때는 두 모듈이 모두 평가를 마쳤다.
+- **creator 안에서 다른 store 는 `ctx` 로 읽는다.** `Store(x)` 로 읽으면 기댐이 적히지 않아 `x` 를 `Store.override` 해도 다시 지어지지 않고, 파생은 다시 계산하지 않아 오류 없이 낡은 값을 낸다.
+- **시험에서 정의를 바꾸려면 모듈을 다시 읽지 말고 `Store.override(handle, creator)` 를 쓴다.** `vi.resetModules()` 뒤에 정의 파일을 다시 import 하면 새 store 가 따로 생기고, 옛 store 와 그것이 event 에 건 듣기가 남는다. 덮어쓴 정의는 `Store.reset()` 가 지운다.
 
 ## store 의 이름
 
@@ -185,7 +196,7 @@ store 에 사람이 붙이는 이름은 없다. 오류 문구와 `record()` 에�
 
 - 이 이름으로 store 를 찾는 API 는 없다. 핸들에도 이름 칸이 없다.
 - **`record()` 를 견줄 때 이름을 문자열로 박지 않는다.** 줄 번호는 그 파일을 고치면 바뀐다. 수(`record().on.length`)나 포함 여부(`expect.stringContaining("todo.ts")`)로 견준다.
-- `registeredStores()` 는 등록한 핸들을 등록한 차례대로 준다. 다시 이어졌을 때 모든 자원을 낡게 하는 것처럼 앱 전체에 거는 일에 쓴다. 어느 한 store 를 골라내는 길이 아니다.
+- `Store.registered()` 는 등록한 핸들을 등록한 차례대로 준다. 다시 이어졌을 때 모든 자원을 낡게 하는 것처럼 앱 전체에 거는 일에 쓴다. 어느 한 store 를 골라내는 길이 아니다.
 
 ## 자원 더 쓰기
 
@@ -373,7 +384,7 @@ useStore(todos, { select: (titles) => titles.length });                         
 ```ts
 import type { Cache } from "@rojaebl/supa-store/query";
 
-// 캐시를 직접 읽고 쓴다 — store 안에서는 ctx, 밖에서는 getStore
+// 캐시를 직접 읽고 쓴다 — store 안에서는 ctx, 밖에서는 Store
 ctx(settings).getData();
 ctx(settings).setData((prev) => ({ ...prev!, theme: "dark" }));
 
@@ -469,7 +480,7 @@ await open.mutateAsync("/repo"); // 실패하면 던진다
 ```
 
 연결의 칸(`data` · `status` · `isFetching` · `error`)과 명령마다의 칸(`mutate` · `mutateAsync` · `pending` · `error` · `data` · `reset` · `retry`)이 있다.
-다른 store 에서는 `getStore(terminal).getState().open("/repo")` 처럼 명령 함수로 부르고, 실패하면 던진다.
+다른 store 에서는 `Store(terminal).open("/repo")` 처럼 명령 함수로 부르고, 실패하면 던진다.
 
 ### 연결 상태
 
@@ -567,11 +578,11 @@ export const POST = streamHandler(terminal); // 명령 · ask · answer
 ### 시험에서
 
 ```ts
-import { disposeStores } from "@rojaebl/supa-store";
-afterEach(() => disposeStores()); // 열린 연결을 닫는다(store 는 다음에 꺼낼 때 다시 짓는다)
+import { Store } from "@rojaebl/supa-store";
+afterEach(() => Store.dispose()); // 열린 연결을 닫는다(store 는 다음에 꺼낼 때 다시 짓는다)
 ```
 
-`disposeStores()` 는 그려져 있는 화면을 다시 그리지 않는다 — 시험의 뒷정리에 쓴다.
+`Store.dispose()` 는 그려져 있는 화면을 다시 그리지 않는다 — 시험의 뒷정리에 쓴다.
 
 ## 프로세스와 다른 서버에 붙기(createJsonRpc)
 
@@ -670,6 +681,10 @@ export default withStore({});
 - 동적 `import("@rojaebl/supa-store")`
 - `import def, * as s from "@rojaebl/supa-store"` 처럼 기본 가져오기와 이름 공간 가져오기를 한 줄에 적은 꼴
 
+## 0.7.1 에서 옮길 때
+
+깨지는 것은 없다. `Store(handle)` 이 더해졌고 `getStore` 는 deprecated 가 되었다. `getStore(x).getState()` 는 `Store(x)` 로 바꾼다. 파생은 `getStore(x).getState().get()` 대신 `Store(x)` 가 값을 준다. `getStore(x).setState(…)` 는 `Store.set(x, …)`, `getStore(x).subscribe(fn)` 은 `Store.subscribe(x, fn)`, `getStore(x).getInitialState()` 는 `Store.getInitial(x)` 로 바꾼다. 파생을 들을 때 쓰던 `getStore(x).getState().subscribe(fn)` 도 `Store.subscribe(x, fn)` 이다. `overrideStore` · `resetStores` · `disposeStores` · `registeredStores` 는 `Store.override` · `Store.reset` · `Store.dispose` · `Store.registered` 로 바꾼다. 옛 이름은 deprecated 로 남아 같은 함수를 가리킨다. 바꾸지 않아도 그대로 돈다.
+
 ## 0.7.0 에서 옮길 때
 
 깨지는 것은 없다. `createStore.ofContext` 가 더해졌다. `ctx` 만 쓰려고 `createStore<Resource<…>>((_set, _get, ctx) => …)` 처럼 타입 인자를 적었거나 `(_s: unknown, _g: unknown, ctx: Ctx) =>` 로 적은 정의는 `createStore.ofContext((ctx) => …)` 로 바꾸면 타입을 지울 수 있다. 바꾸지 않아도 그대로 돈다.
@@ -679,12 +694,12 @@ export default withStore({});
 store 를 key 대신 `createStore` 가 돌려주는 핸들로 가리킨다. 생성 파일 · 설정 파일 · tsserver 플러그인이 없어졌다.
 
 - `createStore("k", creator)` 는 `export const k = createStore(creator)` 로 바꾼다. creator 가 인자를 받으면 타입 인자를 적는다(위 「타입 인자를 적어야 하는 꼴」 절)
-- `useStore("k", …)` · `ctx("k", …)` · `getStore("k")` · `overrideStore("k", …)` 는 핸들을 받는다 — `useStore(k, …)` · `ctx(k, …)` · `getStore(k)` · `overrideStore(k, …)`
+- `useStore("k", …)` · `ctx("k", …)` · `getStore("k")` · `Store.override("k", …)` 는 핸들을 받는다 — `useStore(k, …)` · `ctx(k, …)` · `getStore(k)` · `Store.override(k, …)`
 - `.on(ctx.key, fn)` 은 `.on(fn)` 으로, `.exempt(ctx.key, why)` 는 `.exempt(why)` 로 바꾼다. `ctx.key` 는 없다
-- `registeredKeys()` 는 `registeredStores()` 로 바꾼다. 문자열 대신 핸들을 준다
+- `registeredKeys()` 는 `Store.registered()` 로 바꾼다. 문자열 대신 핸들을 준다
 - 생성 파일(`store.gen.ts`)과 그 import, `store.config.ts`, tsconfig 의 `{ "name": "supa-store/plugin" }` 항목, `store-gen` 을 부르는 스크립트를 지운다. 번들러 장치(`supaStore()` · `withStore`)는 남긴다
 - 닫힌 key(`_` 로 시작하는 key)는 export 경계로 바꾼다 — 닫을 store 의 핸들을 export 하지 않는다
-- `vi.resetModules()` 뒤 정의 파일을 다시 import 해 정의를 갈아 끼우던 시험은 `overrideStore` 로 바꾼다. 0.7 은 다시 읽은 모듈을 새 store 로 등록한다
+- `vi.resetModules()` 뒤 정의 파일을 다시 import 해 정의를 갈아 끼우던 시험은 `Store.override` 로 바꾼다. 0.7 은 다시 읽은 모듈을 새 store 로 등록한다
 - `record()` 의 `who` 와 오류 문구의 key 자리에는 부른 자리의 이름(`<경로>:<줄>`)이 선다. 그 문자열을 박아 견주던 시험은 수나 포함 여부로 견준다
 
 ## 라이선스

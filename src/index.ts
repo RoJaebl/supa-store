@@ -5,7 +5,7 @@ export { DERIVED };
 
 /** 상태에 이 표식으로 함수를 두면 useStore 가 꺼내기를 그 함수에 맡긴다 — 그 함수는 훅이다 */
 export const USE: unique symbol = Symbol.for("supa-store.use") as never;
-/** 상태 객체에 `[DISPOSE]: () => void` 가 있으면 그 store 를 다시 짓기 직전과 disposeStores 에서 부른다 */
+/** 상태 객체에 `[DISPOSE]: () => void` 가 있으면 그 store 를 다시 짓기 직전과 Store.dispose 에서 부른다 */
 export const DISPOSE: unique symbol = Symbol.for("supa-store.dispose") as never;
 
 export type SetState<T> = (partial: Partial<T> | ((now: T) => Partial<T>)) => void;
@@ -261,40 +261,88 @@ export namespace createStore {
   }
 }
 
-/** 처음 등록한 정의 대신 이것으로 짓는다. 그 store 에 기대던 store 도 다시 짓는다. 시험의 가짜는 일부 칸만 돌려줘도 된다 */
-export function overrideStore<S>(
-  store: Store<S>,
-  creator: (set: SetState<S>, get: GetState<S>, ctx: Ctx<S>) => object,
-): void {
-  const entry = entryOf(store);
-  entry.override = creator as Creator;
-  rebuild([entry]);
-}
-
-/** 핸들이 가리키는 store — 핸들이 아니면 `store 핸들이 아니다` 로 실패한다. 다시 지어도 같은 객체다 */
+/**
+ * 핸들이 가리키는 store — 핸들이 아니면 `store 핸들이 아니다` 로 실패한다. 다시 지어도 같은 객체다
+ * @deprecated `Store(handle)` 과 `Store.set` · `Store.subscribe` · `Store.getInitial` 을 쓴다
+ */
 export function getStore<S>(store: Store<S>): StoreApi<S> {
   return entryOf(store).api;
 }
 
-/** 덮어쓴 정의를 모두 지우고, 전부 무른 뒤 지어져 있던 것을 다시 지어 알린다. 구독자는 남는다 — 시험 사이에 부른다 */
-export function resetStores(): void {
-  entries.forEach((entry) => (entry.override = undefined));
-  rebuild(entries);
-  resetScopes();
+/**
+ * React 밖에서 핸들이 가리키는 store 의 지금 상태를 꺼낸다 — useStore 의 훅 아닌 짝이다.
+ * 파생이면 그 값을 주고, `{ pick }` / `{ omit }` 으로 칸을 고른다. 부르는 순간의 값이고 따라가지 않는다 —
+ * creator 안에서 다른 store 는 `ctx` 로 읽는다
+ */
+export function Store<S>(store: Store<S>): ReadOf<S>;
+export function Store<S, N extends Names<S>, O extends PickOptions<S, N>>(store: Store<S>, options: O): Picked<S, O>;
+export function Store(store: Store<unknown>, options?: PickFromOptions): unknown {
+  const state = entryOf(store).api.getState();
+  if (isDerived(state)) return state.get();
+  return pickFrom(state, options);
 }
 
-/** 지어진 모든 store 의 [DISPOSE] 를 부르고 지어지지 않은 상태로 되돌린다. 다시 짓지 않는다(다음에 꺼낼 때 짓는다) — 구독자는 남는다 */
-export function disposeStores(): void {
-  entries.forEach((entry) => {
-    entry.dispose();
-    entry.built = false;
-  });
+const isDerived = (state: unknown): state is Derived<unknown> =>
+  !!state && typeof state === "object" && DERIVED in state;
+
+export namespace Store {
+  /** 상태를 얕게 합친다. 함수를 넘기면 지금 상태를 받는다 — 같은 객체를 돌려주면 알리지 않는다 */
+  export function set<S>(store: Store<S>, partial: Partial<S> | ((now: S) => Partial<S>)): void {
+    entryOf(store).api.setState(partial);
+  }
+  /** 처음 지었을 때의 상태를 돌려준다. 바꾸지 않는다 — 다시 지으면(Store.override · Store.reset) 새로 지은 것 */
+  export function getInitial<S>(store: Store<S>): S {
+    return entryOf(store).api.getInitialState();
+  }
+  /**
+   * 바뀌면 부른다. 파생이면 값이 바뀔 때 부른다. 풀기 함수를 돌려준다.
+   * 파생인지 알려고 store 를 짓는다. 다시 지어도 듣기가 이어진다
+   */
+  export function subscribe<S>(store: Store<S>, listener: () => void): () => void {
+    const api = entryOf(store).api;
+    let inner = () => {};
+    const follow = () => {
+      inner();
+      const state = api.getState();
+      inner = isDerived(state) ? state.subscribe(listener) : () => {};
+    };
+    follow();
+    const off = api.subscribe(() => (follow(), listener()));
+    return () => (off(), inner());
+  }
+  /** 처음 등록한 정의 대신 이것으로 짓는다. 그 store 에 기대던 store 도 다시 짓는다. 시험의 가짜는 일부 칸만 돌려줘도 된다 */
+  export function override<S>(store: Store<S>, creator: (set: SetState<S>, get: GetState<S>, ctx: Ctx<S>) => object): void {
+    const entry = entryOf(store);
+    entry.override = creator as Creator;
+    rebuild([entry]);
+  }
+  /** 덮어쓴 정의를 모두 지우고, 전부 무른 뒤 지어져 있던 것을 다시 지어 알린다. 구독자는 남는다 — 시험 사이에 부른다 */
+  export function reset(): void {
+    entries.forEach((entry) => (entry.override = undefined));
+    rebuild(entries);
+    resetScopes();
+  }
+  /** 지어진 모든 store 의 [DISPOSE] 를 부르고 지어지지 않은 상태로 되돌린다. 다시 짓지 않는다(다음에 꺼낼 때 짓는다) — 구독자는 남는다 */
+  export function dispose(): void {
+    entries.forEach((entry) => {
+      entry.dispose();
+      entry.built = false;
+    });
+  }
+  /** 등록한 store 전부, 등록한 차례대로 — 앱 전체에 거는 일(다시 이어졌을 때 모든 자원을 낡게 하기 같은)에 쓴다 */
+  export function registered(): Store<unknown>[] {
+    return entries.map((entry) => entry.handle);
+  }
 }
 
-/** 등록한 store 전부, 등록한 차례대로 — 앱 전체에 거는 일(다시 이어졌을 때 모든 자원을 낡게 하기 같은)에 쓴다 */
-export function registeredStores(): Store<unknown>[] {
-  return entries.map((entry) => entry.handle);
-}
+/** @deprecated `Store.override` 를 쓴다 */
+export const overrideStore: typeof Store.override = Store.override;
+/** @deprecated `Store.reset` 을 쓴다 */
+export const resetStores: typeof Store.reset = Store.reset;
+/** @deprecated `Store.dispose` 를 쓴다 */
+export const disposeStores: typeof Store.dispose = Store.dispose;
+/** @deprecated `Store.registered` 를 쓴다 */
+export const registeredStores: typeof Store.registered = Store.registered;
 
 /**
  * @internal — 지금 짓고 있는 store. adopt 로 맡긴 함수는 그 store 를 dispose 할 때 [DISPOSE] 뒤에 돈다(query.ts 의 event 가 쓴다).
