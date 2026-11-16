@@ -75,7 +75,7 @@ export function createStream<V, C = V, Cmd extends Record<keyof Cmd, Fn> = {}>(o
       : connect({ ...o, url: absolute(o.url, o.transport) } as ClientOptions<unknown, unknown>);
   const state: Record<string | symbol, unknown> = {
     [USE]: makeStreamHook(client, names),
-    // 다시 짓기 직전 · disposeStores 에서 — 앞 연결의 늦은 메시지는 닫힌 클라이언트가 버린다
+    // 다시 짓기 직전 · Store.dispose 에서 — 앞 연결의 늦은 메시지는 닫힌 클라이언트가 버린다
     [DISPOSE]: () => client.close(),
   };
   for (const name of names) state[name] = (...args: unknown[]) => client.command(name, args);

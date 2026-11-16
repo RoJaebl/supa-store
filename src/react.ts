@@ -40,7 +40,7 @@ export function useStore(handle: Store<object>, ...args: any[]): any {
   const store = getStore(handle);
   // [USE] 갈래와 pick 갈래는 store 마다 늘 같은 쪽이라 훅 순서가 바뀌지 않는다
   if (USE in (store.getInitialState() as object)) {
-    // 다시 지으면(overrideStore · resetStores) 상태 객체가 바뀐다 — 구독해 두어야 새 상태의 [USE] 로 다시 그린다
+    // 다시 지으면(Store.override · Store.reset) 상태 객체가 바뀐다 — 구독해 두어야 새 상태의 [USE] 로 다시 그린다
     const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
     return (state as any)[USE](...args);
   }
